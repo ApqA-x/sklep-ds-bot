@@ -5,3 +5,4 @@ bot_token.txt
 bin/
 dist/
 vendor/
+infra

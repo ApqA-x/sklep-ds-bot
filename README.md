@@ -37,6 +37,11 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 
 See `.env.example` for the required environment variables.
 
+## Examples
+
+- `EXAMPLES.md`
+- `infra/docker-compose.yml` (editable local stack)
+
 ## Commands
 
 - `voice-track-mode`: choose `all`, `none`, or `specific`.
