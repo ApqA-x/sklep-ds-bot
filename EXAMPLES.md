@@ -10,6 +10,8 @@ services:
     image: mongo:7
     ports:
       - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
 
   nats:
     image: nats:2
@@ -59,6 +61,9 @@ services:
     depends_on:
       - mongo
       - nats
+
+volumes:
+  mongo-data:
 ```
 
 Start it with:
