@@ -37,13 +37,17 @@ func TestParseVoiceRoute(t *testing.T) {
 func TestCanUseVoiceCommand(t *testing.T) {
 	manage := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{Member: &discordgo.Member{Permissions: discordgo.PermissionManageGuild}}}
 	admin := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{Member: &discordgo.Member{Permissions: discordgo.PermissionAdministrator}}}
-	if !canUseVoiceCommand(manage, "config", "channels") {
+	allowlisted := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{Member: &discordgo.Member{User: &discordgo.User{ID: "u1"}}}}
+	if !canUseVoiceCommand(manage, nil, "config", "channels") {
 		t.Fatal("expected manage guild to pass config")
 	}
-	if !canUseVoiceCommand(admin, "inspect", "sessions") {
+	if !canUseVoiceCommand(admin, nil, "inspect", "sessions") {
 		t.Fatal("expected admin to pass session inspection")
 	}
-	if canUseVoiceCommand(manage, "inspect", "sessions") {
+	if !canUseVoiceCommand(allowlisted, []string{"u1"}, "inspect", "sessions") {
+		t.Fatal("expected allowlisted user to pass all commands")
+	}
+	if canUseVoiceCommand(manage, nil, "inspect", "sessions") {
 		t.Fatal("expected manage guild to fail session inspection")
 	}
 }

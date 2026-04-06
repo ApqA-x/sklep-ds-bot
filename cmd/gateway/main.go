@@ -20,6 +20,8 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+const summaryEmbedColor = 0x5865F2
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -108,6 +110,23 @@ func main() {
 		}
 	}()
 
+	sendSummary := func(sessionID, guildID, channelID, message string) error {
+		_, err := dg.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Embeds: []*discordgo.MessageEmbed{{
+				Title:       "Voice Session Summary",
+				Description: message,
+				Color:       summaryEmbedColor,
+				Footer:      &discordgo.MessageEmbedFooter{Text: "Voice Tracker"},
+			}},
+		})
+		if err != nil {
+			log.Printf("gateway summary send failed session=%s guild=%s channel=%s err=%v", sessionID, guildID, channelID, err)
+			return err
+		}
+		log.Printf("gateway summary sent session=%s guild=%s channel=%s", sessionID, guildID, channelID)
+		return nil
+	}
+
 	_, err = busConn.Subscribe(ctx, domain.SubjectSummaryReady, repo, func(payload []byte) error {
 		var event domain.SummaryReadyEvent
 		if err := json.Unmarshal(payload, &event); err != nil {
@@ -118,11 +137,15 @@ func main() {
 		}
 		claimed, err := repo.ClaimSessionSummaryDelivery(ctx, event.SessionID, time.Now().UTC())
 		if err != nil || !claimed {
+			if err != nil {
+				log.Printf("gateway summary claim failed session=%s guild=%s channel=%s err=%v", event.SessionID, event.GuildID, event.ChannelID, err)
+			}
 			return nil
 		}
 		var sendErr error
 		for attempt := 0; attempt < 3; attempt++ {
-			_, sendErr = dg.ChannelMessageSend(event.ChannelID, event.Message)
+			log.Printf("gateway summary attempt session=%s guild=%s channel=%s attempt=%d", event.SessionID, event.GuildID, event.ChannelID, attempt+1)
+			sendErr = sendSummary(event.SessionID, event.GuildID, event.ChannelID, event.Message)
 			if sendErr == nil {
 				if err := repo.MarkSessionSummaryDelivered(ctx, event.SessionID, time.Now().UTC()); err != nil {
 					log.Printf("gateway mark delivered error session=%s: %v", event.SessionID, err)
@@ -130,6 +153,7 @@ func main() {
 				}
 				return nil
 			}
+			log.Printf("gateway summary retry session=%s guild=%s channel=%s attempt=%d err=%v", event.SessionID, event.GuildID, event.ChannelID, attempt+1, sendErr)
 			time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
 		}
 		if relErr := repo.ReleaseSessionSummaryDeliveryClaim(ctx, event.SessionID); relErr != nil {

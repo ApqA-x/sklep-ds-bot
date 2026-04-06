@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/robinlant/sklep-ds-bot/internal/botauth"
 	"github.com/robinlant/sklep-ds-bot/internal/domain"
 
 	"github.com/bwmarrin/discordgo"
@@ -13,7 +14,7 @@ import (
 
 const voiceCommandName = "voice"
 
-func (s *Service) Install(session *discordgo.Session, allowedGuildID string) {
+func (s *Service) Install(session *discordgo.Session, allowedGuildID string, botAdminUserIDs []string) {
 	session.AddHandler(func(ds *discordgo.Session, interaction *discordgo.InteractionCreate) {
 		if interaction.Type != discordgo.InteractionApplicationCommand {
 			return
@@ -32,7 +33,7 @@ func (s *Service) Install(session *discordgo.Session, allowedGuildID string) {
 		}
 
 		group, command, options := parseVoiceRoute(data.Options)
-		if !canUseVoiceCommand(interaction, group, command) {
+		if !canUseVoiceCommand(interaction, botAdminUserIDs, group, command) {
 			_ = respondEphemeral(ds, interaction, "Insufficient permissions.")
 			return
 		}
@@ -166,7 +167,10 @@ func (s *Service) handleVoiceCommand(ctx context.Context, interaction *discordgo
 	}
 }
 
-func canUseVoiceCommand(interaction *discordgo.InteractionCreate, group, command string) bool {
+func canUseVoiceCommand(interaction *discordgo.InteractionCreate, botAdminUserIDs []string, group, command string) bool {
+	if botauth.IsAllowlisted(interaction, botAdminUserIDs) {
+		return true
+	}
 	if group == "inspect" && (command == "sessions" || command == "session") {
 		return hasAdministratorPermissions(interaction)
 	}

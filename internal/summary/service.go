@@ -192,21 +192,45 @@ func BuildSummary(session domain.Session, participants []domain.ParticipantInter
 
 func FormatSummary(summary domain.SessionSummary) string {
 	var builder strings.Builder
-	builder.WriteString("Voice session ended\n")
-	builder.WriteString(fmt.Sprintf("- unique users: %d\n", summary.UniqueUsers))
-	builder.WriteString(fmt.Sprintf("- total duration: %s\n", summary.TotalDuration.Round(time.Second)))
+	builder.WriteString("**Voice session ended**\n")
+	builder.WriteString(fmt.Sprintf("**Channel:** <#%s>\n", summary.ChannelID))
+	builder.WriteString(fmt.Sprintf("**Duration:** %s\n", summary.TotalDuration.Round(time.Second)))
+	builder.WriteString(fmt.Sprintf("**Unique users:** %d\n", summary.UniqueUsers))
 	if summary.EndedByUserID != "" {
-		builder.WriteString(fmt.Sprintf("- ended by: <@%s>\n", summary.EndedByUserID))
+		builder.WriteString(fmt.Sprintf("**Ended by:** %s\n", participantDisplayName(summary.Participants, summary.EndedByUserID)))
 	}
-	builder.WriteString("- people:\n")
+	builder.WriteString("\n**Participants**\n")
+	if len(summary.Participants) == 0 {
+		builder.WriteString("- none\n")
+	}
 	for _, participant := range summary.Participants {
 		name := participant.UserName
 		if name == "" {
 			name = participant.UserID
 		}
-		builder.WriteString(fmt.Sprintf("  - %s: %s (%d intervals)\n", name, participant.TotalTime.Round(time.Second), participant.Intervals))
+		builder.WriteString(fmt.Sprintf("- %s - %s (%s)\n", name, participant.TotalTime.Round(time.Second), intervalLabel(participant.Intervals)))
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+func participantDisplayName(participants []domain.ParticipantSummary, userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "unknown"
+	}
+	for _, participant := range participants {
+		if participant.UserID == userID && strings.TrimSpace(participant.UserName) != "" {
+			return participant.UserName
+		}
+	}
+	return userID
+}
+
+func intervalLabel(count int) string {
+	if count == 1 {
+		return "1 interval"
+	}
+	return fmt.Sprintf("%d intervals", count)
 }
 
 func derefTime(value *time.Time) time.Time {

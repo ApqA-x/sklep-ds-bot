@@ -62,7 +62,7 @@ func main() {
 	log.Printf("shuffle service ready guild=%s", cfg.DiscordGuildID)
 
 	service := shuffle.New(dg.State, dg, botUserID, rand.New(rand.NewSource(time.Now().UTC().UnixNano())))
-	service.Install(dg, cfg.DiscordGuildID)
+	service.Install(dg, cfg.DiscordGuildID, cfg.BotAdminUserIDs)
 
 	if err := appcommands.RegisterCommands(ctx, dg, cfg.DiscordApplicationID, cfg.DiscordGuildID); err != nil {
 		log.Fatal(err)

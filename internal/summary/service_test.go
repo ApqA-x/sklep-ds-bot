@@ -3,6 +3,7 @@ package summary
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func TestBuildAndFormatSummary(t *testing.T) {
 	participants := []domain.ParticipantInterval{
 		{UserID: "u1", UserName: "alice", JoinedAt: startedAt, LeftAt: ptrTime(startedAt.Add(20 * time.Minute)), DurationMs: int64(20 * time.Minute / time.Millisecond)},
 		{UserID: "u1", UserName: "alice", JoinedAt: startedAt.Add(30 * time.Minute), LeftAt: ptrTime(startedAt.Add(45 * time.Minute)), DurationMs: 0},
-		{UserID: "u2", UserName: "", JoinedAt: startedAt.Add(10 * time.Minute), LeftAt: ptrTime(startedAt.Add(10 * time.Minute).Add(500 * time.Millisecond)), DurationMs: -1},
+		{UserID: "u2", UserName: "bob", JoinedAt: startedAt.Add(10 * time.Minute), LeftAt: ptrTime(startedAt.Add(10 * time.Minute).Add(500 * time.Millisecond)), DurationMs: -1},
 	}
 
 	summary := BuildSummary(session, participants, "u2")
@@ -40,6 +41,12 @@ func TestBuildAndFormatSummary(t *testing.T) {
 	message := FormatSummary(summary)
 	if message == "" {
 		t.Fatal("expected summary message")
+	}
+	if strings.Contains(message, "<@") {
+		t.Fatalf("expected no mention syntax, got: %s", message)
+	}
+	if !strings.Contains(message, "Ended by:") || !strings.Contains(message, "bob") {
+		t.Fatalf("expected username in summary, got: %s", message)
 	}
 	if got := summary.TotalDuration; got != time.Hour {
 		t.Fatalf("TotalDuration = %s, want 1h", got)
