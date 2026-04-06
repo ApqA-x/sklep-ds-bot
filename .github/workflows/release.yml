@@ -1,0 +1,217 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  actions: read
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  verify-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Wait for CI
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/wait_for_ci.py
+
+  version:
+    needs: verify-ci
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force origin
+
+          head_tag="$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n1 || true)"
+          if [ -n "$head_tag" ]; then
+            echo "version=${head_tag#v}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n1 || true)"
+          if [ -z "$latest_tag" ]; then
+            base_version="0.0.0"
+            commit_range="HEAD"
+          else
+            base_version="${latest_tag#v}"
+            commit_range="${latest_tag}..HEAD"
+          fi
+
+          commits="$(git log --format=%s "$commit_range")"
+          bump="patch"
+
+          if printf '%s\n' "$commits" | grep -Eq '^[a-z]+(\([^)]+\))?!:'; then
+            bump="major"
+          elif printf '%s\n' "$commits" | grep -Eq '^feat(\([^)]+\))?:'; then
+            bump="minor"
+          fi
+
+          IFS='.' read -r major minor patch <<<"$base_version"
+
+          case "$bump" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+
+          version="v${major}.${minor}.${patch}"
+          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        service:
+          - gateway
+          - tracker
+          - writer
+          - commands
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx create --use --name voice-tracker-builder
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push image
+        shell: bash
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY}/${SERVICE}:${GITHUB_SHA}"
+          docker buildx build \
+            --push \
+            --build-arg SERVICE="${SERVICE}" \
+            -t "${image}" \
+            .
+
+  cleanup-publish:
+    needs: publish
+    if: ${{ always() && needs.publish.result == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Remove partial SHA tags
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/cleanup_ghcr_sha_tags.py
+
+  tag:
+    needs:
+      - publish
+      - version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Push semver tag
+        id: tag
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            python3 .github/scripts/cleanup_ghcr_sha_tags.py
+          }
+
+          trap cleanup ERR
+
+          version="v${{ needs.version.outputs.version }}"
+          git fetch --tags --force origin
+
+          existing_tag="$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n1 || true)"
+          if [ -n "$existing_tag" ]; then
+            echo "tag=${existing_tag}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git tag "$version"
+          git push origin "$version"
+          echo "tag=${version}" >> "$GITHUB_OUTPUT"
+          trap - ERR
