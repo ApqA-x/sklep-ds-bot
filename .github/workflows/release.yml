@@ -1,9 +1,10 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
 
 permissions:
   actions: read
@@ -15,203 +16,117 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify-ci:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-
-      - name: Wait for CI
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/wait_for_ci.py
-
   version:
-    needs: verify-ci
     runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      new_version: ${{ steps.semver.outputs.new_version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
-          persist-credentials: true
 
-      - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      - name: Calculate next version
+        id: semver
+        uses: mathieudutour/github-tag-action@v6.2
         with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Determine release version
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          git fetch --tags --force origin
-
-          head_tag="$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n1 || true)"
-          if [ -n "$head_tag" ]; then
-            echo "version=${head_tag#v}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n1 || true)"
-          if [ -z "$latest_tag" ]; then
-            base_version="0.0.0"
-            commit_range="HEAD"
-          else
-            base_version="${latest_tag#v}"
-            commit_range="${latest_tag}..HEAD"
-          fi
-
-          commits="$(git log --format=%s "$commit_range")"
-          bump="patch"
-
-          if printf '%s\n' "$commits" | grep -Eq '^[a-z]+(\([^)]+\))?!:'; then
-            bump="major"
-          elif printf '%s\n' "$commits" | grep -Eq '^feat(\([^)]+\))?:'; then
-            bump="minor"
-          fi
-
-          IFS='.' read -r major minor patch <<<"$base_version"
-
-          case "$bump" in
-            major)
-              major=$((major + 1))
-              minor=0
-              patch=0
-              ;;
-            minor)
-              minor=$((minor + 1))
-              patch=0
-              ;;
-            patch)
-              patch=$((patch + 1))
-              ;;
-          esac
-
-          version="v${major}.${minor}.${patch}"
-          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: patch
+          tag_prefix: v
+          dry_run: true
+          commit_sha: ${{ github.event.workflow_run.head_sha }}
 
   publish:
     needs: version
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
-      max-parallel: 1
       matrix:
-        service:
-          - gateway
-          - tracker
-          - writer
-          - commands
-
+        service: [gateway, tracker, writer, commands]
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker buildx create --use --name voice-tracker-builder
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        shell: bash
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-
-      - name: Build and push image
-        shell: bash
-        env:
-          SERVICE: ${{ matrix.service }}
-        run: |
-          set -euo pipefail
-          image="ghcr.io/${GITHUB_REPOSITORY}/${SERVICE}:${GITHUB_SHA}"
-          docker buildx build \
-            --push \
-            --build-arg SERVICE="${SERVICE}" \
-            -t "${image}" \
-            .
-
-  cleanup-publish:
-    needs: publish
-    if: ${{ always() && needs.publish.result == 'failure' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: docker/login-action@v3
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Remove partial SHA tags
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/cleanup_ghcr_sha_tags.py
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: SERVICE=${{ matrix.service }}
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha }}
+            ghcr.io/${{ github.repository }}/${{ matrix.service }}:v${{ needs.version.outputs.new_version }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
   tag:
-    needs:
-      - publish
-      - version
+    needs: [version, publish]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
-          persist-credentials: true
 
-      - name: Push semver tag
-        id: tag
-        shell: bash
+      - name: Create and push tag
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          custom_tag: ${{ needs.version.outputs.new_version }}
+          tag_prefix: v
+          commit_sha: ${{ github.event.workflow_run.head_sha }}
+
+  cleanup-publish:
+    needs: [publish, version]
+    if: ${{ always() && needs.publish.result == 'failure' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, tracker, writer, commands]
+    steps:
+      - name: Delete partial SHA-tagged image
+        continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.repository }}"
+          REPO_NAME="${REPO_NAME#*/}"
+          SERVICE="${{ matrix.service }}"
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          PACKAGE="${REPO_NAME}%2F${SERVICE}"
 
-          cleanup() {
-            python3 .github/scripts/cleanup_ghcr_sha_tags.py
-          }
+          for PREFIX in "orgs" "users"; do
+            VERSION_ID=$(gh api \
+              "/${PREFIX}/${OWNER}/packages/container/${PACKAGE}/versions" \
+              --paginate --jq ".[] | select(.metadata.container.tags[] == \"${SHA}\") | .id" 2>/dev/null) && break
+          done
 
-          trap cleanup ERR
-
-          version="v${{ needs.version.outputs.version }}"
-          git fetch --tags --force origin
-
-          existing_tag="$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n1 || true)"
-          if [ -n "$existing_tag" ]; then
-            echo "tag=${existing_tag}" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ -n "${VERSION_ID:-}" ]; then
+            for PREFIX in "orgs" "users"; do
+              gh api --method DELETE \
+                "/${PREFIX}/${OWNER}/packages/container/${PACKAGE}/versions/${VERSION_ID}" 2>/dev/null && break
+            done
+            echo "Deleted ${SERVICE}:${SHA}"
           fi
-
-          git tag "$version"
-          git push origin "$version"
-          echo "tag=${version}" >> "$GITHUB_OUTPUT"
-          trap - ERR
