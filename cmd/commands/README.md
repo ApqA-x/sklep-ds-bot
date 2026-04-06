@@ -1,6 +1,6 @@
 # Commands Service
 
-Owns guild settings commands for the bot.
+Owns the `/voice` admin command tree for guild settings and live session inspection.
 
 ## What It Does
 
@@ -12,14 +12,18 @@ Owns guild settings commands for the bot.
 
 - Run locally with `go run ./cmd/commands`.
 - In Docker Compose, this is the `commands` service.
-- Requires Discord token, application ID, guild ID, MongoDB, and the event signing secret.
+- Use the shared `.env.example` / `EXAMPLES.md` setup for MongoDB, NATS, and Discord credentials.
+- Requires Discord token, application ID, guild ID, and MongoDB.
+- Register commands before using `/voice` in the target guild.
 
 ## Commands
 
-- `voice-track-mode`: set `all`, `none`, or `specific`.
-- `voice-track-channels`: set tracked voice channels.
-- `voice-summary-channel`: set the recap destination.
-- `voice-settings`: inspect current settings.
+- `/voice config mode show|set`
+- `/voice config channels add|remove|list|clear`
+- `/voice config summary-channel set|clear`
+- `/voice inspect settings`
+- `/voice inspect sessions`
+- `/voice inspect session`
 
 ## How It Fits
 

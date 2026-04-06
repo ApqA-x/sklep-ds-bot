@@ -1,0 +1,6 @@
+.git
+.github
+.env
+.env.*
+bot_token.txt
+.DS_Store

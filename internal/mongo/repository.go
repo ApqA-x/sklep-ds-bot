@@ -230,6 +230,20 @@ func (r *Repository) ListActiveSessions(ctx context.Context) ([]domain.Session, 
 	return sessions, nil
 }
 
+func (r *Repository) ListActiveSessionsByGuild(ctx context.Context, guildID string) ([]domain.Session, error) {
+	cursor, err := r.sessions.Find(ctx, bson.M{"status": domain.SessionStatusActive, "guildId": guildID})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var sessions []domain.Session
+	if err := cursor.All(ctx, &sessions); err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
 func (r *Repository) GetSessionByID(ctx context.Context, sessionID string) (*domain.Session, error) {
 	var session domain.Session
 	if err := r.sessions.FindOne(ctx, bson.M{"_id": sessionID}).Decode(&session); err != nil {
@@ -337,6 +351,20 @@ func (r *Repository) FindActiveParticipant(ctx context.Context, sessionID, userI
 
 func (r *Repository) ListActiveParticipants(ctx context.Context, sessionID string) ([]domain.ParticipantInterval, error) {
 	cursor, err := r.participants.Find(ctx, bson.M{"sessionId": sessionID, "active": true})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var participants []domain.ParticipantInterval
+	if err := cursor.All(ctx, &participants); err != nil {
+		return nil, err
+	}
+	return participants, nil
+}
+
+func (r *Repository) ListActiveParticipantsByGuildSession(ctx context.Context, guildID, sessionID string) ([]domain.ParticipantInterval, error) {
+	cursor, err := r.participants.Find(ctx, bson.M{"guildId": guildID, "sessionId": sessionID, "active": true})
 	if err != nil {
 		return nil, err
 	}

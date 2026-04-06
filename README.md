@@ -8,20 +8,25 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 - Stores session and participant history in MongoDB.
 - Builds a recap when a session ends.
 - Posts the recap back to Discord.
-- Lets admins configure tracked channels and the recap channel.
+- Lets admins configure tracked channels and the recap channel through `/voice`.
 
 ## Services
 
 - `cmd/gateway`: Discord entrypoint. Converts Discord events into NATS messages and posts session summaries.
 - `cmd/tracker`: Owns voice-session lifecycle and participant timing in MongoDB.
 - `cmd/writer`: Turns a closed session into a formatted recap.
-- `cmd/commands`: Owns guild settings commands.
+- `cmd/commands`: Owns the `/voice` guild admin command tree.
 
 ## Runtime Dependencies
 
 - MongoDB: persistent state and replay markers.
 - NATS: service-to-service event bus.
 - Discord API: voice state intake, slash commands, and recap delivery.
+
+## CI/CD
+
+- `CI` runs tests on every push and pull request.
+- After `CI` succeeds on `main`, `Release` publishes immutable `ghcr.io/robinlant/sklep-ds-bot/<service>:<sha>` images for `gateway`, `tracker`, `writer`, and `commands`, then records the next semver git tag from Conventional Commit messages.
 
 ## Event Flow
 
@@ -35,14 +40,21 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 
 ## Configuration
 
-See `.env.example` for the required environment variables.
+See `.env.example` for the shared environment layout and `EXAMPLES.md` for a copy-and-run walkthrough.
+
+## Examples
+
+- `EXAMPLES.md` (compose usage, `.env` example, and setup notes)
+- `infra/docker-compose.yml` (editable local stack)
 
 ## Commands
 
-- `voice-track-mode`: choose `all`, `none`, or `specific`.
-- `voice-track-channels`: set the tracked voice channels.
-- `voice-summary-channel`: set where recaps are posted.
-- `voice-settings`: show the current guild settings.
+- `/voice config mode show|set`
+- `/voice config channels add|remove|list|clear`
+- `/voice config summary-channel set|clear`
+- `/voice inspect settings`
+- `/voice inspect sessions`
+- `/voice inspect session`
 
 ## For AI Agents
 

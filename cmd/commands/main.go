@@ -24,6 +24,9 @@ func main() {
 	if cfg.DiscordToken == "" {
 		log.Fatal("DISCORD_TOKEN is required")
 	}
+	if cfg.DiscordApplicationID == "" {
+		log.Fatal("DISCORD_APPLICATION_ID is required")
+	}
 	if cfg.DiscordGuildID == "" {
 		log.Fatal("DISCORD_GUILD_ID is required")
 	}
@@ -57,10 +60,8 @@ func main() {
 	}
 	defer dg.Close()
 
-	if cfg.DiscordApplicationID != "" {
-		if err := commands.RegisterCommands(ctx, dg, cfg.DiscordApplicationID, cfg.DiscordGuildID); err != nil {
-			log.Fatal(err)
-		}
+	if err := commands.RegisterCommands(ctx, dg, cfg.DiscordApplicationID, cfg.DiscordGuildID); err != nil {
+		log.Fatal(err)
 	}
 
 	<-ctx.Done()
