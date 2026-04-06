@@ -14,6 +14,7 @@ import (
 
 const (
 	shuffleCommandName = "shuffle"
+	shuffleGatherGroup = "gather"
 	shuffleEqualGroup  = "equal"
 )
 
@@ -22,6 +23,15 @@ func ShuffleApplicationCommand() *discordgo.ApplicationCommand {
 		Name:        shuffleCommandName,
 		Description: "Redistribute people evenly across voice channels",
 		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommandGroup,
+				Name:        shuffleGatherGroup,
+				Description: "Put everyone back into one voice channel",
+				Options: []*discordgo.ApplicationCommandOption{
+					shuffleGatherAllCommand(),
+					shuffleGatherSelectCommand(),
+				},
+			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommandGroup,
 				Name:        shuffleEqualGroup,
@@ -55,7 +65,7 @@ func (s *Service) Install(session *discordgo.Session, allowedGuildID string, bot
 		}
 
 		group, command, options := parseShuffleRoute(data.Options)
-		if group != shuffleEqualGroup {
+		if group != shuffleEqualGroup && group != shuffleGatherGroup {
 			_ = respondEphemeral(ds, interaction, "Unknown shuffle command.")
 			return
 		}
@@ -70,7 +80,14 @@ func (s *Service) Install(session *discordgo.Session, allowedGuildID string, bot
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		content, err := s.handleEqualCommand(ctx, interaction, command, options)
+		var content string
+		var err error
+		switch group {
+		case shuffleEqualGroup:
+			content, err = s.handleEqualCommand(ctx, interaction, command, options)
+		case shuffleGatherGroup:
+			content, err = s.handleGatherCommand(ctx, interaction, command, options)
+		}
 		if err != nil {
 			content = err.Error()
 		}
@@ -105,6 +122,66 @@ func shuffleEqualCommand(name string, channels int) *discordgo.ApplicationComman
 	}
 }
 
+func shuffleGatherAllCommand() *discordgo.ApplicationCommandOption {
+	return &discordgo.ApplicationCommandOption{
+		Type:        discordgo.ApplicationCommandOptionSubCommand,
+		Name:        "all",
+		Description: "Gather everyone from every voice channel into one channel",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:         discordgo.ApplicationCommandOptionChannel,
+				Name:         "destination",
+				Description:  "Voice channel to gather into",
+				Required:     true,
+				ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "exclude",
+				Description: "User IDs or mentions to keep in place",
+			},
+		},
+	}
+}
+
+func shuffleGatherSelectCommand() *discordgo.ApplicationCommandOption {
+	options := []*discordgo.ApplicationCommandOption{
+		{
+			Type:         discordgo.ApplicationCommandOptionChannel,
+			Name:         "destination",
+			Description:  "Voice channel to gather into",
+			Required:     true,
+			ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice},
+		},
+		{
+			Type:         discordgo.ApplicationCommandOptionChannel,
+			Name:         "source1",
+			Description:  "Voice channel 1",
+			Required:     true,
+			ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice},
+		},
+	}
+	for i := 2; i <= 8; i++ {
+		options = append(options, &discordgo.ApplicationCommandOption{
+			Type:         discordgo.ApplicationCommandOptionChannel,
+			Name:         fmt.Sprintf("source%d", i),
+			Description:  fmt.Sprintf("Voice channel %d", i),
+			ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice},
+		})
+	}
+	options = append(options, &discordgo.ApplicationCommandOption{
+		Type:        discordgo.ApplicationCommandOptionString,
+		Name:        "exclude",
+		Description: "User IDs or mentions to keep in place",
+	})
+	return &discordgo.ApplicationCommandOption{
+		Type:        discordgo.ApplicationCommandOptionSubCommand,
+		Name:        "select",
+		Description: "Gather members from chosen voice channels into one channel",
+		Options:     options,
+	}
+}
+
 func (s *Service) handleEqualCommand(ctx context.Context, interaction *discordgo.InteractionCreate, command string, options []*discordgo.ApplicationCommandInteractionDataOption) (string, error) {
 	switch command {
 	case "two", "three", "four":
@@ -123,6 +200,45 @@ func (s *Service) handleEqualCommand(ctx context.Context, interaction *discordgo
 		return formatShuffleResult(result), nil
 	default:
 		return "", fmt.Errorf("unknown shuffle equal command")
+	}
+}
+
+func (s *Service) handleGatherCommand(ctx context.Context, interaction *discordgo.InteractionCreate, command string, options []*discordgo.ApplicationCommandInteractionDataOption) (string, error) {
+	switch command {
+	case "all":
+		destinationChannelID, err := resolveCommandChannel(interaction, options, "destination", discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice)
+		if err != nil {
+			return "", err
+		}
+		excludedIDs, err := parseExcludedUserIDs(optionString(options, "exclude"))
+		if err != nil {
+			return "", err
+		}
+		result, err := s.Gather(ctx, interaction.GuildID, destinationChannelID, nil, excludedIDs)
+		if err != nil {
+			return "", err
+		}
+		return formatGatherResult(destinationChannelID, result), nil
+	case "select":
+		destinationChannelID, err := resolveCommandChannel(interaction, options, "destination", discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice)
+		if err != nil {
+			return "", err
+		}
+		sourceChannelIDs, err := resolveGatherChannels(interaction, options)
+		if err != nil {
+			return "", err
+		}
+		excludedIDs, err := parseExcludedUserIDs(optionString(options, "exclude"))
+		if err != nil {
+			return "", err
+		}
+		result, err := s.Gather(ctx, interaction.GuildID, destinationChannelID, sourceChannelIDs, excludedIDs)
+		if err != nil {
+			return "", err
+		}
+		return formatGatherResult(destinationChannelID, result), nil
+	default:
+		return "", fmt.Errorf("unknown shuffle gather command")
 	}
 }
 
@@ -146,6 +262,48 @@ func formatShuffleResult(result Result) string {
 		}
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+func formatGatherResult(destinationChannelID string, result Result) string {
+	var builder strings.Builder
+	if len(result.Failures) == 0 {
+		builder.WriteString(fmt.Sprintf("Gathered %d users into <#%s>.\n", result.MovedUsers, destinationChannelID))
+	} else {
+		builder.WriteString(fmt.Sprintf("Gathered %d users into <#%s> with %d move failure(s).\n", result.MovedUsers, destinationChannelID, len(result.Failures)))
+	}
+	if result.SkippedChannels > 0 {
+		builder.WriteString(fmt.Sprintf("Skipped %d inaccessible channel(s): %s.\n", result.SkippedChannels, formatChannelMentions(result.SkippedChannelIDs)))
+	}
+	if result.ExcludedUsers > 0 {
+		builder.WriteString(fmt.Sprintf("Excluded %d user(s).\n", result.ExcludedUsers))
+	}
+	if len(result.ChannelResults) > 0 {
+		builder.WriteString(fmt.Sprintf("<#%s>: %d moved\n", result.ChannelResults[0].ChannelID, result.ChannelResults[0].Moved))
+	}
+	if len(result.Failures) > 0 {
+		builder.WriteString("Failures:\n")
+		for _, failure := range result.Failures {
+			builder.WriteString(fmt.Sprintf("- %s\n", failure))
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func formatChannelMentions(channelIDs []string) string {
+	if len(channelIDs) == 0 {
+		return "none"
+	}
+	mentions := make([]string, 0, len(channelIDs))
+	for _, channelID := range channelIDs {
+		if strings.TrimSpace(channelID) == "" {
+			continue
+		}
+		mentions = append(mentions, fmt.Sprintf("<#%s>", channelID))
+	}
+	if len(mentions) == 0 {
+		return "none"
+	}
+	return strings.Join(mentions, ", ")
 }
 
 func canUseShuffleCommand(interaction *discordgo.InteractionCreate, botAdminUserIDs []string) bool {
@@ -195,6 +353,25 @@ func resolveShuffleChannels(interaction *discordgo.InteractionCreate, options []
 			return nil, err
 		}
 		resolved = append(resolved, channelID)
+	}
+	return resolved, nil
+}
+
+func resolveGatherChannels(interaction *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) ([]string, error) {
+	resolved := make([]string, 0, 8)
+	for i := 1; i <= 8; i++ {
+		name := fmt.Sprintf("source%d", i)
+		channelID, err := resolveCommandChannel(interaction, options, name, discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice)
+		if err != nil {
+			if optionChannelID(options, name) == "" {
+				continue
+			}
+			return nil, err
+		}
+		resolved = append(resolved, channelID)
+	}
+	if len(resolved) == 0 {
+		return nil, fmt.Errorf("at least one source channel is required")
 	}
 	return resolved, nil
 }

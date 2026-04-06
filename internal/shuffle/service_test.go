@@ -293,6 +293,146 @@ func TestEqualKeepsShufflingAfterMoveFailure(t *testing.T) {
 	}
 }
 
+func TestGatherAllMovesEveryoneIntoOneChannel(t *testing.T) {
+	guildID := "g1"
+	channels := []*discordgo.Channel{
+		{ID: "c1", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+		{ID: "c2", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+		{ID: "c3", GuildID: guildID, Type: discordgo.ChannelTypeGuildStageVoice},
+	}
+	voiceStates := []*discordgo.VoiceState{
+		{GuildID: guildID, UserID: "u1", ChannelID: "c1"},
+		{GuildID: guildID, UserID: "u2", ChannelID: "c1"},
+		{GuildID: guildID, UserID: "u3", ChannelID: "c2"},
+		{GuildID: guildID, UserID: "u4", ChannelID: "c3"},
+		{GuildID: guildID, UserID: "u5", ChannelID: "c3"},
+	}
+	members := []*discordgo.Member{
+		{GuildID: guildID, User: &discordgo.User{ID: "u1"}},
+		{GuildID: guildID, User: &discordgo.User{ID: "u2"}},
+		{GuildID: guildID, User: &discordgo.User{ID: "u3"}},
+		{GuildID: guildID, User: &discordgo.User{ID: "u4"}},
+		{GuildID: guildID, User: &discordgo.User{ID: "u5"}},
+	}
+	state := newShuffleState(guildID, channels, voiceStates, members)
+	mover := newFakeShuffleMover()
+	for _, channel := range channels {
+		mover.perms[channel.ID] = discordgo.PermissionViewChannel | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceMoveMembers
+	}
+	svc := New(state, mover, "bot", rand.New(rand.NewSource(1)))
+
+	result, err := svc.Gather(context.Background(), guildID, "c2", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MovableUsers != 4 {
+		t.Fatalf("movable users = %d, want 4", result.MovableUsers)
+	}
+	if result.MovedUsers != 4 {
+		t.Fatalf("moved users = %d, want 4", result.MovedUsers)
+	}
+	if len(result.ChannelResults) != 1 || result.ChannelResults[0].ChannelID != "c2" || result.ChannelResults[0].Moved != 4 {
+		t.Fatalf("unexpected gather result: %#v", result.ChannelResults)
+	}
+	if len(mover.moves) != 4 {
+		t.Fatalf("move calls = %d, want 4", len(mover.moves))
+	}
+	for _, move := range mover.moves {
+		if move.userID == "u3" {
+			t.Fatal("expected destination occupant to stay put")
+		}
+	}
+}
+
+func TestGatherAllSkipsInaccessibleChannels(t *testing.T) {
+	guildID := "g1"
+	channels := []*discordgo.Channel{
+		{ID: "c1", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+		{ID: "c2", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+		{ID: "c3", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+		{ID: "c4", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+	}
+	voiceStates := []*discordgo.VoiceState{
+		{GuildID: guildID, UserID: "u1", ChannelID: "c1"},
+		{GuildID: guildID, UserID: "u2", ChannelID: "c3"},
+		{GuildID: guildID, UserID: "u3", ChannelID: "c2"},
+	}
+	members := []*discordgo.Member{
+		{GuildID: guildID, User: &discordgo.User{ID: "u1"}},
+		{GuildID: guildID, User: &discordgo.User{ID: "u2"}},
+		{GuildID: guildID, User: &discordgo.User{ID: "u3"}},
+	}
+	state := newShuffleState(guildID, channels, voiceStates, members)
+	mover := newFakeShuffleMover()
+	for _, channel := range []string{"c1", "c2", "c4"} {
+		mover.perms[channel] = discordgo.PermissionViewChannel | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceMoveMembers
+	}
+	// c3 is intentionally inaccessible.
+	svc := New(state, mover, "bot", rand.New(rand.NewSource(1)))
+
+	result, err := svc.Gather(context.Background(), guildID, "c2", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MovableUsers != 1 {
+		t.Fatalf("movable users = %d, want 1", result.MovableUsers)
+	}
+	if result.SkippedChannels != 1 {
+		t.Fatalf("skipped channels = %d, want 1", result.SkippedChannels)
+	}
+	if len(result.SkippedChannelIDs) != 1 || result.SkippedChannelIDs[0] != "c3" {
+		t.Fatalf("skipped channel ids = %#v, want [c3]", result.SkippedChannelIDs)
+	}
+	if result.MovedUsers != 1 {
+		t.Fatalf("moved users = %d, want 1", result.MovedUsers)
+	}
+	if len(mover.moves) != 1 {
+		t.Fatalf("move calls = %d, want 1", len(mover.moves))
+	}
+}
+
+func TestGatherSelectUsesChosenSources(t *testing.T) {
+	guildID := "g1"
+	channels := []*discordgo.Channel{
+		{ID: "c1", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+		{ID: "c2", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+		{ID: "c3", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+		{ID: "c4", GuildID: guildID, Type: discordgo.ChannelTypeGuildVoice},
+	}
+	voiceStates := []*discordgo.VoiceState{
+		{GuildID: guildID, UserID: "u1", ChannelID: "c1"},
+		{GuildID: guildID, UserID: "u2", ChannelID: "c3"},
+		{GuildID: guildID, UserID: "u3", ChannelID: "c4"},
+	}
+	members := []*discordgo.Member{
+		{GuildID: guildID, User: &discordgo.User{ID: "u1"}},
+		{GuildID: guildID, User: &discordgo.User{ID: "u2"}},
+		{GuildID: guildID, User: &discordgo.User{ID: "u3"}},
+	}
+	state := newShuffleState(guildID, channels, voiceStates, members)
+	mover := newFakeShuffleMover()
+	for _, channel := range channels {
+		mover.perms[channel.ID] = discordgo.PermissionViewChannel | discordgo.PermissionVoiceConnect | discordgo.PermissionVoiceMoveMembers
+	}
+	svc := New(state, mover, "bot", rand.New(rand.NewSource(1)))
+
+	result, err := svc.Gather(context.Background(), guildID, "c2", []string{"c1", "c3"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MovableUsers != 2 {
+		t.Fatalf("movable users = %d, want 2", result.MovableUsers)
+	}
+	if len(mover.moves) != 2 {
+		t.Fatalf("move calls = %d, want 2", len(mover.moves))
+	}
+	for _, move := range mover.moves {
+		if move.userID == "u3" {
+			t.Fatal("expected unselected source channel to stay put")
+		}
+	}
+}
+
 func TestParseExcludedUserIDs(t *testing.T) {
 	ids, err := parseExcludedUserIDs("<@123>, 456 <@!789> 456")
 	if err != nil {
@@ -311,13 +451,29 @@ func TestShuffleApplicationCommandShape(t *testing.T) {
 	if command.Name != shuffleCommandName {
 		t.Fatalf("command name = %q", command.Name)
 	}
-	if len(command.Options) != 1 || command.Options[0].Name != shuffleEqualGroup {
+	if len(command.Options) != 2 {
 		t.Fatalf("unexpected command tree: %#v", command.Options)
 	}
-	group := command.Options[0]
-	if len(group.Options) != 3 {
-		t.Fatalf("expected 3 equal subcommands, got %d", len(group.Options))
+	groups := map[string]*discordgo.ApplicationCommandOption{}
+	for _, option := range command.Options {
+		groups[option.Name] = option
 	}
+	gatherGroup := groups[shuffleGatherGroup]
+	if gatherGroup == nil || len(gatherGroup.Options) != 2 {
+		t.Fatalf("unexpected gather tree: %#v", gatherGroup)
+	}
+	selectCommand := gatherGroup.Options[1]
+	if selectCommand.Name != "select" {
+		t.Fatalf("unexpected gather command: %#v", selectCommand)
+	}
+	if len(selectCommand.Options) < 3 {
+		t.Fatalf("expected source options on gather select, got %#v", selectCommand.Options)
+	}
+	equalGroup := groups[shuffleEqualGroup]
+	if equalGroup == nil || len(equalGroup.Options) != 3 {
+		t.Fatalf("unexpected equal tree: %#v", equalGroup)
+	}
+	group := equalGroup
 	for _, name := range []string{"two", "three", "four"} {
 		found := false
 		for _, option := range group.Options {
@@ -328,5 +484,12 @@ func TestShuffleApplicationCommandShape(t *testing.T) {
 		if !found {
 			t.Fatalf("missing subcommand %s", name)
 		}
+	}
+}
+
+func TestFormatGatherResultIncludesSkippedChannels(t *testing.T) {
+	content := formatGatherResult("c2", Result{MovedUsers: 3, SkippedChannels: 2, SkippedChannelIDs: []string{"c3", "c4"}})
+	if !strings.Contains(content, "Skipped 2 inaccessible channel(s): <#c3>, <#c4>.") {
+		t.Fatalf("unexpected gather content: %s", content)
 	}
 }

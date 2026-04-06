@@ -9,7 +9,7 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 - Builds a recap when a session ends.
 - Posts the recap back to Discord.
 - Lets admins configure tracked channels and the recap channel through `/voice`.
-- Lets moderators reshuffle live voice members through `/shuffle`.
+- Lets moderators reshuffle or gather live voice members through `/shuffle`.
 - Lets allowlisted bot admins bypass guild permission checks through `BOT_ADMIN_USER_IDS`.
 
 ## Services
@@ -52,6 +52,8 @@ See `.env.example` for the shared environment layout and `EXAMPLES.md` for a cop
 
 ## Commands
 
+- `/shuffle gather all` puts everyone from every accessible voice channel into one destination channel.
+- `/shuffle gather select` puts members from chosen voice channels into one destination channel.
 - `/shuffle equal two|three|four` balances exactly 2, 3, or 4 voice channels.
 - `/voice config mode show|set`
 - `/voice config channels add|remove|list|clear`
