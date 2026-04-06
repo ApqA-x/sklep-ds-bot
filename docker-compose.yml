@@ -55,5 +55,16 @@ services:
       - mongo
       - nats
 
+  shuffle:
+    build:
+      context: .
+      args:
+        SERVICE: shuffle
+    env_file:
+      - .env
+    depends_on:
+      - mongo
+      - nats
+
 volumes:
   mongo-data:

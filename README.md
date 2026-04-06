@@ -9,6 +9,7 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 - Builds a recap when a session ends.
 - Posts the recap back to Discord.
 - Lets admins configure tracked channels and the recap channel through `/voice`.
+- Lets moderators reshuffle live voice members through `/shuffle`.
 
 ## Services
 
@@ -16,6 +17,7 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 - `cmd/tracker`: Owns voice-session lifecycle and participant timing in MongoDB.
 - `cmd/writer`: Turns a closed session into a formatted recap.
 - `cmd/commands`: Owns the `/voice` guild admin command tree.
+- `cmd/shuffle`: Owns the `/shuffle` reshuffle command tree.
 
 ## Runtime Dependencies
 
@@ -49,6 +51,7 @@ See `.env.example` for the shared environment layout and `EXAMPLES.md` for a cop
 
 ## Commands
 
+- `/shuffle equal two|three|four` balances exactly 2, 3, or 4 voice channels.
 - `/voice config mode show|set`
 - `/voice config channels add|remove|list|clear`
 - `/voice config summary-channel set|clear`
@@ -70,7 +73,9 @@ See `.env.example` for the shared environment layout and `EXAMPLES.md` for a cop
 - `cmd/tracker/README.md`
 - `cmd/writer/README.md`
 - `cmd/commands/README.md`
+- `cmd/shuffle/README.md`
 - `internal/bus/README.md`
 - `internal/domain/README.md`
 - `internal/mongo/README.md`
 - `internal/summary/README.md`
+- `internal/shuffle/README.md`

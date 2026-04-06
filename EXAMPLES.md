@@ -62,6 +62,17 @@ services:
       - mongo
       - nats
 
+  shuffle:
+    build:
+      context: .
+      args:
+        SERVICE: shuffle
+    env_file:
+      - .env
+    depends_on:
+      - mongo
+      - nats
+
 volumes:
   mongo-data:
 ```
@@ -96,7 +107,7 @@ SERVICE_NAME=gateway
 
 ## Variable Notes
 
-- `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, and `DISCORD_GUILD_ID` are required for the command service.
+- `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, and `DISCORD_GUILD_ID` are required for the command services.
 - `MONGO_URI`, `MONGO_DB`, and `NATS_URL` are shared by the Go services.
 - `EVENT_SIGNING_SECRET` is used by the gateway event path.
 - `TRACKING_MODE` and `TRACKED_CHANNEL_IDS` are startup defaults for the tracker.

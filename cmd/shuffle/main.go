@@ -3,18 +3,17 @@ package main
 import (
 	"context"
 	"log"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/robinlant/sklep-ds-bot/internal/appcommands"
-	"github.com/robinlant/sklep-ds-bot/internal/commands"
 	"github.com/robinlant/sklep-ds-bot/internal/config"
-	mongorepo "github.com/robinlant/sklep-ds-bot/internal/mongo"
+	"github.com/robinlant/sklep-ds-bot/internal/shuffle"
 
 	"github.com/bwmarrin/discordgo"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func main() {
@@ -35,31 +34,29 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	mongoClient, err := mongo.Connect(ctx, options.Client().ApplyURI(cfg.MongoURI))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() { _ = mongoClient.Disconnect(context.Background()) }()
-
-	repo := mongorepo.NewRepository(mongoClient.Database(cfg.MongoDB))
-	if err := repo.EnsureIndexes(ctx); err != nil {
-		log.Fatal(err)
-	}
-
 	dg, err := discordgo.New("Bot " + cfg.DiscordToken)
 	if err != nil {
 		log.Fatal(err)
 	}
 	dg.StateEnabled = true
-	dg.Identify.Intents = discordgo.IntentsGuilds
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMembers
 
-	service := commands.New(repo)
-	service.Install(dg, cfg.DiscordGuildID)
+	ready := make(chan string, 1)
+	dg.AddHandlerOnce(func(_ *discordgo.Session, event *discordgo.Ready) {
+		if event != nil && event.User != nil {
+			ready <- event.User.ID
+		}
+	})
 
 	if err := dg.Open(); err != nil {
 		log.Fatal(err)
 	}
 	defer dg.Close()
+
+	botUserID := <-ready
+
+	service := shuffle.New(dg.State, dg, botUserID, rand.New(rand.NewSource(time.Now().UTC().UnixNano())))
+	service.Install(dg, cfg.DiscordGuildID)
 
 	if err := appcommands.RegisterCommands(ctx, dg, cfg.DiscordApplicationID, cfg.DiscordGuildID); err != nil {
 		log.Fatal(err)
