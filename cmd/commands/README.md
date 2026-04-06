@@ -15,6 +15,7 @@ Owns the `/voice` admin command tree for guild settings and live session inspect
 - Use the shared `.env.example` / `EXAMPLES.md` setup for MongoDB, NATS, and Discord credentials.
 - Requires Discord token, application ID, guild ID, and MongoDB.
 - Register commands before using `/voice` in the target guild.
+- `/shuffle` is handled by the separate `cmd/shuffle` service.
 
 ## Commands
 

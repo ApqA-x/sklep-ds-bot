@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/robinlant/sklep-ds-bot/internal/appcommands"
 	"github.com/robinlant/sklep-ds-bot/internal/commands"
 	"github.com/robinlant/sklep-ds-bot/internal/config"
 	mongorepo "github.com/robinlant/sklep-ds-bot/internal/mongo"
@@ -30,6 +31,7 @@ func main() {
 	if cfg.DiscordGuildID == "" {
 		log.Fatal("DISCORD_GUILD_ID is required")
 	}
+	log.Printf("commands service starting guild=%s", cfg.DiscordGuildID)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -60,9 +62,10 @@ func main() {
 	}
 	defer dg.Close()
 
-	if err := commands.RegisterCommands(ctx, dg, cfg.DiscordApplicationID, cfg.DiscordGuildID); err != nil {
+	if err := appcommands.RegisterCommands(ctx, dg, cfg.DiscordApplicationID, cfg.DiscordGuildID); err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("application commands registered count=%d guild=%s", len(appcommands.Commands()), cfg.DiscordGuildID)
 
 	<-ctx.Done()
 }

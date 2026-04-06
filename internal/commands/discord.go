@@ -13,15 +13,6 @@ import (
 
 const voiceCommandName = "voice"
 
-func RegisterCommands(_ context.Context, session *discordgo.Session, appID, guildID string) error {
-	if session == nil || strings.TrimSpace(appID) == "" || strings.TrimSpace(guildID) == "" {
-		return fmt.Errorf("application id and guild id are required")
-	}
-	commands := []*discordgo.ApplicationCommand{voiceApplicationCommand()}
-	_, err := session.ApplicationCommandBulkOverwrite(appID, guildID, commands)
-	return err
-}
-
 func (s *Service) Install(session *discordgo.Session, allowedGuildID string) {
 	session.AddHandler(func(ds *discordgo.Session, interaction *discordgo.InteractionCreate) {
 		if interaction.Type != discordgo.InteractionApplicationCommand {
@@ -59,7 +50,7 @@ func (s *Service) Install(session *discordgo.Session, allowedGuildID string) {
 	})
 }
 
-func voiceApplicationCommand() *discordgo.ApplicationCommand {
+func VoiceApplicationCommand() *discordgo.ApplicationCommand {
 	return &discordgo.ApplicationCommand{
 		Name:        voiceCommandName,
 		Description: "Manage tracked voice channels and inspect live sessions",
@@ -377,6 +368,13 @@ func hasAdministratorPermissions(interaction *discordgo.InteractionCreate) bool 
 func respondEphemeral(session *discordgo.Session, interaction *discordgo.InteractionCreate, content string) error {
 	return session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral},
+		Data: &discordgo.InteractionResponseData{
+			Flags: discordgo.MessageFlagsEphemeral,
+			Embeds: []*discordgo.MessageEmbed{{
+				Title:       "Voice Tracker",
+				Description: content,
+				Color:       0x5865F2,
+			}},
+		},
 	})
 }
