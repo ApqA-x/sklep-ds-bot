@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -12,7 +13,11 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-const voiceCommandName = "voice"
+const (
+	voiceCommandName                     = "voice"
+	voiceInspectHistoryCommandName       = "history"
+	voiceInspectRecentSessionCommandName  = "recent-session"
+)
 
 func (s *Service) Install(session *discordgo.Session, allowedGuildID string, botAdminUserIDs []string) {
 	session.AddHandler(func(ds *discordgo.Session, interaction *discordgo.InteractionCreate) {
@@ -54,7 +59,7 @@ func (s *Service) Install(session *discordgo.Session, allowedGuildID string, bot
 func VoiceApplicationCommand() *discordgo.ApplicationCommand {
 	return &discordgo.ApplicationCommand{
 		Name:        voiceCommandName,
-		Description: "Manage tracked voice channels and inspect live sessions",
+		Description: "Manage tracked voice channels and inspect live and closed sessions",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommandGroup,
@@ -126,7 +131,7 @@ func VoiceApplicationCommand() *discordgo.ApplicationCommand {
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommandGroup,
 				Name:        "inspect",
-				Description: "Inspect live voice state",
+				Description: "Inspect live and closed voice sessions",
 				Options: []*discordgo.ApplicationCommandOption{
 					{
 						Type:        discordgo.ApplicationCommandOptionSubCommand,
@@ -150,6 +155,44 @@ func VoiceApplicationCommand() *discordgo.ApplicationCommand {
 							ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice},
 						}},
 					},
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        voiceInspectHistoryCommandName,
+						Description: "List recent closed sessions for one voice channel",
+						Options: []*discordgo.ApplicationCommandOption{
+							{
+								Type:         discordgo.ApplicationCommandOptionChannel,
+								Name:         "channel",
+								Description:  "Voice channel to inspect",
+								Required:     true,
+								ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice},
+							},
+							{
+								Type:        discordgo.ApplicationCommandOptionInteger,
+								Name:        "limit",
+								Description: "How many closed sessions to show (1-10)",
+							},
+						},
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        voiceInspectRecentSessionCommandName,
+						Description: "Inspect one recent closed session for a voice channel",
+						Options: []*discordgo.ApplicationCommandOption{
+							{
+								Type:         discordgo.ApplicationCommandOptionChannel,
+								Name:         "channel",
+								Description:  "Voice channel to inspect",
+								Required:     true,
+								ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice},
+							},
+							{
+								Type:        discordgo.ApplicationCommandOptionInteger,
+								Name:        "pick",
+								Description: "Which recent closed session to inspect (1-10)",
+							},
+						},
+					},
 				},
 			},
 		},
@@ -172,6 +215,9 @@ func canUseVoiceCommand(interaction *discordgo.InteractionCreate, botAdminUserID
 		return true
 	}
 	if group == "inspect" && (command == "sessions" || command == "session") {
+		return hasAdministratorPermissions(interaction)
+	}
+	if group == "inspect" && (command == voiceInspectHistoryCommandName || command == voiceInspectRecentSessionCommandName) {
 		return hasAdministratorPermissions(interaction)
 	}
 	return hasManagePermissions(interaction)
@@ -282,6 +328,26 @@ func (s *Service) handleInspectCommand(ctx context.Context, interaction *discord
 			return "", err
 		}
 		return s.DescribeActiveSession(ctx, interaction.GuildID, channelID)
+	case voiceInspectHistoryCommandName:
+		channelID, err := resolveCommandChannel(interaction, options, "channel", discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice)
+		if err != nil {
+			return "", err
+		}
+		limit, err := optionIntInRange(options, "limit", 5, 1, 10)
+		if err != nil {
+			return "", err
+		}
+		return s.DescribeClosedSessionHistory(ctx, interaction.GuildID, channelID, limit)
+	case voiceInspectRecentSessionCommandName:
+		channelID, err := resolveCommandChannel(interaction, options, "channel", discordgo.ChannelTypeGuildVoice, discordgo.ChannelTypeGuildStageVoice)
+		if err != nil {
+			return "", err
+		}
+		pick, err := optionIntInRange(options, "pick", 1, 1, 10)
+		if err != nil {
+			return "", err
+		}
+		return s.DescribeClosedSessionDetail(ctx, interaction.GuildID, channelID, pick)
 	default:
 		return "", fmt.Errorf("unknown inspect command")
 	}
@@ -313,14 +379,58 @@ func optionString(options []*discordgo.ApplicationCommandInteractionDataOption, 
 }
 
 func optionChannelID(options []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
+	return optionString(options, name)
+}
+
+func optionIntInRange(options []*discordgo.ApplicationCommandInteractionDataOption, name string, fallback, min, max int) (int, error) {
+	if fallback < min || fallback > max {
+		return 0, fmt.Errorf("invalid default for %s", name)
+	}
 	for _, option := range options {
-		if option.Name == name {
-			if value, ok := option.Value.(string); ok {
-				return strings.TrimSpace(value)
+		if option.Name != name {
+			continue
+		}
+		switch value := option.Value.(type) {
+		case int:
+			if value < min || value > max {
+				return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
 			}
+			return value, nil
+		case int32:
+			intValue := int(value)
+			if intValue < min || intValue > max {
+				return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
+			}
+			return intValue, nil
+		case int64:
+			intValue := int(value)
+			if intValue < min || intValue > max {
+				return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
+			}
+			return intValue, nil
+		case float64:
+			if math.Trunc(value) != value {
+				return 0, fmt.Errorf("%s must be a whole number", name)
+			}
+			intValue := int(value)
+			if intValue < min || intValue > max {
+				return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
+			}
+			return intValue, nil
+		case float32:
+			if float32(math.Trunc(float64(value))) != value {
+				return 0, fmt.Errorf("%s must be a whole number", name)
+			}
+			intValue := int(value)
+			if intValue < min || intValue > max {
+				return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
+			}
+			return intValue, nil
+		default:
+			return 0, fmt.Errorf("invalid %s value", name)
 		}
 	}
-	return ""
+	return fallback, nil
 }
 
 func resolveCommandChannel(interaction *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption, name string, allowedTypes ...discordgo.ChannelType) (string, error) {

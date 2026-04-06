@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -139,55 +138,7 @@ func (s *Service) generateAndPublishFromSession(ctx context.Context, session dom
 }
 
 func BuildSummary(session domain.Session, participants []domain.ParticipantInterval, endedByUserID string) domain.SessionSummary {
-	byUser := make(map[string]*domain.ParticipantSummary)
-	unique := make(map[string]struct{})
-
-	for _, participant := range participants {
-		unique[participant.UserID] = struct{}{}
-		summary, ok := byUser[participant.UserID]
-		if !ok {
-			summary = &domain.ParticipantSummary{UserID: participant.UserID, UserName: participant.UserName}
-			byUser[participant.UserID] = summary
-		}
-		summary.Intervals++
-		duration := participant.DurationMs
-		if duration == 0 && participant.LeftAt != nil {
-			duration = participant.LeftAt.Sub(participant.JoinedAt).Milliseconds()
-		}
-		if duration < 0 {
-			duration = 0
-		}
-		summary.TotalTime += time.Duration(duration) * time.Millisecond
-	}
-
-	items := make([]domain.ParticipantSummary, 0, len(byUser))
-	for _, item := range byUser {
-		items = append(items, *item)
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].TotalTime == items[j].TotalTime {
-			return items[i].UserName < items[j].UserName
-		}
-		return items[i].TotalTime > items[j].TotalTime
-	})
-
-	totalDuration := time.Duration(0)
-	if session.EndedAt != nil {
-		totalDuration = session.EndedAt.Sub(session.StartedAt)
-	}
-	if totalDuration < 0 {
-		totalDuration = 0
-	}
-
-	return domain.SessionSummary{
-		SessionID:     session.ID,
-		GuildID:       session.GuildID,
-		ChannelID:     session.ChannelID,
-		UniqueUsers:   len(unique),
-		TotalDuration: totalDuration,
-		EndedByUserID: endedByUserID,
-		Participants:  items,
-	}
+	return domain.BuildSessionSummary(session, participants, endedByUserID)
 }
 
 func FormatSummary(summary domain.SessionSummary) string {

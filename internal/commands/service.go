@@ -15,6 +15,8 @@ type Repository interface {
 	FindActiveSession(context.Context, string, string) (*domain.Session, error)
 	ListActiveParticipantsByGuildSession(context.Context, string, string) ([]domain.ParticipantInterval, error)
 	ListActiveParticipants(context.Context, string) ([]domain.ParticipantInterval, error)
+	ListClosedSessionsByGuildChannel(context.Context, string, string, int) ([]domain.Session, error)
+	ListParticipantsByGuildChannelSession(context.Context, string, string, string) ([]domain.ParticipantInterval, error)
 }
 
 type Service struct {

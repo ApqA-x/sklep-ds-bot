@@ -1,6 +1,6 @@
 # Commands Service
 
-Owns the `/voice` admin command tree for guild settings and live session inspection.
+Owns the `/voice` admin command tree for guild settings, live session inspection, and closed-session history.
 
 ## What It Does
 
@@ -25,11 +25,13 @@ Owns the `/voice` admin command tree for guild settings and live session inspect
 - `/voice inspect settings`
 - `/voice inspect sessions`
 - `/voice inspect session`
+- `/voice inspect history` lists recent closed sessions for one voice channel.
+- `/voice inspect recent-session` inspects one closed session by recency index.
 
 ## How It Fits
 
 - Input: Discord interactions.
-- Output: guild settings in MongoDB.
+- Output: ephemeral Discord responses and guild settings in MongoDB.
 - Depends on: `internal/commands`, `internal/mongo`, `internal/config`, and Discord permissions.
 
 ## AI Notes

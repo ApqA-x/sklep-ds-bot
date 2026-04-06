@@ -8,7 +8,7 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 - Stores session and participant history in MongoDB.
 - Builds a recap when a session ends.
 - Posts the recap back to Discord.
-- Lets admins configure tracked channels and the recap channel through `/voice`.
+- Lets admins configure tracked channels, inspect live sessions, and browse closed-session history through `/voice`.
 - Lets moderators reshuffle or gather live voice members through `/shuffle`.
 - Lets allowlisted bot admins bypass guild permission checks through `BOT_ADMIN_USER_IDS`.
 
@@ -61,6 +61,8 @@ See `.env.example` for the shared environment layout and `EXAMPLES.md` for a cop
 - `/voice inspect settings`
 - `/voice inspect sessions`
 - `/voice inspect session`
+- `/voice inspect history` lists recent closed sessions for one voice channel.
+- `/voice inspect recent-session` inspects one closed session by recency index.
 
 ## For AI Agents
 

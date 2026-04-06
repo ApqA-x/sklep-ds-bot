@@ -8,6 +8,7 @@ Shared event and model definitions for the system.
 - Defines voice-session events.
 - Defines MongoDB session, participant, and guild settings shapes.
 - Defines summary output models.
+- Provides shared session-summary aggregation used by `summary` and `commands`.
 
 ## How To Use
 
@@ -18,6 +19,7 @@ Shared event and model definitions for the system.
 ## How It Fits
 
 - `gateway`, `tracker`, `writer`, and `commands` all depend on this package.
+- `summary` and `commands` both use the shared session-summary builder here.
 - It is the shared language of the system.
 
 ## AI Notes

@@ -5,7 +5,7 @@ Builds the recap text for a finished voice session.
 ## What It Does
 
 - Loads the closed session and participant history.
-- Builds the aggregate summary model.
+- Uses shared summary aggregation from `internal/domain`.
 - Formats the final message text.
 - Stores summary generation state for replay-safe delivery.
 
@@ -23,6 +23,7 @@ Builds the recap text for a finished voice session.
 
 ## AI Notes
 
-- Keep summary math and formatting here.
+- Keep summary formatting here.
+- Keep shared summary math in `internal/domain`.
 - Do not move Discord posting into this package.
 - If summary delivery rules change, update this package and the gateway consumer together.

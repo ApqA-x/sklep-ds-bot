@@ -5,7 +5,7 @@ MongoDB repository layer for sessions, participants, guild settings, and message
 ## What It Does
 
 - Stores and reads guild settings.
-- Stores voice sessions and participant intervals.
+- Stores voice sessions and participant intervals, including closed-session history lookups.
 - Stores replay markers and summary delivery state.
 - Provides the persistence methods used by the services.
 
@@ -20,10 +20,10 @@ MongoDB repository layer for sessions, participants, guild settings, and message
 - `tracker` owns voice session writes.
 - `writer` reads session history and stores summary state.
 - `gateway` reads guild settings and summary delivery state.
-- `commands` updates guild settings.
+- `commands` updates guild settings and reads closed-session history.
 
 ## AI Notes
 
 - Keep this package as the only place that knows collection names.
-- Add methods here when a service needs persistent state.
+- Add methods here when a service needs persistent state or history lookups.
 - Avoid spreading Mongo queries into service code.

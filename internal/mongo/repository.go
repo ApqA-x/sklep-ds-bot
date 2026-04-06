@@ -38,12 +38,15 @@ func (r *Repository) EnsureIndexes(ctx context.Context) error {
 				"status": domain.SessionStatusActive,
 			}),
 		},
+		{Keys: bson.D{{Key: "status", Value: 1}, {Key: "guildId", Value: 1}, {Key: "channelId", Value: 1}, {Key: "endedAt", Value: -1}}},
 		{Keys: bson.D{{Key: "status", Value: 1}, {Key: "closedEventPublishedAt", Value: 1}}},
 	}); err != nil {
 		return err
 	}
 	if _, err := r.participants.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "sessionId", Value: 1}, {Key: "active", Value: 1}}},
+		{Keys: bson.D{{Key: "guildId", Value: 1}, {Key: "sessionId", Value: 1}, {Key: "active", Value: 1}}},
+		{Keys: bson.D{{Key: "guildId", Value: 1}, {Key: "channelId", Value: 1}, {Key: "sessionId", Value: 1}}},
 		{
 			Keys: bson.D{{Key: "sessionId", Value: 1}, {Key: "userId", Value: 1}, {Key: "active", Value: 1}},
 			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.M{
@@ -143,6 +146,29 @@ func (r *Repository) ListClosedSessionsPendingSummary(ctx context.Context) ([]do
 		},
 	}
 	cursor, err := r.sessions.Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var sessions []domain.Session
+	if err := cursor.All(ctx, &sessions); err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+func (r *Repository) ListClosedSessionsByGuildChannel(ctx context.Context, guildID, channelID string, limit int) ([]domain.Session, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	filter := bson.M{
+		"status":    domain.SessionStatusClosed,
+		"guildId":   guildID,
+		"channelId": channelID,
+	}
+	findOptions := options.Find().SetSort(bson.D{{Key: "endedAt", Value: -1}, {Key: "startedAt", Value: -1}}).SetLimit(int64(limit))
+	cursor, err := r.sessions.Find(ctx, filter, findOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -379,6 +405,20 @@ func (r *Repository) ListActiveParticipantsByGuildSession(ctx context.Context, g
 
 func (r *Repository) ListParticipantsBySession(ctx context.Context, sessionID string) ([]domain.ParticipantInterval, error) {
 	cursor, err := r.participants.Find(ctx, bson.M{"sessionId": sessionID})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var participants []domain.ParticipantInterval
+	if err := cursor.All(ctx, &participants); err != nil {
+		return nil, err
+	}
+	return participants, nil
+}
+
+func (r *Repository) ListParticipantsByGuildChannelSession(ctx context.Context, guildID, channelID, sessionID string) ([]domain.ParticipantInterval, error) {
+	cursor, err := r.participants.Find(ctx, bson.M{"guildId": guildID, "channelId": channelID, "sessionId": sessionID})
 	if err != nil {
 		return nil, err
 	}

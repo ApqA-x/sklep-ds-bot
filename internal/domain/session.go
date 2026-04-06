@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 const (
 	SessionStatusActive = "active"
@@ -53,4 +56,56 @@ type SessionSummary struct {
 	TotalDuration time.Duration        `json:"totalDuration"`
 	EndedByUserID string               `json:"endedByUserId"`
 	Participants  []ParticipantSummary `json:"participants"`
+}
+
+func BuildSessionSummary(session Session, participants []ParticipantInterval, endedByUserID string) SessionSummary {
+	byUser := make(map[string]*ParticipantSummary)
+	unique := make(map[string]struct{})
+
+	for _, participant := range participants {
+		unique[participant.UserID] = struct{}{}
+		summary, ok := byUser[participant.UserID]
+		if !ok {
+			summary = &ParticipantSummary{UserID: participant.UserID, UserName: participant.UserName}
+			byUser[participant.UserID] = summary
+		}
+		summary.Intervals++
+		duration := participant.DurationMs
+		if duration == 0 && participant.LeftAt != nil {
+			duration = participant.LeftAt.Sub(participant.JoinedAt).Milliseconds()
+		}
+		if duration < 0 {
+			duration = 0
+		}
+		summary.TotalTime += time.Duration(duration) * time.Millisecond
+	}
+
+	items := make([]ParticipantSummary, 0, len(byUser))
+	for _, item := range byUser {
+		items = append(items, *item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].TotalTime == items[j].TotalTime {
+			return items[i].UserName < items[j].UserName
+		}
+		return items[i].TotalTime > items[j].TotalTime
+	})
+
+	totalDuration := time.Duration(0)
+	if session.EndedAt != nil {
+		totalDuration = session.EndedAt.Sub(session.StartedAt)
+	}
+	if totalDuration < 0 {
+		totalDuration = 0
+	}
+
+	return SessionSummary{
+		SessionID:     session.ID,
+		GuildID:       session.GuildID,
+		ChannelID:     session.ChannelID,
+		UniqueUsers:   len(unique),
+		TotalDuration: totalDuration,
+		EndedByUserID: endedByUserID,
+		Participants:  items,
+	}
 }

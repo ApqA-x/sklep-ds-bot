@@ -50,6 +50,36 @@ func TestCanUseVoiceCommand(t *testing.T) {
 	if canUseVoiceCommand(manage, nil, "inspect", "sessions") {
 		t.Fatal("expected manage guild to fail session inspection")
 	}
+	if canUseVoiceCommand(manage, nil, "inspect", "history") {
+		t.Fatal("expected manage guild to fail history inspection")
+	}
+	if canUseVoiceCommand(manage, nil, "inspect", "recent-session") {
+		t.Fatal("expected manage guild to fail recent session inspection")
+	}
+}
+
+func TestVoiceApplicationCommandHasHistoryRoutes(t *testing.T) {
+	command := VoiceApplicationCommand()
+	var inspect *discordgo.ApplicationCommandOption
+	for _, option := range command.Options {
+		if option.Name == "inspect" {
+			inspect = option
+			break
+		}
+	}
+	if inspect == nil {
+		t.Fatal("expected inspect group")
+	}
+	routes := map[string]struct{}{}
+	for _, option := range inspect.Options {
+		routes[option.Name] = struct{}{}
+	}
+	if _, ok := routes["history"]; !ok {
+		t.Fatal("expected history route")
+	}
+	if _, ok := routes["recent-session"]; !ok {
+		t.Fatal("expected recent-session route")
+	}
 }
 
 func TestHandleConfigCommandChannelsAdd(t *testing.T) {
@@ -154,5 +184,78 @@ func TestHandleInspectCommandSessionMissing(t *testing.T) {
 	}
 	if content != "No active session in that channel." {
 		t.Fatalf("unexpected content: %s", content)
+	}
+}
+
+func TestHandleInspectCommandHistory(t *testing.T) {
+	repo := newFakeRepo()
+	olderEnded := time.Date(2026, 4, 5, 18, 45, 0, 0, time.UTC)
+	newerEnded := time.Date(2026, 4, 5, 19, 30, 0, 0, time.UTC)
+	olderStarted := olderEnded.Add(-1 * time.Hour)
+	newerStarted := newerEnded.Add(-30 * time.Minute)
+	repo.sessions["old"] = domain.Session{ID: "old", GuildID: "g1", ChannelID: "c1", Status: domain.SessionStatusClosed, StartedAt: olderStarted, EndedAt: &olderEnded}
+	repo.sessions["new"] = domain.Session{ID: "new", GuildID: "g1", ChannelID: "c1", Status: domain.SessionStatusClosed, StartedAt: newerStarted, EndedAt: &newerEnded}
+	repo.participants["old"] = []domain.ParticipantInterval{
+		{ID: "p1", SessionID: "old", GuildID: "g1", ChannelID: "c1", UserID: "u1", UserName: "alice", JoinedAt: olderStarted, LeftAt: ptrTime(olderEnded), DurationMs: int64(time.Hour / time.Millisecond)},
+		{ID: "p2", SessionID: "old", GuildID: "g1", ChannelID: "c1", UserID: "u2", UserName: "bob", JoinedAt: olderStarted, LeftAt: ptrTime(olderEnded), DurationMs: int64(time.Hour / time.Millisecond)},
+	}
+	repo.participants["new"] = []domain.ParticipantInterval{{ID: "p3", SessionID: "new", GuildID: "g1", ChannelID: "c1", UserID: "u3", UserName: "carol", JoinedAt: newerStarted, LeftAt: ptrTime(newerEnded), DurationMs: int64(30 * time.Minute / time.Millisecond)}}
+	svc := New(repo)
+	interaction := testInteraction("g1", discordgo.PermissionAdministrator, map[string]*discordgo.Channel{"c1": {ID: "c1", GuildID: "g1", Type: discordgo.ChannelTypeGuildVoice}})
+
+	content, err := svc.handleInspectCommand(context.Background(), interaction, "history", []*discordgo.ApplicationCommandInteractionDataOption{{Name: "channel", Value: "c1"}, {Name: "limit", Value: 5}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "Recent closed sessions for <#c1>") || !strings.Contains(content, "1 users") || !strings.Contains(content, "2 users") {
+		t.Fatalf("unexpected content: %s", content)
+	}
+}
+
+func TestHandleInspectCommandRecentSession(t *testing.T) {
+	repo := newFakeRepo()
+	newerEnded := time.Date(2026, 4, 5, 19, 30, 0, 0, time.UTC)
+	olderEnded := time.Date(2026, 4, 5, 18, 45, 0, 0, time.UTC)
+	newerStarted := newerEnded.Add(-30 * time.Minute)
+	olderStarted := olderEnded.Add(-1 * time.Hour)
+	repo.sessions["new"] = domain.Session{ID: "new", GuildID: "g1", ChannelID: "c1", Status: domain.SessionStatusClosed, StartedAt: newerStarted, EndedAt: &newerEnded}
+	repo.sessions["old"] = domain.Session{ID: "old", GuildID: "g1", ChannelID: "c1", Status: domain.SessionStatusClosed, StartedAt: olderStarted, EndedAt: &olderEnded, EndedByUserID: "u2"}
+	repo.participants["new"] = []domain.ParticipantInterval{{ID: "p1", SessionID: "new", GuildID: "g1", ChannelID: "c1", UserID: "u1", UserName: "alice", JoinedAt: newerStarted, LeftAt: ptrTime(newerEnded), DurationMs: int64(30 * time.Minute / time.Millisecond)}}
+	repo.participants["old"] = []domain.ParticipantInterval{
+		{ID: "p2", SessionID: "old", GuildID: "g1", ChannelID: "c1", UserID: "u1", UserName: "alice", JoinedAt: olderStarted, LeftAt: ptrTime(olderStarted.Add(20 * time.Minute)), DurationMs: int64(20 * time.Minute / time.Millisecond)},
+		{ID: "p3", SessionID: "old", GuildID: "g1", ChannelID: "c1", UserID: "u1", UserName: "alice", JoinedAt: olderStarted.Add(25 * time.Minute), LeftAt: ptrTime(olderStarted.Add(35 * time.Minute)), DurationMs: int64(10 * time.Minute / time.Millisecond)},
+		{ID: "p4", SessionID: "old", GuildID: "g1", ChannelID: "c1", UserID: "u2", UserName: "bob", JoinedAt: olderStarted, LeftAt: ptrTime(olderEnded), DurationMs: int64(time.Hour / time.Millisecond)},
+	}
+	svc := New(repo)
+	interaction := testInteraction("g1", discordgo.PermissionAdministrator, map[string]*discordgo.Channel{"c1": {ID: "c1", GuildID: "g1", Type: discordgo.ChannelTypeGuildVoice}})
+
+	content, err := svc.handleInspectCommand(context.Background(), interaction, "recent-session", []*discordgo.ApplicationCommandInteractionDataOption{{Name: "channel", Value: "c1"}, {Name: "pick", Value: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "Session ID: old") || !strings.Contains(content, "Ended by: bob") || !strings.Contains(content, "2 intervals") {
+		t.Fatalf("unexpected content: %s", content)
+	}
+}
+
+func TestHandleInspectCommandHistoryLimitValidation(t *testing.T) {
+	repo := newFakeRepo()
+	svc := New(repo)
+	interaction := testInteraction("g1", discordgo.PermissionAdministrator, map[string]*discordgo.Channel{"c1": {ID: "c1", GuildID: "g1", Type: discordgo.ChannelTypeGuildVoice}})
+
+	_, err := svc.handleInspectCommand(context.Background(), interaction, "history", []*discordgo.ApplicationCommandInteractionDataOption{{Name: "channel", Value: "c1"}, {Name: "limit", Value: 11}})
+	if err == nil {
+		t.Fatal("expected limit validation error")
+	}
+}
+
+func TestHandleInspectCommandRecentSessionLimitValidation(t *testing.T) {
+	repo := newFakeRepo()
+	svc := New(repo)
+	interaction := testInteraction("g1", discordgo.PermissionAdministrator, map[string]*discordgo.Channel{"c1": {ID: "c1", GuildID: "g1", Type: discordgo.ChannelTypeGuildVoice}})
+
+	_, err := svc.handleInspectCommand(context.Background(), interaction, "recent-session", []*discordgo.ApplicationCommandInteractionDataOption{{Name: "channel", Value: "c1"}, {Name: "pick", Value: 0}})
+	if err == nil {
+		t.Fatal("expected pick validation error")
 	}
 }
