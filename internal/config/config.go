@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/robinlant/sklep-ds-bot/internal/botauth"
 )
 
 type Config struct {
@@ -14,6 +16,7 @@ type Config struct {
 	DiscordToken         string
 	DiscordApplicationID string
 	DiscordGuildID       string
+	BotAdminUserIDs      []string
 	EventSigningSecret   string
 	TrackingMode         string
 	TrackedChannelIDs    []string
@@ -30,6 +33,7 @@ func Load() (Config, error) {
 		DiscordGuildID:       strings.TrimSpace(os.Getenv("DISCORD_GUILD_ID")),
 		EventSigningSecret:   strings.TrimSpace(os.Getenv("EVENT_SIGNING_SECRET")),
 	}
+	cfg.BotAdminUserIDs = botauth.ParseUserIDs(os.Getenv("BOT_ADMIN_USER_IDS"))
 
 	cfg.TrackingMode = getenv("TRACKING_MODE", "")
 	if raw := strings.TrimSpace(os.Getenv("TRACKED_CHANNEL_IDS")); raw != "" {

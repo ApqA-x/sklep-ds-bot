@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/robinlant/sklep-ds-bot/internal/botauth"
 )
 
 const (
@@ -17,11 +18,9 @@ const (
 )
 
 func ShuffleApplicationCommand() *discordgo.ApplicationCommand {
-	defaultPermissions := int64(discordgo.PermissionVoiceMoveMembers)
 	return &discordgo.ApplicationCommand{
-		Name:                     shuffleCommandName,
-		Description:              "Redistribute people evenly across voice channels",
-		DefaultMemberPermissions: &defaultPermissions,
+		Name:        shuffleCommandName,
+		Description: "Redistribute people evenly across voice channels",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommandGroup,
@@ -37,7 +36,7 @@ func ShuffleApplicationCommand() *discordgo.ApplicationCommand {
 	}
 }
 
-func (s *Service) Install(session *discordgo.Session, allowedGuildID string) {
+func (s *Service) Install(session *discordgo.Session, allowedGuildID string, botAdminUserIDs []string) {
 	session.AddHandler(func(ds *discordgo.Session, interaction *discordgo.InteractionCreate) {
 		if interaction.Type != discordgo.InteractionApplicationCommand {
 			return
@@ -60,7 +59,7 @@ func (s *Service) Install(session *discordgo.Session, allowedGuildID string) {
 			_ = respondEphemeral(ds, interaction, "Unknown shuffle command.")
 			return
 		}
-		if !canUseShuffleCommand(interaction) {
+		if !canUseShuffleCommand(interaction, botAdminUserIDs) {
 			_ = respondEphemeral(ds, interaction, "Insufficient permissions.")
 			return
 		}
@@ -149,7 +148,10 @@ func formatShuffleResult(result Result) string {
 	return strings.TrimSpace(builder.String())
 }
 
-func canUseShuffleCommand(interaction *discordgo.InteractionCreate) bool {
+func canUseShuffleCommand(interaction *discordgo.InteractionCreate, botAdminUserIDs []string) bool {
+	if botauth.IsAllowlisted(interaction, botAdminUserIDs) {
+		return true
+	}
 	if interaction == nil || interaction.Member == nil {
 		return false
 	}

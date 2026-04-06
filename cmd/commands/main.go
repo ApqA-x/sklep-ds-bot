@@ -55,7 +55,7 @@ func main() {
 	dg.Identify.Intents = discordgo.IntentsGuilds
 
 	service := commands.New(repo)
-	service.Install(dg, cfg.DiscordGuildID)
+	service.Install(dg, cfg.DiscordGuildID, cfg.BotAdminUserIDs)
 
 	if err := dg.Open(); err != nil {
 		log.Fatal(err)

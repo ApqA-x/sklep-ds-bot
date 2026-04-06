@@ -92,6 +92,7 @@ NATS_URL=nats://nats:4222
 DISCORD_TOKEN=your-bot-token
 DISCORD_APPLICATION_ID=your-application-id
 DISCORD_GUILD_ID=your-guild-id
+BOT_ADMIN_USER_IDS=
 EVENT_SIGNING_SECRET=change-me
 TRACKING_MODE=all
 TRACKED_CHANNEL_IDS=
@@ -108,6 +109,7 @@ SERVICE_NAME=gateway
 ## Variable Notes
 
 - `DISCORD_TOKEN`, `DISCORD_APPLICATION_ID`, and `DISCORD_GUILD_ID` are required for the command services.
+- `BOT_ADMIN_USER_IDS` lets listed Discord user IDs bypass guild permission checks for all commands.
 - `MONGO_URI`, `MONGO_DB`, and `NATS_URL` are shared by the Go services.
 - `EVENT_SIGNING_SECRET` is used by the gateway event path.
 - `TRACKING_MODE` and `TRACKED_CHANNEL_IDS` are startup defaults for the tracker.

@@ -10,6 +10,7 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 - Posts the recap back to Discord.
 - Lets admins configure tracked channels and the recap channel through `/voice`.
 - Lets moderators reshuffle live voice members through `/shuffle`.
+- Lets allowlisted bot admins bypass guild permission checks through `BOT_ADMIN_USER_IDS`.
 
 ## Services
 
