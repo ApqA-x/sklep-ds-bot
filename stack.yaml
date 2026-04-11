@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo-data:/data/db
+
+  nats:
+    image: nats:2
+
+  gateway:
+    image: ghcr.io/robinlant/sklep-ds-bot/gateway:${IMAGE_TAG}
+    env_file:
+      - .env
+
+  tracker:
+    image: ghcr.io/robinlant/sklep-ds-bot/tracker:${IMAGE_TAG}
+    env_file:
+      - .env
+
+  writer:
+    image: ghcr.io/robinlant/sklep-ds-bot/writer:${IMAGE_TAG}
+    env_file:
+      - .env
+
+  commands:
+    image: ghcr.io/robinlant/sklep-ds-bot/commands:${IMAGE_TAG}
+    env_file:
+      - .env
+
+  shuffle:
+    image: ghcr.io/robinlant/sklep-ds-bot/shuffle:${IMAGE_TAG}
+    env_file:
+      - .env
+
+volumes:
+  mongo-data:

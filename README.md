@@ -29,7 +29,7 @@ Modular Discord voice-session tracker built around Go services, MongoDB, and NAT
 ## CI/CD
 
 - `CI` runs tests on every push and pull request.
-- After `CI` succeeds on `main`, `Release` publishes immutable `ghcr.io/robinlant/sklep-ds-bot/<service>:<sha>` images for `gateway`, `tracker`, `writer`, and `commands`, then records the next semver git tag from Conventional Commit messages.
+- After `CI` succeeds on `main`, `Release` publishes immutable `ghcr.io/robinlant/sklep-ds-bot/<service>:<sha>` images for `gateway`, `tracker`, `writer`, `commands`, and `shuffle`, then records the next semver git tag from Conventional Commit messages.
 
 ## Event Flow
 

@@ -96,7 +96,6 @@ BOT_ADMIN_USER_IDS=
 EVENT_SIGNING_SECRET=change-me
 TRACKING_MODE=all
 TRACKED_CHANNEL_IDS=
-SERVICE_NAME=gateway
 ```
 
 ## How To Use
@@ -113,7 +112,6 @@ SERVICE_NAME=gateway
 - `MONGO_URI`, `MONGO_DB`, and `NATS_URL` are shared by the Go services.
 - `EVENT_SIGNING_SECRET` is used by the gateway event path.
 - `TRACKING_MODE` and `TRACKED_CHANNEL_IDS` are startup defaults for the tracker.
-- `SERVICE_NAME` selects the container role when reusing the shared config file.
 
 ## Minimal Local Setup
 

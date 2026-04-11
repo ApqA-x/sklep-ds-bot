@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.example
 bot_token.txt
 *.log
 bin/
