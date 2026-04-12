@@ -139,3 +139,28 @@ async def test_handle_session_closed_uses_configured_summary_channel() -> None:
     event = publisher.events[0]
     assert isinstance(event, domain.SummaryReadyEvent)
     assert event.channel_id == "text-1"
+
+
+@pytest.mark.asyncio
+async def test_handle_session_closed_uses_fallback_summary_channel() -> None:
+    started_at = datetime(2026, 4, 5, 18, 0, 0, tzinfo=UTC)
+    ended_at = started_at + timedelta(hours=1)
+    repo = SummaryFakeRepo()
+    repo.session = domain.Session(id="s1", guild_id="g1", channel_id="c1", started_at=started_at, ended_at=ended_at)
+    repo.settings = domain.GuildSettings(guild_id="g1", fallback_summary_channel_id="text-fallback")
+    repo.parts = [
+        domain.ParticipantInterval(
+            user_id="u1",
+            user_name="alice",
+            joined_at=started_at,
+            left_at=ended_at,
+            duration_ms=int(timedelta(hours=1).total_seconds() * 1000),
+        )
+    ]
+    publisher = SummaryFakePublisher()
+    service = Service(repo, publisher)
+
+    await service.HandleSessionClosed(_must_json(domain.SessionClosedEvent(session_id="s1", guild_id="g1", channel_id="c1")))
+    event = publisher.events[0]
+    assert isinstance(event, domain.SummaryReadyEvent)
+    assert event.channel_id == "text-fallback"

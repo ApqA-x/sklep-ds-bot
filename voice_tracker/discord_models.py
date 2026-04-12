@@ -87,6 +87,7 @@ class ApplicationCommandInteractionData:
 class Interaction:
     type: str = ""
     guild_id: str = ""
+    channel_id: str = ""
     member: Member | None = None
     user: User | None = None
     data: ApplicationCommandInteractionData = field(default_factory=ApplicationCommandInteractionData)
@@ -103,6 +104,10 @@ class InteractionCreate:
     @property
     def guild_id(self) -> str:
         return "" if self.interaction is None else self.interaction.guild_id
+
+    @property
+    def channel_id(self) -> str:
+        return "" if self.interaction is None else self.interaction.channel_id
 
     @property
     def member(self) -> Member | None:

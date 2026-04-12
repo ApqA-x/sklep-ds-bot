@@ -1,6 +1,6 @@
 # Codex Worklog
 
-Updated: 2026-04-11, Europe/Warsaw.
+Updated: 2026-04-12, Europe/Warsaw.
 
 Current task: rewrite the whole project from Go to Python without changing the product logic, split the rewrite into subagent tasks, then verify it with code correctness, security, and QA review agents.
 
@@ -15,13 +15,13 @@ Current task: rewrite the whole project from Go to Python without changing the p
 - `Dockerfile` was migrated to Python and still accepts the `SERVICE` build arg used by compose.
 - `docker-compose.yml` now binds Mongo/NATS development ports to `127.0.0.1`.
 - Local verification is blocked in this environment: `python`, `python3`, `py`, and `pytest` are unavailable on PATH.
+- On 2026-04-12, docs were updated for the new command catalog and access policy: `ADMIN_ONLY` vs `ALL_USER`, and the `services.commands` registration owner note.
 
 ## Subagents Used
 
 - Rewrite agents:
   - tracker and summary rewrite
   - commands, config, and botauth rewrite
-  - shuffle rewrite
   - bus, repository, gateway, runtime, and service entrypoint rewrite
 - Review agents:
   - code correctness agent
@@ -30,7 +30,7 @@ Current task: rewrite the whole project from Go to Python without changing the p
 
 ## Review Findings Integrated
 
-- Fixed discord.py intents in `services/gateway.py`, `services/shuffle.py`, and `services/commands.py`.
+- Fixed discord.py intents in `services/gateway.py` and `services/commands.py`.
 - Fixed gateway voice event guild id derivation in `voice_tracker/gateway.py`.
 - Added gateway test coverage for member-derived guild id in `tests/test_gateway.py`.
 - Added event signing secret validation in `voice_tracker/runtime.py`.
@@ -63,5 +63,4 @@ Current task: rewrite the whole project from Go to Python without changing the p
 - `voice_tracker/repository.py`
 - `services/gateway.py`
 - `services/commands.py`
-- `services/shuffle.py`
 - `tests/test_gateway.py`

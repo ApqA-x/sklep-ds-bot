@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        service: [gateway, tracker, writer, commands, shuffle]
+        service: [gateway, tracker, writer, commands]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [gateway, tracker, writer, commands, shuffle]
+        service: [gateway, tracker, writer, commands]
     steps:
       - name: Delete partial SHA-tagged image
         continue-on-error: true

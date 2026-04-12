@@ -103,12 +103,28 @@ class Repository:
                     "trackingMode": settings.tracking_mode,
                     "trackedChannelIds": settings.tracked_channel_ids,
                     "summaryChannelId": settings.summary_channel_id,
+                    "fallbackSummaryChannelId": settings.fallback_summary_channel_id,
+                    "autoRoleId": settings.auto_role_id,
                     "updatedAt": settings.updated_at,
                 },
                 "$setOnInsert": {"createdAt": settings.created_at},
             },
             upsert=True,
         )
+
+    def get_autorole(self, ctx: Any, guild_id: str) -> str:
+        settings = self.get_guild_settings(ctx, guild_id)
+        if settings is None:
+            return ""
+        return settings.auto_role_id
+
+    def set_autorole(self, ctx: Any, guild_id: str, role_id: str) -> str:
+        settings = self.get_guild_settings(ctx, guild_id)
+        if settings is None:
+            settings = GuildSettings(guild_id=guild_id)
+        settings.auto_role_id = str(role_id or "").strip()
+        self.upsert_guild_settings(ctx, settings)
+        return settings.auto_role_id
 
     def list_closed_sessions_pending_notification(self, _ctx: Any) -> list[Session]:
         cursor = self.sessions.find(
@@ -300,6 +316,18 @@ class Repository:
 
     def UpsertGuildSettings(self, settings: GuildSettings | None) -> None:
         self.upsert_guild_settings(None, settings)
+
+    def getAutoRole(self, guild_id: str) -> str:
+        return self.get_autorole(None, guild_id)
+
+    def setAutoRole(self, guild_id: str, role_id: str) -> str:
+        return self.set_autorole(None, guild_id, role_id)
+
+    def GetAutoRole(self, guild_id: str) -> str:
+        return self.get_autorole(None, guild_id)
+
+    def SetAutoRole(self, guild_id: str, role_id: str) -> str:
+        return self.set_autorole(None, guild_id, role_id)
 
     def ClaimMessage(self, subject: str, message_id: str, issuer: str, issued_at: int) -> bool:
         return self.claim_message(None, subject, message_id, issuer, issued_at)

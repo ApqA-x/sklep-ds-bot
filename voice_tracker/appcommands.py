@@ -69,13 +69,10 @@ def commands() -> list[Any]:
 
 
 def default_commands() -> list[Any]:
-    from .commands import voice_application_command
-    from .shuffle import shuffle_application_command
+    from .commands import voice_application_commands
 
-    return [
-        command_to_dict(voice_application_command()),
-        command_to_dict(shuffle_application_command()),
-    ]
+    voice_commands = [command_to_dict(command) for command in voice_application_commands()]
+    return voice_commands
 
 
 def validate_commands(commands: list[Any]) -> None:
@@ -101,9 +98,7 @@ def _command_name(command: Any) -> str:
 
 def command_to_dict(command: Any) -> dict[str, Any]:
     if isinstance(command, dict):
-        return command
-    if hasattr(command, "to_dict") and callable(command.to_dict):
-        return command.to_dict()
+        return dict(command)
     if is_dataclass(command):
         payload: dict[str, Any] = {}
         for item in fields(command):
@@ -111,13 +106,13 @@ def command_to_dict(command: Any) -> dict[str, Any]:
             if value is None or value == "" or value == [] or value == () or value is False:
                 continue
             key = _payload_key(item.name)
-            if isinstance(value, (list, tuple)):
-                payload[key] = [command_to_dict(child) if _is_command_like(child) else _choice_to_dict(child) for child in value]
-            elif _is_command_like(value):
-                payload[key] = command_to_dict(value)
-            else:
-                payload[key] = _scalar_to_payload(value)
+            payload[key] = _field_to_payload(key, value)
         return payload
+    if hasattr(command, "to_dict") and callable(command.to_dict):
+        raw_payload = command.to_dict()
+        if not isinstance(raw_payload, dict):
+            raise TypeError(f"unsupported command payload {type(raw_payload)!r}")
+        return dict(raw_payload)
     raise TypeError(f"unsupported command type {type(command)!r}")
 
 
@@ -125,10 +120,30 @@ def _is_command_like(value: Any) -> bool:
     return isinstance(value, dict) or hasattr(value, "to_dict") or is_dataclass(value)
 
 
+def _field_to_payload(key: str, value: Any) -> Any:
+    if key == "type":
+        return _scalar_to_payload(value)
+    if key == "channel_types":
+        if isinstance(value, (list, tuple)):
+            return [_scalar_to_payload(child) for child in value]
+        return _scalar_to_payload(value)
+    if isinstance(value, (list, tuple)):
+        return [command_to_dict(child) if _is_command_like(child) else _choice_to_dict(child) for child in value]
+    if _is_command_like(value):
+        return command_to_dict(value)
+    return _enum_value(value)
+
+
 def _choice_to_dict(value: Any) -> Any:
     if is_dataclass(value):
-        return {field.name: _scalar_to_payload(getattr(value, field.name)) for field in fields(value)}
-    return _scalar_to_payload(value)
+        return {field.name: _enum_value(getattr(value, field.name)) for field in fields(value)}
+    return _enum_value(value)
+
+
+def _enum_value(value: Any) -> Any:
+    if hasattr(value, "value") and not isinstance(value, (str, bytes, bytearray)):
+        return value.value
+    return value
 
 
 def _payload_key(name: str) -> str:

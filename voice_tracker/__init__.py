@@ -9,7 +9,6 @@ __all__ = [
     "domain",
     "gateway",
     "repository",
-    "shuffle",
     "summary",
     "tracker",
 ]

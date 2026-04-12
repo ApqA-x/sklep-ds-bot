@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 
 import discord
@@ -15,6 +16,7 @@ from voice_tracker.runtime import load_config, require_event_signing_secret
 
 
 SUMMARY_EMBED_COLOR = 0x5865F2
+logger = logging.getLogger(__name__)
 
 
 async def _resolve_channel(client: discord.Client, channel_id: str):
@@ -47,6 +49,75 @@ async def _deliver_pending(client: discord.Client, repo: Repository) -> None:
         repo.mark_session_summary_delivered(None, session.id, datetime.now(UTC))
 
 
+def _autorole_id_for_guild(repo: Repository, guild_id: str) -> str:
+    settings = None
+    getter = getattr(repo, "get_guild_settings", None)
+    if callable(getter):
+        try:
+            settings = getter(None, guild_id)
+        except Exception:
+            settings = None
+    role_id = str(getattr(settings, "auto_role_id", "") or "").strip()
+    if role_id:
+        return role_id
+    collection = getattr(repo, "guild_settings", None)
+    if collection is None:
+        return ""
+    try:
+        document = collection.find_one({"_id": guild_id})
+    except Exception:
+        return ""
+    if not document:
+        return ""
+    return str(document.get("autoRoleId") or document.get("auto_role_id") or "").strip()
+
+
+async def _resolve_bot_member(client: discord.Client, guild: discord.Guild) -> discord.Member | None:
+    me = getattr(guild, "me", None)
+    if isinstance(me, discord.Member):
+        return me
+    user = getattr(client, "user", None)
+    if user is None:
+        return None
+    cached = guild.get_member(int(user.id))
+    if cached is not None:
+        return cached
+    try:
+        return await guild.fetch_member(int(user.id))
+    except Exception:
+        return None
+
+
+async def _resolve_role(guild: discord.Guild, role_id: str) -> discord.Role | None:
+    try:
+        snowflake = int(role_id)
+    except ValueError:
+        return None
+    role = guild.get_role(snowflake)
+    if role is not None:
+        return role
+    try:
+        roles = await guild.fetch_roles()
+    except Exception:
+        return None
+    for candidate in roles:
+        if candidate.id == snowflake:
+            return candidate
+    return None
+
+
+def _autorole_is_safe(role: discord.Role, bot_member: discord.Member) -> bool:
+    if role.is_default():
+        return False
+    if getattr(role, "managed", False):
+        return False
+    if role.permissions.administrator:
+        return False
+    if role.position >= bot_member.top_role.position:
+        return False
+    return role.is_assignable()
+
+
 async def main() -> None:
     cfg = load_config()
     if cfg.discord_token == "":
@@ -66,6 +137,31 @@ async def main() -> None:
     intents.members = True
     client = discord.Client(intents=intents)
     GatewayService(client, bus).install()
+
+    @client.event
+    async def on_member_join(member: discord.Member) -> None:
+        if str(getattr(member.guild, "id", "") or "") != cfg.discord_guild_id:
+            return
+        if getattr(member, "bot", False):
+            return
+        role_id = _autorole_id_for_guild(repo, str(member.guild.id))
+        if role_id == "":
+            return
+        role = await _resolve_role(member.guild, role_id)
+        if role is None:
+            logger.warning("autorole skipped guild=%s missing role=%s", member.guild.id, role_id)
+            return
+        bot_member = await _resolve_bot_member(client, member.guild)
+        if bot_member is None:
+            logger.warning("autorole skipped guild=%s missing bot member", member.guild.id)
+            return
+        if not _autorole_is_safe(role, bot_member):
+            logger.warning("autorole skipped guild=%s unsafe role=%s", member.guild.id, role_id)
+            return
+        try:
+            await member.add_roles(role, reason="Voice Tracker autorole")
+        except Exception:
+            logger.exception("autorole assignment failed guild=%s member=%s role=%s", member.guild.id, member.id, role_id)
 
     async def handle_summary(payload: bytes) -> None:
         event = summary_from_payload(payload)

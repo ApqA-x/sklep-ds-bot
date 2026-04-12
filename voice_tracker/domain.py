@@ -49,12 +49,16 @@ class GuildSettings:
     summary_channel_id: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    fallback_summary_channel_id: str = ""
+    auto_role_id: str = ""
 
     def __post_init__(self) -> None:
         self.guild_id = _clean(self.guild_id)
         self.tracking_mode = normalize_tracking_mode(self.tracking_mode)
         self.tracked_channel_ids = clean_channel_ids(self.tracked_channel_ids)
         self.summary_channel_id = _clean(self.summary_channel_id)
+        self.fallback_summary_channel_id = _clean(self.fallback_summary_channel_id)
+        self.auto_role_id = _clean(self.auto_role_id)
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
 
@@ -72,7 +76,7 @@ class GuildSettings:
         return True
 
     def summary_destination(self, fallback_channel_id: str) -> str:
-        return _clean(self.summary_channel_id) or _clean(fallback_channel_id)
+        return _clean(self.summary_channel_id) or _clean(self.fallback_summary_channel_id) or _clean(fallback_channel_id)
 
     @classmethod
     def from_mongo(cls, data: dict[str, Any] | None) -> "GuildSettings | None":
@@ -83,6 +87,8 @@ class GuildSettings:
             tracking_mode=data.get("trackingMode", GUILD_TRACKING_MODE_ALL),
             tracked_channel_ids=list(data.get("trackedChannelIds") or []),
             summary_channel_id=data.get("summaryChannelId", ""),
+            fallback_summary_channel_id=data.get("fallbackSummaryChannelId", ""),
+            auto_role_id=data.get("autoRoleId", ""),
             created_at=parse_datetime(data.get("createdAt")),
             updated_at=parse_datetime(data.get("updatedAt")),
         )
@@ -93,8 +99,17 @@ def new_guild_settings(
     tracking_mode: str,
     tracked_channel_ids: list[str] | None,
     summary_channel_id: str,
+    fallback_summary_channel_id: str = "",
+    auto_role_id: str = "",
 ) -> GuildSettings:
-    return GuildSettings(guild_id, tracking_mode, tracked_channel_ids or [], summary_channel_id)
+    return GuildSettings(
+        guild_id,
+        tracking_mode,
+        tracked_channel_ids or [],
+        summary_channel_id,
+        fallback_summary_channel_id=fallback_summary_channel_id,
+        auto_role_id=auto_role_id,
+    )
 
 
 @dataclass(slots=True)

@@ -29,10 +29,5 @@ services:
     env_file:
       - .env
 
-  shuffle:
-    image: ghcr.io/robinlant/sklep-ds-bot/shuffle:${IMAGE_TAG}
-    env_file:
-      - .env
-
 volumes:
   mongo-data:

@@ -7,14 +7,21 @@ import pytest
 from voice_tracker import domain
 from voice_tracker.commands import (
     ActiveSessionView,
+    INSPECT_ACTIVE_ALL_COMMAND,
+    INSPECT_ACTIVE_CHANNEL_COMMAND,
+    INSPECT_COMMAND_NAME,
+    INSPECT_HISTORY_ALL_COMMAND,
+    INSPECT_HISTORY_PICK_COMMAND,
     MAX_CLOSED_HISTORY_ITEMS,
     Service,
+    SETTINGS_COMMAND_NAME,
+    TRACK_COMMAND_NAME,
     can_use_voice_command,
     format_duration,
     option_int_in_range,
     parse_voice_route,
     resolve_command_channel,
-    voice_application_command,
+    voice_application_commands,
 )
 from voice_tracker.discord_models import (
     ApplicationCommandInteractionData,
@@ -45,6 +52,7 @@ class FakeRepo:
             settings.summary_channel_id,
             settings.created_at,
             settings.updated_at,
+            fallback_summary_channel_id=settings.fallback_summary_channel_id,
         )
 
     def upsert_guild_settings(self, _ctx, settings: domain.GuildSettings) -> None:
@@ -55,6 +63,7 @@ class FakeRepo:
             settings.summary_channel_id,
             settings.created_at,
             settings.updated_at,
+            fallback_summary_channel_id=settings.fallback_summary_channel_id,
         )
 
     def list_active_sessions_by_guild(self, _ctx, guild_id: str):
@@ -82,14 +91,20 @@ def _closed_end_time(session: domain.Session) -> datetime:
     return session.ended_at or datetime.min.replace(tzinfo=UTC)
 
 
-def interaction_with_channels(guild_id: str, permissions: int, channels: dict[str, Channel] | None = None) -> InteractionCreate:
+def interaction_with_channels(
+    guild_id: str,
+    permissions: int,
+    channels: dict[str, Channel] | None = None,
+    channel_id: str = "",
+) -> InteractionCreate:
     return InteractionCreate(
         interaction=Interaction(
             type="application_command",
             guild_id=guild_id,
+            channel_id=channel_id,
             member=Member(user=User(id="u1"), permissions=permissions),
             data=ApplicationCommandInteractionData(
-                name="voice",
+                name="settings",
                 options=[],
                 resolved=ApplicationCommandInteractionDataResolved(channels=channels or {}),
             ),
@@ -102,60 +117,160 @@ def option(name: str, value):
 
 
 def test_parse_voice_route() -> None:
-    group, command, opts = parse_voice_route(
-        [
-            ApplicationCommandInteractionDataOption(
-                name="config",
-                type="subcommand_group",
-                options=[
-                    ApplicationCommandInteractionDataOption(
-                        name="channels",
-                        type="subcommand",
-                        options=[option("action", "list")],
-                    )
-                ],
-            )
-        ]
+    root, command, opts = parse_voice_route(
+        ApplicationCommandInteractionData(
+            name="inspect",
+            options=[
+                ApplicationCommandInteractionDataOption(
+                    name="history",
+                    type="subcommand_group",
+                    options=[
+                        ApplicationCommandInteractionDataOption(
+                            name="all",
+                            type="subcommand",
+                            options=[option("channel", "c1")],
+                        )
+                    ],
+                )
+            ],
+        )
     )
-    assert (group, command, len(opts)) == ("config", "channels", 1)
+    assert (root, command, len(opts)) == ("inspect", INSPECT_HISTORY_ALL_COMMAND, 1)
+
+    root, command, opts = parse_voice_route(
+        ApplicationCommandInteractionData(
+            name="settings",
+            options=[
+                ApplicationCommandInteractionDataOption(
+                    name="mode",
+                    type="subcommand",
+                    options=[option("mode", "all")],
+                )
+            ],
+        )
+    )
+    assert (root, command, len(opts)) == ("settings", "mode", 1)
 
 
-def test_can_use_voice_command() -> None:
+def test_parse_voice_route_accepts_numeric_discord_types() -> None:
+    root, command, opts = parse_voice_route(
+        ApplicationCommandInteractionData(
+            name="inspect",
+            options=[
+                ApplicationCommandInteractionDataOption(
+                    name="history",
+                    type="2",
+                    options=[
+                        ApplicationCommandInteractionDataOption(
+                            name="pick",
+                            type="1",
+                            options=[option("pick", 2)],
+                        )
+                    ],
+                )
+            ],
+        )
+    )
+    assert (root, command, len(opts)) == ("inspect", INSPECT_HISTORY_PICK_COMMAND, 1)
+
+
+def test_can_use_voice_command_requires_admin_for_admin_only_commands() -> None:
+    plain = InteractionCreate(interaction=Interaction(member=Member(user=User(id="u2"), permissions=0)))
     manage = InteractionCreate(interaction=Interaction(member=Member(permissions=PERMISSION_MANAGE_GUILD)))
     admin = InteractionCreate(interaction=Interaction(member=Member(permissions=PERMISSION_ADMINISTRATOR)))
     allowlisted = InteractionCreate(interaction=Interaction(member=Member(user=User(id="u1"))))
 
-    assert can_use_voice_command(manage, [], "config", "channels") is True
-    assert can_use_voice_command(admin, [], "inspect", "sessions") is True
-    assert can_use_voice_command(allowlisted, ["u1"], "inspect", "sessions") is True
-    assert can_use_voice_command(manage, [], "inspect", "sessions") is False
-    assert can_use_voice_command(manage, [], "inspect", "history") is False
-    assert can_use_voice_command(manage, [], "inspect", "recent-session") is False
+    admin_only_routes = [
+        ("audit", ""),
+        ("bot-setting", ""),
+        (TRACK_COMMAND_NAME, "add"),
+        (TRACK_COMMAND_NAME, "remove"),
+        (TRACK_COMMAND_NAME, "list"),
+        ("track-list", "clear"),
+        (INSPECT_COMMAND_NAME, "channel"),
+        ("autorole", ""),
+    ]
+    for root, command in admin_only_routes:
+        assert can_use_voice_command(plain, [], root, command) is False
+        assert can_use_voice_command(manage, [], root, command) is False
+        assert can_use_voice_command(allowlisted, ["u1"], root, command) is False
+        assert can_use_voice_command(admin, [], root, command) is True
 
 
-def test_voice_application_command_has_history_routes() -> None:
-    command = voice_application_command()
-    config = next(option for option in command.options if option.name == "config")
-    inspect = next(option for option in command.options if option.name == "inspect")
-    config_routes = {option.name for option in config.options}
-    routes = {option.name for option in inspect.options}
-    assert {"mode", "channels", "summary-channel"}.issubset(config_routes)
-    assert "history" in routes
-    assert "recent-session" in routes
+def test_can_use_voice_command_all_user_routes_do_not_require_admin() -> None:
+    plain = InteractionCreate(interaction=Interaction(member=Member(user=User(id="u2"), permissions=0)))
+
+    assert can_use_voice_command(plain, [], "jump", "") is True
+    assert can_use_voice_command(plain, [], "dashboard", "") is True
+    assert can_use_voice_command(plain, [], "userinfo", "") is True
 
 
-def test_handle_config_channels_add_and_clear() -> None:
+def test_voice_application_commands_have_expected_routes() -> None:
+    commands = {command.name: command for command in voice_application_commands()}
+    assert list(commands) == [
+        "audit",
+        "bot-setting",
+        "track",
+        "track-list",
+        "jump",
+        "inspect",
+        "autorole",
+        "dashboard",
+        "userinfo",
+    ]
+
+    track_routes = [option.name for option in commands[TRACK_COMMAND_NAME].options]
+    assert track_routes == ["add", "remove", "list"]
+    assert [option.name for option in commands["track-list"].options] == ["clear"]
+    assert [option.name for option in commands[INSPECT_COMMAND_NAME].options] == ["channel"]
+
+
+def test_handle_track_add_and_clear() -> None:
     repo = FakeRepo()
     svc = Service(repo)
     interaction = interaction_with_channels("g1", PERMISSION_MANAGE_GUILD, {"c1": Channel(id="c1", guild_id="g1", type="guild_voice")})
 
-    content = svc.handle_config_command(None, interaction, "channels", [option("action", "add"), option("channel", "c1")])
+    content = svc.handle_track_command(None, interaction, "add", [option("channel", "c1")])
     assert "tracking mode: all" in content
     assert "stored channels: <#c1>" in content
 
     repo.settings["g1"] = domain.new_guild_settings("g1", domain.GUILD_TRACKING_MODE_SPECIFIC, ["c1", "c2"], "")
-    content = svc.handle_config_command(None, interaction, "channels", [option("action", "clear")])
+    content = svc.handle_track_command(None, interaction, "clear", [])
     assert "no voice channels" in content
+
+
+def test_handle_settings_commands() -> None:
+    repo = FakeRepo()
+    svc = Service(repo)
+    interaction = interaction_with_channels("g1", PERMISSION_MANAGE_GUILD, {"t1": Channel(id="t1", guild_id="g1", type="guild_text")})
+
+    content = svc.handle_settings_command(None, interaction, "mode", [option("mode", domain.GUILD_TRACKING_MODE_NONE)])
+    assert "tracking mode: none" in content
+
+    content = svc.handle_settings_command(None, interaction, "summary-set", [option("channel", "t1")])
+    assert "audit channel: <#t1>" in content
+
+    content = svc.handle_settings_command(None, interaction, "summary-clear", [])
+    assert "audit channel: not set" in content
+
+
+def test_fallback_summary_channel_is_described() -> None:
+    repo = FakeRepo()
+    svc = Service(repo)
+    svc.remember_fallback_summary_channel(None, "g1", "t1")
+
+    content = svc.handle_settings_command(None, interaction_with_channels("g1", PERMISSION_MANAGE_GUILD), "show", [])
+    assert "audit channel: <#t1> (fallback)" in content
+
+
+def test_voice_command_can_remember_interaction_channel_for_summary_fallback() -> None:
+    repo = FakeRepo()
+    svc = Service(repo)
+    interaction = interaction_with_channels("g1", PERMISSION_MANAGE_GUILD, channel_id="text-from-command")
+
+    svc.remember_fallback_summary_channel(None, interaction.guild_id, interaction.channel_id)
+
+    assert repo.settings["g1"].fallback_summary_channel_id == "text-from-command"
 
 
 def test_handle_inspect_commands() -> None:
@@ -176,17 +291,17 @@ def test_handle_inspect_commands() -> None:
     svc = Service(repo)
     interaction = interaction_with_channels("g1", PERMISSION_ADMINISTRATOR, {"c1": Channel(id="c1", guild_id="g1", type="guild_voice")})
 
-    content = svc.handle_inspect_command(None, interaction, "sessions", [])
+    content = svc.handle_inspect_command(None, interaction, INSPECT_ACTIVE_ALL_COMMAND, [])
     assert "<#c1>" in content
 
-    content = svc.handle_inspect_command(None, interaction, "session", [option("channel", "c1")])
+    content = svc.handle_inspect_command(None, interaction, INSPECT_ACTIVE_CHANNEL_COMMAND, [option("channel", "c1")])
     assert "alice" in content and "Channel: <#c1>" in content
 
-    content = svc.handle_inspect_command(None, interaction, "history", [option("channel", "c1"), option("limit", 5)])
+    content = svc.handle_inspect_command(None, interaction, INSPECT_HISTORY_ALL_COMMAND, [option("channel", "c1"), option("limit", 5)])
     assert "Recent closed sessions for <#c1>" in content
     assert "1 users" in content and "2 users" in content
 
-    content = svc.handle_inspect_command(None, interaction, "recent-session", [option("channel", "c1"), option("pick", 2)])
+    content = svc.handle_inspect_command(None, interaction, INSPECT_HISTORY_PICK_COMMAND, [option("channel", "c1"), option("pick", 2)])
     assert "Session ID: old" in content
     assert "Ended by: bob" in content
     assert "2 intervals" in content
@@ -241,9 +356,9 @@ def test_history_and_pick_validation() -> None:
     svc = Service(FakeRepo())
     interaction = interaction_with_channels("g1", PERMISSION_ADMINISTRATOR, {"c1": Channel(id="c1", guild_id="g1", type="guild_voice")})
     with pytest.raises(ValueError, match=f"limit must be between 1 and {MAX_CLOSED_HISTORY_ITEMS}"):
-        svc.handle_inspect_command(None, interaction, "history", [option("channel", "c1"), option("limit", 11)])
+        svc.handle_inspect_command(None, interaction, INSPECT_HISTORY_ALL_COMMAND, [option("channel", "c1"), option("limit", 11)])
     with pytest.raises(ValueError, match=f"pick must be between 1 and {MAX_CLOSED_HISTORY_ITEMS}"):
-        svc.handle_inspect_command(None, interaction, "recent-session", [option("channel", "c1"), option("pick", 0)])
+        svc.handle_inspect_command(None, interaction, INSPECT_HISTORY_PICK_COMMAND, [option("channel", "c1"), option("pick", 0)])
 
 
 def test_resolve_command_channel_validates_resolution() -> None:

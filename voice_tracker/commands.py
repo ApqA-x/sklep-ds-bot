@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import math
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from importlib import metadata as importlib_metadata
 from typing import Any, Protocol
+import math
+import logging
 
-from . import botauth, domain
+from . import domain
 from .discord_models import (
-    ApplicationCommand,
     ApplicationCommandInteractionDataOption,
     ApplicationCommandOption,
     ApplicationCommandOptionChoice,
@@ -32,10 +32,93 @@ from .timeutil import discord_timestamp, go_duration
 
 logger = logging.getLogger(__name__)
 
-VOICE_COMMAND_NAME = "voice"
-VOICE_INSPECT_HISTORY_COMMAND_NAME = "history"
-VOICE_INSPECT_RECENT_SESSION_COMMAND_NAME = "recent-session"
+COMMAND_ACCESS_ADMIN_ONLY = "ADMIN_ONLY"
+COMMAND_ACCESS_ALL_USER = "ALL_USER"
+
+AUDIT_COMMAND_NAME = "audit"
+BOT_SETTING_COMMAND_NAME = "bot-setting"
+SETTINGS_COMMAND_NAME = BOT_SETTING_COMMAND_NAME
+LEGACY_SETTINGS_COMMAND_NAME = "settings"
+TRACK_COMMAND_NAME = "track"
+TRACK_LIST_COMMAND_NAME = "track-list"
+JUMP_COMMAND_NAME = "jump"
+INSPECT_COMMAND_NAME = "inspect"
+AUTOROLE_COMMAND_NAME = "autorole"
+DASHBOARD_COMMAND_NAME = "dashboard"
+USERINFO_COMMAND_NAME = "userinfo"
+
+VOICE_COMMAND_NAMES = {
+    AUDIT_COMMAND_NAME,
+    BOT_SETTING_COMMAND_NAME,
+    TRACK_COMMAND_NAME,
+    TRACK_LIST_COMMAND_NAME,
+    JUMP_COMMAND_NAME,
+    INSPECT_COMMAND_NAME,
+    AUTOROLE_COMMAND_NAME,
+    DASHBOARD_COMMAND_NAME,
+    USERINFO_COMMAND_NAME,
+    LEGACY_SETTINGS_COMMAND_NAME,
+}
+INSPECT_HISTORY_ALL_COMMAND = "history.all"
+INSPECT_HISTORY_PICK_COMMAND = "history.pick"
+INSPECT_ACTIVE_ALL_COMMAND = "active.all"
+INSPECT_ACTIVE_CHANNEL_COMMAND = "active.channel"
 MAX_CLOSED_HISTORY_ITEMS = 10
+OPTION_TYPE_ROLE = 8
+OPTION_TYPE_USER = 6
+
+
+@dataclass(slots=True)
+class CommandDefinition:
+    name: str
+    description: str = ""
+    options: list[ApplicationCommandOption] = field(default_factory=list)
+    default_member_permissions: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"name": self.name, "description": self.description}
+        if self.options:
+            payload["options"] = [option.to_dict() for option in self.options]
+        if self.default_member_permissions is not None:
+            payload["default_member_permissions"] = self.default_member_permissions
+        return payload
+
+
+ApplicationCommand = CommandDefinition
+
+
+@dataclass(slots=True)
+class CommandPolicy:
+    root: str
+    command: str
+    access_class: str
+    default_member_permissions: int | None = None
+    handler_name: str = ""
+    ephemeral_default: bool = True
+
+
+COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
+    (AUDIT_COMMAND_NAME, "channel"): CommandPolicy(AUDIT_COMMAND_NAME, "channel", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_audit_command"),
+    (BOT_SETTING_COMMAND_NAME, ""): CommandPolicy(BOT_SETTING_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_bot_setting_command"),
+    (LEGACY_SETTINGS_COMMAND_NAME, "show"): CommandPolicy(LEGACY_SETTINGS_COMMAND_NAME, "show", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
+    (LEGACY_SETTINGS_COMMAND_NAME, "mode"): CommandPolicy(LEGACY_SETTINGS_COMMAND_NAME, "mode", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
+    (LEGACY_SETTINGS_COMMAND_NAME, "summary-set"): CommandPolicy(LEGACY_SETTINGS_COMMAND_NAME, "summary-set", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
+    (LEGACY_SETTINGS_COMMAND_NAME, "summary-clear"): CommandPolicy(LEGACY_SETTINGS_COMMAND_NAME, "summary-clear", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
+    (TRACK_COMMAND_NAME, "add"): CommandPolicy(TRACK_COMMAND_NAME, "add", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_command"),
+    (TRACK_COMMAND_NAME, "remove"): CommandPolicy(TRACK_COMMAND_NAME, "remove", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_command"),
+    (TRACK_COMMAND_NAME, "list"): CommandPolicy(TRACK_COMMAND_NAME, "list", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_command"),
+    (TRACK_COMMAND_NAME, "clear"): CommandPolicy(TRACK_COMMAND_NAME, "clear", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_command"),
+    (TRACK_LIST_COMMAND_NAME, "clear"): CommandPolicy(TRACK_LIST_COMMAND_NAME, "clear", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_list_command"),
+    (JUMP_COMMAND_NAME, "channel"): CommandPolicy(JUMP_COMMAND_NAME, "channel", COMMAND_ACCESS_ALL_USER, None, "handle_jump_command"),
+    (INSPECT_COMMAND_NAME, "channel"): CommandPolicy(INSPECT_COMMAND_NAME, "channel", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
+    (INSPECT_COMMAND_NAME, INSPECT_ACTIVE_ALL_COMMAND): CommandPolicy(INSPECT_COMMAND_NAME, INSPECT_ACTIVE_ALL_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
+    (INSPECT_COMMAND_NAME, INSPECT_ACTIVE_CHANNEL_COMMAND): CommandPolicy(INSPECT_COMMAND_NAME, INSPECT_ACTIVE_CHANNEL_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
+    (INSPECT_COMMAND_NAME, INSPECT_HISTORY_ALL_COMMAND): CommandPolicy(INSPECT_COMMAND_NAME, INSPECT_HISTORY_ALL_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
+    (INSPECT_COMMAND_NAME, INSPECT_HISTORY_PICK_COMMAND): CommandPolicy(INSPECT_COMMAND_NAME, INSPECT_HISTORY_PICK_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
+    (AUTOROLE_COMMAND_NAME, "role"): CommandPolicy(AUTOROLE_COMMAND_NAME, "role", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_autorole_command"),
+    (DASHBOARD_COMMAND_NAME, ""): CommandPolicy(DASHBOARD_COMMAND_NAME, "", COMMAND_ACCESS_ALL_USER, None, "handle_dashboard_command"),
+    (USERINFO_COMMAND_NAME, "user"): CommandPolicy(USERINFO_COMMAND_NAME, "user", COMMAND_ACCESS_ALL_USER, None, "handle_userinfo_command"),
+}
 
 
 class Repository(Protocol):
@@ -74,6 +157,22 @@ class ActiveSessionView:
     participants: list[SessionParticipantView] = field(default_factory=list)
     active_for: timedelta = field(default_factory=timedelta)
     count: int = 0
+
+
+@dataclass(slots=True)
+class VoiceTotalView:
+    user_id: str
+    user_name: str
+    total_for: timedelta
+    role_names: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class MemberProfileView:
+    user_id: str
+    user_name: str
+    total_for: timedelta
+    roles: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -154,8 +253,23 @@ class Service:
         self._save(ctx, settings)
         return settings
 
+    def set_audit_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
+        return self.set_summary_channel(ctx, guild_id, channel_id)
+
     def clear_summary_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
         return self.set_summary_channel(ctx, guild_id, "")
+
+    def clear_audit_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
+        return self.clear_summary_channel(ctx, guild_id)
+
+    def remember_fallback_summary_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
+        settings = self.get_guild_settings(ctx, guild_id)
+        channel_id = (channel_id or "").strip()
+        if not channel_id or settings.fallback_summary_channel_id == channel_id:
+            return settings
+        settings.fallback_summary_channel_id = channel_id
+        self._save(ctx, settings)
+        return settings
 
     def describe_settings(self, settings: domain.GuildSettings) -> str:
         mode = domain.normalize_tracking_mode(settings.tracking_mode)
@@ -169,13 +283,30 @@ class Service:
                 tracked = "no configured channels"
 
         summary_channel = settings.summary_channel_id.strip()
-        summary_channel = _channel_mention(summary_channel) if summary_channel else "not set"
+        fallback_channel = settings.fallback_summary_channel_id.strip()
+        if summary_channel:
+            summary_channel = _channel_mention(summary_channel)
+        elif fallback_channel:
+            summary_channel = f"{_channel_mention(fallback_channel)} (fallback)"
+        else:
+            summary_channel = "not set"
 
+        autorole_id = _optional_setting(settings, "auto_role_id", _optional_setting(settings, "autoRoleId", ""))
+        autorole = _role_mention(autorole_id) if autorole_id else "not set"
         lines = [f"tracking mode: {mode}", f"tracked channels: {tracked}"]
         if stored and stored != tracked:
             lines.append(f"stored channels: {stored}")
-        lines.append(f"summary channel: {summary_channel}")
+        lines.append(f"audit channel: {summary_channel}")
+        lines.append(f"autorole: {autorole}")
+        created_at = format_time(settings.created_at)
+        if created_at != "":
+            lines.append(f"created: {created_at}")
         return "\n".join(lines)
+
+    def describe_bot_settings(self, ctx: Any, guild_id: str) -> str:
+        settings = self.get_guild_settings(ctx, guild_id)
+        lines = [f"version: {get_bot_version()}", self.describe_settings(settings)]
+        return "\n".join(lines).strip()
 
     def list_active_sessions(self, ctx: Any, guild_id: str) -> list[ActiveSessionView]:
         if self.repo is None:
@@ -260,7 +391,7 @@ class Service:
             )
         if has_more:
             lines.append("More sessions available.")
-        lines.append(f"Use /voice inspect recent-session channel:<#{channel_id}> pick:<number> for details.")
+        lines.append(f"Use /inspect history pick channel:<#{channel_id}> pick:<number> for details.")
         return "\n".join(lines).strip()
 
     def describe_closed_session_detail(self, ctx: Any, guild_id: str, channel_id: str, pick: int) -> str:
@@ -309,14 +440,16 @@ class Service:
         else:
             participants = self.repo.list_active_participants_by_guild_session(ctx, guild_id, session.id)
         now = datetime.now(timezone.utc)
-        view = ActiveSessionView(session=session, active_for=now - session.started_at, count=len(participants))
+        started_at = session.started_at or now
+        view = ActiveSessionView(session=session, active_for=now - started_at, count=len(participants))
         for participant in participants:
+            joined_at = participant.joined_at or now
             view.participants.append(
                 SessionParticipantView(
                     user_id=participant.user_id,
                     user_name=participant.user_name,
-                    joined_at=participant.joined_at,
-                    active_for=now - participant.joined_at,
+                    joined_at=joined_at,
+                    active_for=now - joined_at,
                 )
             )
         view.participants.sort(key=lambda item: (item.joined_at, item.user_name))
@@ -341,16 +474,18 @@ class Service:
                 return None
 
             data = interaction.application_command_data()
-            if data.name != VOICE_COMMAND_NAME:
+            if data.name not in VOICE_COMMAND_NAMES:
                 return None
 
-            group, command, options = parse_voice_route(data.options)
-            if not can_use_voice_command(interaction, bot_admin_user_ids, group, command):
+            root, command, options = parse_voice_route(data)
+            if not can_use_voice_command(interaction, bot_admin_user_ids, root, command):
                 respond_ephemeral(ds, interaction, "Insufficient permissions.")
                 return None
 
             try:
-                content = self.handle_voice_command(None, interaction, group, command, options)
+                if interaction.channel_id:
+                    self.remember_fallback_summary_channel(None, interaction.guild_id, interaction.channel_id)
+                content = self.handle_voice_command(None, interaction, root, command, options)
             except ValueError as exc:
                 content = str(exc)
             except Exception:
@@ -369,67 +504,115 @@ class Service:
         self,
         ctx: Any,
         interaction: InteractionCreate,
-        group: str,
+        root: str,
         command: str,
         options: list[ApplicationCommandInteractionDataOption],
     ) -> str:
-        if group == "config":
-            return self.handle_config_command(ctx, interaction, command, options)
-        if group == "inspect":
+        if root == AUDIT_COMMAND_NAME:
+            return self.handle_audit_command(ctx, interaction, command, options)
+        if root == BOT_SETTING_COMMAND_NAME:
+            return self.handle_bot_setting_command(ctx, interaction, command, options)
+        if root == LEGACY_SETTINGS_COMMAND_NAME:
+            return self.handle_settings_command(ctx, interaction, command, options)
+        if root == TRACK_COMMAND_NAME:
+            return self.handle_track_command(ctx, interaction, command, options)
+        if root == TRACK_LIST_COMMAND_NAME:
+            return self.handle_track_list_command(ctx, interaction, command, options)
+        if root == JUMP_COMMAND_NAME:
+            return self.handle_jump_command(ctx, interaction, command, options)
+        if root == INSPECT_COMMAND_NAME:
             return self.handle_inspect_command(ctx, interaction, command, options)
-        raise ValueError("unknown command group")
+        if root == AUTOROLE_COMMAND_NAME:
+            return self.handle_autorole_command(ctx, interaction, command, options)
+        if root == DASHBOARD_COMMAND_NAME:
+            return self.handle_dashboard_command(ctx, interaction, command, options)
+        if root == USERINFO_COMMAND_NAME:
+            return self.handle_userinfo_command(ctx, interaction, command, options)
+        raise ValueError("unknown voice command")
 
-    def handle_config_command(
+    def handle_audit_command(
         self,
         ctx: Any,
         interaction: InteractionCreate,
         command: str,
         options: list[ApplicationCommandInteractionDataOption],
     ) -> str:
+        channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_TEXT)
+        settings = self.set_audit_channel(ctx, interaction.guild_id, channel_id)
+        return self.describe_settings(settings)
+
+    def handle_bot_setting_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        return self.describe_bot_settings(ctx, interaction.guild_id)
+
+    def handle_settings_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        if command == "show":
+            settings = self.get_guild_settings(ctx, interaction.guild_id)
+            return self.describe_settings(settings)
         if command == "mode":
-            action = option_string(options, "action")
-            if action == "show":
-                settings = self.get_guild_settings(ctx, interaction.guild_id)
-                return f"tracking mode: {domain.normalize_tracking_mode(settings.tracking_mode)}"
-            if action == "set":
-                mode = option_string(options, "value")
-                if not mode:
-                    raise ValueError("mode value is required")
-                settings = self.set_tracking_mode(ctx, interaction.guild_id, mode)
-                return self.describe_settings(settings)
-            raise ValueError("unknown mode action")
-        if command == "channels":
-            action = option_string(options, "action")
-            if action == "add":
-                channel_id = resolve_command_channel(
-                    interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
-                )
-                settings = self.add_tracked_channel(ctx, interaction.guild_id, channel_id)
-                return self.describe_settings(settings)
-            if action == "remove":
-                channel_id = resolve_command_channel(
-                    interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
-                )
-                settings = self.remove_tracked_channel(ctx, interaction.guild_id, channel_id)
-                return self.describe_settings(settings)
-            if action == "list":
-                settings = self.list_tracked_channels(ctx, interaction.guild_id)
-                return self.describe_settings(settings)
-            if action == "clear":
-                settings = self.clear_tracked_channels(ctx, interaction.guild_id)
-                return self.describe_settings(settings)
-            raise ValueError("unknown channels action")
-        if command == "summary-channel":
-            action = option_string(options, "action")
-            if action == "set":
-                channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_TEXT)
-                settings = self.set_summary_channel(ctx, interaction.guild_id, channel_id)
-                return self.describe_settings(settings)
-            if action == "clear":
-                settings = self.clear_summary_channel(ctx, interaction.guild_id)
-                return self.describe_settings(settings)
-            raise ValueError("unknown summary-channel action")
-        raise ValueError("unknown config command")
+            mode = option_string(options, "mode")
+            if not mode:
+                raise ValueError("mode value is required")
+            settings = self.set_tracking_mode(ctx, interaction.guild_id, mode)
+            return self.describe_settings(settings)
+        if command == "summary-set":
+            channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_TEXT)
+            settings = self.set_summary_channel(ctx, interaction.guild_id, channel_id)
+            return self.describe_settings(settings)
+        if command == "summary-clear":
+            settings = self.clear_summary_channel(ctx, interaction.guild_id)
+            return self.describe_settings(settings)
+        raise ValueError("unknown settings command")
+
+    def handle_track_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        if command == "add":
+            channel_id = resolve_command_channel(
+                interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
+            )
+            settings = self.add_tracked_channel(ctx, interaction.guild_id, channel_id)
+            return self.describe_settings(settings)
+        if command == "remove":
+            channel_id = resolve_command_channel(
+                interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
+            )
+            settings = self.remove_tracked_channel(ctx, interaction.guild_id, channel_id)
+            return self.describe_settings(settings)
+        if command == "list":
+            settings = self.list_tracked_channels(ctx, interaction.guild_id)
+            return self.describe_settings(settings)
+        if command == "clear":
+            settings = self.clear_tracked_channels(ctx, interaction.guild_id)
+            return self.describe_settings(settings)
+        raise ValueError("unknown track command")
+
+    def handle_track_list_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        if command == "clear":
+            settings = self.clear_tracked_channels(ctx, interaction.guild_id)
+            return self.describe_settings(settings)
+        raise ValueError("unknown track-list command")
 
     def handle_inspect_command(
         self,
@@ -438,200 +621,391 @@ class Service:
         command: str,
         options: list[ApplicationCommandInteractionDataOption],
     ) -> str:
-        if command == "settings":
-            settings = self.get_guild_settings(ctx, interaction.guild_id)
-            return self.describe_settings(settings)
-        if command == "sessions":
-            return self.describe_active_sessions(ctx, interaction.guild_id)
-        if command == "session":
-            channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE)
+        if command == "channel":
+            channel_id = resolve_command_channel(
+                interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
+            )
             return self.describe_active_session(ctx, interaction.guild_id, channel_id)
-        if command == VOICE_INSPECT_HISTORY_COMMAND_NAME:
-            channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE)
+        if command == INSPECT_ACTIVE_ALL_COMMAND:
+            return self.describe_active_sessions(ctx, interaction.guild_id)
+        if command == INSPECT_ACTIVE_CHANNEL_COMMAND:
+            channel_id = resolve_command_channel(
+                interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
+            )
+            return self.describe_active_session(ctx, interaction.guild_id, channel_id)
+        if command == INSPECT_HISTORY_ALL_COMMAND:
+            channel_id = resolve_command_channel(
+                interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
+            )
             limit = option_int_in_range(options, "limit", 5, 1, MAX_CLOSED_HISTORY_ITEMS)
             return self.describe_closed_session_history(ctx, interaction.guild_id, channel_id, limit)
-        if command == VOICE_INSPECT_RECENT_SESSION_COMMAND_NAME:
-            channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE)
+        if command == INSPECT_HISTORY_PICK_COMMAND:
+            channel_id = resolve_command_channel(
+                interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
+            )
             pick = option_int_in_range(options, "pick", 1, 1, MAX_CLOSED_HISTORY_ITEMS)
             return self.describe_closed_session_detail(ctx, interaction.guild_id, channel_id, pick)
         raise ValueError("unknown inspect command")
 
+    def handle_jump_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        channel_id = resolve_command_channel(
+            interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
+        )
+        return f"Jump target validated: <#{channel_id}>"
+
+    def handle_autorole_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        role_id = option_role_id(options, "role")
+        if not role_id:
+            raise ValueError("role is required")
+        settings = self.get_guild_settings(ctx, interaction.guild_id)
+        if hasattr(settings, "auto_role_id"):
+            setattr(settings, "auto_role_id", role_id)
+            self._save(ctx, settings)
+        return f"Autorole configured: {_role_mention(role_id)}"
+
+    def handle_dashboard_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        totals = _load_voice_totals(self.repo, ctx, interaction.guild_id)
+        if len(totals) == 0:
+            return "No voice totals yet."
+        lines = ["Voice dashboard"]
+        for index, total in enumerate(totals[:10], start=1):
+            lines.append(f"{index}. {total.user_name or total.user_id}: {format_duration(total.total_for)}")
+        if len(totals) > 10:
+            lines.append(f"+{len(totals) - 10} more users")
+        return "\n".join(lines)
+
+    def handle_userinfo_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        user_id = option_user_id(options, "user") or _interaction_user_id(interaction)
+        if not user_id:
+            raise ValueError("user is required")
+        profile = _load_member_profile(self.repo, ctx, interaction.guild_id, user_id)
+        if profile is None:
+            return f"User: {user_id}\nTotal voice time: 0s"
+        lines = [f"User: {profile.user_name or profile.user_id}", f"Total voice time: {format_duration(profile.total_for)}"]
+        if len(profile.roles) > 0:
+            lines.append(f"Roles: {_truncate_list(profile.roles, 10)}")
+        return "\n".join(lines)
+
+
+def build_dashboard_page(model: Any) -> dict[str, Any]:
+    rows = list(getattr(model, "rows", []) or [])
+    page_rows: list[dict[str, Any]] = []
+    for raw in rows[:10]:
+        rank = getattr(raw, "rank", None)
+        display_name = _sanitize_public_text(str(getattr(raw, "display_name", "") or ""))
+        total_voice_time = str(getattr(raw, "total_voice_time", getattr(raw, "total_for", "")) or "")
+        page_rows.append(
+            {
+                "rank": rank,
+                "display_name": display_name,
+                "total_voice_time": total_voice_time,
+            }
+        )
+    return {
+        "rows": page_rows,
+        "page": int(getattr(model, "page", 1) or 1),
+        "page_size": int(getattr(model, "page_size", 10) or 10),
+    }
+
+
+def build_userinfo_page(model: Any) -> dict[str, Any]:
+    user = getattr(model, "user", None)
+    user_id = str(getattr(user, "id", "") or "")
+    display_name = _sanitize_public_text(str(getattr(user, "display_name", user_id) or user_id))
+    avatar_url = str(getattr(user, "avatar_url", "") or "")
+    safe_roles: list[str] = []
+    for role in list(getattr(model, "roles", []) or []):
+        cleaned = _sanitize_public_text(str(role or ""))
+        if cleaned == "":
+            continue
+        safe_roles.append(cleaned)
+    return {
+        "user": {
+            "id": user_id,
+            "display_name": display_name,
+            "avatar_url": avatar_url,
+        },
+        "roles": safe_roles[:10],
+        "total_voice_time": str(getattr(model, "total_voice_time", "0s") or "0s"),
+    }
+
+
+dashboard_page_builder = build_dashboard_page
+userinfo_page_builder = build_userinfo_page
+BuildDashboardPage = build_dashboard_page
+BuildUserInfoPage = build_userinfo_page
+
+
+def voice_application_commands() -> list[ApplicationCommand]:
+    return [
+        audit_application_command(),
+        bot_setting_application_command(),
+        track_application_command(),
+        track_list_application_command(),
+        jump_application_command(),
+        inspect_application_command(),
+        autorole_application_command(),
+        dashboard_application_command(),
+        userinfo_application_command(),
+    ]
+
 
 def voice_application_command() -> ApplicationCommand:
-    return ApplicationCommand(
-        name=VOICE_COMMAND_NAME,
-        description="Manage tracked voice channels and inspect live and closed sessions",
+    return bot_setting_application_command()
+
+
+def audit_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=AUDIT_COMMAND_NAME,
+        description="Configure the audit channel",
+        options=[
+            _text_channel_option("channel", "Audit text channel"),
+        ],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def bot_setting_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=BOT_SETTING_COMMAND_NAME,
+        description="Show current bot settings",
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def track_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=TRACK_COMMAND_NAME,
+        description="Manage tracked voice channels",
         options=[
             ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND_GROUP,
-                name="config",
-                description="Configure voice tracking",
-                options=[
-                    ApplicationCommandOption(
-                        type=OPTION_TYPE_SUB_COMMAND,
-                        name="mode",
-                        description="Show or set the tracking mode",
-                        options=[
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_STRING,
-                                name="action",
-                                description="show or set",
-                                required=True,
-                                choices=[
-                                    ApplicationCommandOptionChoice(name="show", value="show"),
-                                    ApplicationCommandOptionChoice(name="set", value="set"),
-                                ],
-                            ),
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_STRING,
-                                name="value",
-                                description="all, none, or specific",
-                                choices=[
-                                    ApplicationCommandOptionChoice(name=domain.GUILD_TRACKING_MODE_ALL, value=domain.GUILD_TRACKING_MODE_ALL),
-                                    ApplicationCommandOptionChoice(name=domain.GUILD_TRACKING_MODE_NONE, value=domain.GUILD_TRACKING_MODE_NONE),
-                                    ApplicationCommandOptionChoice(name=domain.GUILD_TRACKING_MODE_SPECIFIC, value=domain.GUILD_TRACKING_MODE_SPECIFIC),
-                                ],
-                            ),
-                        ],
-                    ),
-                    ApplicationCommandOption(
-                        type=OPTION_TYPE_SUB_COMMAND,
-                        name="channels",
-                        description="Manage tracked voice channels",
-                        options=[
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_STRING,
-                                name="action",
-                                description="add, remove, list, or clear",
-                                required=True,
-                                choices=[
-                                    ApplicationCommandOptionChoice(name="add", value="add"),
-                                    ApplicationCommandOptionChoice(name="remove", value="remove"),
-                                    ApplicationCommandOptionChoice(name="list", value="list"),
-                                    ApplicationCommandOptionChoice(name="clear", value="clear"),
-                                ],
-                            ),
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_CHANNEL,
-                                name="channel",
-                                description="Voice channel",
-                                channel_types=[CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE],
-                            ),
-                        ],
-                    ),
-                    ApplicationCommandOption(
-                        type=OPTION_TYPE_SUB_COMMAND,
-                        name="summary-channel",
-                        description="Set or clear the summary destination",
-                        options=[
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_STRING,
-                                name="action",
-                                description="set or clear",
-                                required=True,
-                                choices=[
-                                    ApplicationCommandOptionChoice(name="set", value="set"),
-                                    ApplicationCommandOptionChoice(name="clear", value="clear"),
-                                ],
-                            ),
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_CHANNEL,
-                                name="channel",
-                                description="Destination text channel",
-                                channel_types=[CHANNEL_TYPE_GUILD_TEXT],
-                            ),
-                        ],
-                    ),
-                ],
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="add",
+                description="Add a voice channel to the tracked list",
+                options=[_voice_channel_option("channel", "Voice channel to track")],
             ),
             ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND_GROUP,
-                name="inspect",
-                description="Inspect live and closed voice sessions",
-                options=[
-                    ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="settings", description="Show current settings"),
-                    ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="sessions", description="List active sessions (Admin only)"),
-                    ApplicationCommandOption(
-                        type=OPTION_TYPE_SUB_COMMAND,
-                        name="session",
-                        description="Inspect one active session (Admin only)",
-                        options=[
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_CHANNEL,
-                                name="channel",
-                                description="Tracked voice channel",
-                                required=True,
-                                channel_types=[CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE],
-                            )
-                        ],
-                    ),
-                    ApplicationCommandOption(
-                        type=OPTION_TYPE_SUB_COMMAND,
-                        name=VOICE_INSPECT_HISTORY_COMMAND_NAME,
-                        description="List recent closed sessions for one voice channel",
-                        options=[
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_CHANNEL,
-                                name="channel",
-                                description="Voice channel to inspect",
-                                required=True,
-                                channel_types=[CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE],
-                            ),
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_INTEGER,
-                                name="limit",
-                                description="How many closed sessions to show (1-10)",
-                            ),
-                        ],
-                    ),
-                    ApplicationCommandOption(
-                        type=OPTION_TYPE_SUB_COMMAND,
-                        name=VOICE_INSPECT_RECENT_SESSION_COMMAND_NAME,
-                        description="Inspect one recent closed session for a voice channel",
-                        options=[
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_CHANNEL,
-                                name="channel",
-                                description="Voice channel to inspect",
-                                required=True,
-                                channel_types=[CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE],
-                            ),
-                            ApplicationCommandOption(
-                                type=OPTION_TYPE_INTEGER,
-                                name="pick",
-                                description="Which recent closed session to inspect (1-10)",
-                            ),
-                        ],
-                    ),
-                ],
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="remove",
+                description="Remove a voice channel from the tracked list",
+                options=[_voice_channel_option("channel", "Voice channel to stop tracking")],
             ),
+            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="list", description="List tracked voice channels"),
+        ],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def track_list_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=TRACK_LIST_COMMAND_NAME,
+        description="Manage tracked voice channel lists",
+        options=[
+            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="clear", description="Clear tracked voice channels"),
+        ],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def jump_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=JUMP_COMMAND_NAME,
+        description="Move yourself to a visible voice channel",
+        options=[_voice_channel_option("channel", "Voice channel to join")],
+    )
+
+
+def inspect_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=INSPECT_COMMAND_NAME,
+        description="Inspect one voice channel",
+        options=[
+            _voice_channel_option("channel", "Voice channel to inspect"),
+        ],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def autorole_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=AUTOROLE_COMMAND_NAME,
+        description="Configure the guild autorole",
+        options=[_role_option("role", "Role to assign when members join")],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def dashboard_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=DASHBOARD_COMMAND_NAME,
+        description="Show voice-time leaderboard",
+    )
+
+
+def userinfo_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=USERINFO_COMMAND_NAME,
+        description="Show a member's voice-time summary",
+        options=[_user_option("user", "Member to inspect")],
+    )
+
+
+def settings_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=LEGACY_SETTINGS_COMMAND_NAME,
+        description="Show or change voice tracker settings",
+        options=[
+            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="show", description="Show current settings"),
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="mode",
+                description="Set which voice channels are tracked",
+                options=[_tracking_mode_option()],
+            ),
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="summary-set",
+                description="Set the text channel for session summaries",
+                options=[_text_channel_option("channel", "Summary text channel")],
+            ),
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="summary-clear",
+                description="Use the last command channel for summaries",
+            ),
+        ],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def _voice_channel_option(name: str, description: str) -> ApplicationCommandOption:
+    return ApplicationCommandOption(
+        type=OPTION_TYPE_CHANNEL,
+        name=name,
+        description=description,
+        required=True,
+        channel_types=[CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE],
+    )
+
+
+def _text_channel_option(name: str, description: str) -> ApplicationCommandOption:
+    return ApplicationCommandOption(
+        type=OPTION_TYPE_CHANNEL,
+        name=name,
+        description=description,
+        required=True,
+        channel_types=[CHANNEL_TYPE_GUILD_TEXT],
+    )
+
+
+def _role_option(name: str, description: str) -> ApplicationCommandOption:
+    return ApplicationCommandOption(type=OPTION_TYPE_ROLE, name=name, description=description, required=True)
+
+
+def _user_option(name: str, description: str) -> ApplicationCommandOption:
+    return ApplicationCommandOption(type=OPTION_TYPE_USER, name=name, description=description, required=True)
+
+
+def _tracking_mode_option() -> ApplicationCommandOption:
+    return ApplicationCommandOption(
+        type=OPTION_TYPE_STRING,
+        name="mode",
+        description="all, none, or specific",
+        required=True,
+        choices=[
+            ApplicationCommandOptionChoice(name=domain.GUILD_TRACKING_MODE_ALL, value=domain.GUILD_TRACKING_MODE_ALL),
+            ApplicationCommandOptionChoice(name=domain.GUILD_TRACKING_MODE_NONE, value=domain.GUILD_TRACKING_MODE_NONE),
+            ApplicationCommandOptionChoice(name=domain.GUILD_TRACKING_MODE_SPECIFIC, value=domain.GUILD_TRACKING_MODE_SPECIFIC),
         ],
     )
 
 
 def parse_voice_route(
+    data: Any,
+) -> tuple[str, str, list[ApplicationCommandInteractionDataOption]]:
+    if isinstance(data, list):
+        return _parse_nested_route("", data)
+    name = str(getattr(data, "name", "")).strip()
+    return _parse_nested_route(name, list(getattr(data, "options", []) or []))
+
+
+def _parse_nested_route(
+    root: str,
     options: list[ApplicationCommandInteractionDataOption],
 ) -> tuple[str, str, list[ApplicationCommandInteractionDataOption]]:
     if len(options) == 0:
-        return "", "", []
-    group_opt = options[0]
-    group = group_opt.name
-    if len(group_opt.options) == 0:
-        return group, "", []
-    command_opt = group_opt.options[0]
-    return group, command_opt.name, list(command_opt.options)
+        return root, "", []
+    first = options[0]
+    if not _is_subcommand_group(first):
+        return root, first.name, list(first.options)
+    if len(first.options) == 0:
+        return root, first.name, []
+    second = first.options[0]
+    return root, f"{first.name}.{second.name}", list(second.options)
+
+
+def _is_subcommand_group(option: ApplicationCommandInteractionDataOption) -> bool:
+    return _option_type_value(option.type) == _option_type_value(OPTION_TYPE_SUB_COMMAND_GROUP)
+
+
+def _option_type_value(value: Any) -> Any:
+    if hasattr(value, "value") and not isinstance(value, (str, bytes, bytearray)):
+        value = value.value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("utf-8", errors="ignore")
+    return {"subcommand": 1, "subcommand_group": 2}.get(str(value), value)
 
 
 def can_use_voice_command(
-    interaction: InteractionCreate | None, bot_admin_user_ids: list[str], group: str, command: str
+    interaction: InteractionCreate | None, bot_admin_user_ids: list[str], root: str, command: str
 ) -> bool:
-    if botauth.is_allowlisted(interaction, bot_admin_user_ids):
+    policy = command_policy(root, command)
+    if policy is None:
+        return False
+    if policy.access_class == COMMAND_ACCESS_ALL_USER:
         return True
-    if group == "inspect" and (command == "sessions" or command == "session"):
-        return has_administrator_permissions(interaction)
-    if group == "inspect" and (command == VOICE_INSPECT_HISTORY_COMMAND_NAME or command == VOICE_INSPECT_RECENT_SESSION_COMMAND_NAME):
-        return has_administrator_permissions(interaction)
-    return has_manage_permissions(interaction)
+    return has_administrator_permissions(interaction)
+
+
+def command_policy(root: str, command: str) -> CommandPolicy | None:
+    root = (root or "").strip()
+    command = (command or "").strip()
+    policy = COMMAND_POLICIES.get((root, command))
+    if policy is not None:
+        return policy
+    policy = COMMAND_POLICIES.get((root, ""))
+    if policy is not None:
+        return policy
+    root_policies = [item for (policy_root, _), item in COMMAND_POLICIES.items() if policy_root == root]
+    if len(root_policies) == 1:
+        return root_policies[0]
+    return None
 
 
 def option_string(options: list[ApplicationCommandInteractionDataOption], name: str) -> str:
@@ -642,6 +1016,14 @@ def option_string(options: list[ApplicationCommandInteractionDataOption], name: 
 
 
 def option_channel_id(options: list[ApplicationCommandInteractionDataOption], name: str) -> str:
+    return option_string(options, name)
+
+
+def option_role_id(options: list[ApplicationCommandInteractionDataOption], name: str) -> str:
+    return option_string(options, name)
+
+
+def option_user_id(options: list[ApplicationCommandInteractionDataOption], name: str) -> str:
     return option_string(options, name)
 
 
@@ -701,7 +1083,9 @@ def channel_type_allowed(channel_type: str, *allowed_types: str) -> bool:
 def _channel_type_value(value: Any) -> Any:
     if hasattr(value, "value") and not isinstance(value, (str, bytes, bytearray)):
         return value.value
-    return {"guild_text": 0, "guild_voice": 2, "guild_stage_voice": 13}.get(value, value)
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("utf-8", errors="ignore")
+    return {"guild_text": 0, "guild_voice": 2, "guild_stage_voice": 13}.get(str(value), value)
 
 
 def has_manage_permissions(interaction: InteractionCreate | None) -> bool:
@@ -774,11 +1158,171 @@ def _channel_mention(channel_id: str) -> str:
 
 
 def _time_or_zero(value: datetime | None) -> datetime:
-    return value
+    return value if value is not None else datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _time_sort_key(value: datetime | None) -> datetime:
     return value if value is not None else datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _optional_setting(settings: Any, name: str, default: str) -> str:
+    value = getattr(settings, name, default)
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _role_mention(role_id: str) -> str:
+    role_id = (role_id or "").strip()
+    if not role_id:
+        return ""
+    return f"<@&{role_id}>"
+
+
+def _interaction_user_id(interaction: InteractionCreate) -> str:
+    if interaction.member is not None and interaction.member.user is not None:
+        return str(interaction.member.user.id).strip()
+    if interaction.user is not None:
+        return str(interaction.user.id).strip()
+    return ""
+
+
+def _sanitize_public_text(value: str) -> str:
+    text = str(value or "")
+    for token in ("@everyone", "@here"):
+        text = text.replace(token, "")
+    text = _strip_discord_mentions(text)
+    text = " ".join(text.split())
+    return text.strip()
+
+
+def _strip_discord_mentions(text: str) -> str:
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "<":
+            end = text.find(">", index + 1)
+            if end != -1 and text[index + 1 : end + 1].startswith("@"):
+                index = end + 1
+                continue
+        out.append(text[index])
+        index += 1
+    return "".join(out)
+
+
+def _truncate_list(values: list[str], limit: int) -> str:
+    cleaned = [str(value).strip() for value in values if str(value).strip()]
+    if len(cleaned) <= limit:
+        return ", ".join(cleaned)
+    return ", ".join(cleaned[:limit]) + f", +{len(cleaned) - limit} more"
+
+
+def get_bot_version() -> str:
+    try:
+        return importlib_metadata.version("voice-tracker")
+    except importlib_metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _load_voice_totals(repo: Any, ctx: Any, guild_id: str) -> list[VoiceTotalView]:
+    if repo is None:
+        return []
+    loader = getattr(repo, "list_voice_totals_by_guild", None)
+    if callable(loader):
+        rows = loader(ctx, guild_id)
+        return [_voice_total_from_row(row) for row in rows]
+    participants_loader = getattr(repo, "list_participants_by_guild", None)
+    if callable(participants_loader):
+        rows = participants_loader(ctx, guild_id)
+        totals: dict[str, VoiceTotalView] = {}
+        for row in rows:
+            if getattr(row, "guild_id", "") != guild_id:
+                continue
+            total = totals.get(row.user_id)
+            if total is None:
+                total = VoiceTotalView(row.user_id, getattr(row, "user_name", "") or row.user_id, timedelta())
+                totals[row.user_id] = total
+            duration_ms = int(getattr(row, "duration_ms", 0) or 0)
+            if duration_ms < 0:
+                duration_ms = 0
+            total.total_for += timedelta(milliseconds=duration_ms)
+        ordered = list(totals.values())
+        ordered.sort(key=lambda item: (-item.total_for.total_seconds(), item.user_name, item.user_id))
+        return ordered
+    return []
+
+
+def _voice_total_from_row(row: Any) -> VoiceTotalView:
+    if isinstance(row, VoiceTotalView):
+        return row
+    if isinstance(row, dict):
+        return VoiceTotalView(
+            user_id=str(row.get("user_id") or row.get("userId") or "").strip(),
+            user_name=str(row.get("user_name") or row.get("userName") or "").strip(),
+            total_for=_timedelta_from_value(row.get("total_for") or row.get("totalFor") or row.get("total_time") or row.get("totalTime") or 0),
+            role_names=[str(role).strip() for role in row.get("role_names") or row.get("roleNames") or [] if str(role).strip()],
+        )
+    return VoiceTotalView(
+        user_id=str(getattr(row, "user_id", getattr(row, "userId", ""))).strip(),
+        user_name=str(getattr(row, "user_name", getattr(row, "userName", ""))).strip(),
+        total_for=_timedelta_from_value(getattr(row, "total_for", getattr(row, "totalFor", getattr(row, "total_time", getattr(row, "totalTime", 0))))),
+        role_names=[str(role).strip() for role in getattr(row, "role_names", getattr(row, "roleNames", [])) if str(role).strip()],
+    )
+
+
+def _timedelta_from_value(value: Any) -> timedelta:
+    if isinstance(value, timedelta):
+        return value
+    if isinstance(value, (int, float)):
+        return timedelta(milliseconds=int(value))
+    return timedelta()
+
+
+def _load_member_profile(repo: Any, ctx: Any, guild_id: str, user_id: str) -> MemberProfileView | None:
+    if repo is None:
+        return None
+    loader = getattr(repo, "get_member_profile", None)
+    if callable(loader):
+        row = loader(ctx, guild_id, user_id)
+        if row is None:
+            return None
+        return _member_profile_from_row(row, user_id)
+    loader = getattr(repo, "get_user_voice_summary", None)
+    if callable(loader):
+        row = loader(ctx, guild_id, user_id)
+        if row is None:
+            return None
+        return _member_profile_from_row(row, user_id)
+    totals_loader = getattr(repo, "list_voice_totals_by_guild", None)
+    if callable(totals_loader):
+        for row in totals_loader(ctx, guild_id):
+            profile = _member_profile_from_row(row, user_id)
+            if profile is not None:
+                return profile
+    return None
+
+
+def _member_profile_from_row(row: Any, default_user_id: str) -> MemberProfileView | None:
+    if isinstance(row, dict):
+        user_id = str(row.get("user_id") or row.get("userId") or default_user_id).strip()
+        if user_id != default_user_id:
+            return None
+        return MemberProfileView(
+            user_id=user_id,
+            user_name=str(row.get("user_name") or row.get("userName") or "").strip(),
+            total_for=_timedelta_from_value(row.get("total_for") or row.get("totalFor") or row.get("total_time") or row.get("totalTime") or 0),
+            roles=[str(role).strip() for role in row.get("roles") or row.get("role_names") or row.get("roleNames") or [] if str(role).strip()],
+        )
+    user_id = str(getattr(row, "user_id", getattr(row, "userId", default_user_id))).strip()
+    if user_id != default_user_id:
+        return None
+    return MemberProfileView(
+        user_id=user_id,
+        user_name=str(getattr(row, "user_name", getattr(row, "userName", ""))).strip(),
+        total_for=_timedelta_from_value(getattr(row, "total_for", getattr(row, "totalFor", getattr(row, "total_time", getattr(row, "totalTime", 0))))),
+        roles=[str(role).strip() for role in getattr(row, "roles", getattr(row, "role_names", getattr(row, "roleNames", []))) if str(role).strip()],
+    )
+
+
 VoiceApplicationCommand = voice_application_command
+VoiceApplicationCommands = voice_application_commands

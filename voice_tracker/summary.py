@@ -54,10 +54,10 @@ class Service:
         participants = self.repo.ListParticipantsBySession(event.session_id)
         summary = BuildSummary(session, participants, event.ended_by_user_id)
         settings = self.repo.GetGuildSettings(event.guild_id)
-        if settings is None or settings.summary_channel_id == "":
+        destination = "" if settings is None else settings.summary_destination("")
+        if destination == "":
             raise ValueError("summary channel not configured")
 
-        destination = settings.summary_destination("")
         message = FormatSummary(summary)
         ready_at = datetime.now(UTC)
         self.repo.MarkSessionSummaryReady(session.id, destination, message, ready_at)
@@ -93,10 +93,10 @@ class Service:
             raise ValueError("session mismatch for summary event")
         summary = BuildSummary(session, participants, event.ended_by_user_id)
         settings = self.repo.GetGuildSettings(event.guild_id)
-        if settings is None or settings.summary_channel_id == "":
+        destination = "" if settings is None else settings.summary_destination("")
+        if destination == "":
             raise ValueError("summary channel not configured")
 
-        destination = settings.summary_destination("")
         message = FormatSummary(summary)
         ready_at = datetime.now(UTC)
         self.repo.MarkSessionSummaryReady(session.id, destination, message, ready_at)
