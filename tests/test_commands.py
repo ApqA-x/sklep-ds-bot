@@ -151,6 +151,14 @@ def test_parse_voice_route() -> None:
     )
     assert (root, command, len(opts)) == ("settings", "mode", 1)
 
+    root, command, opts = parse_voice_route(
+        ApplicationCommandInteractionData(
+            name="audit",
+            options=[ApplicationCommandInteractionDataOption(name="channel", type="channel", value="t1")],
+        )
+    )
+    assert (root, command, len(opts), opts[0].name, opts[0].value) == ("audit", "", 1, "channel", "t1")
+
 
 def test_parse_voice_route_accepts_numeric_discord_types() -> None:
     root, command, opts = parse_voice_route(
@@ -232,7 +240,8 @@ def test_handle_track_add_and_clear() -> None:
 
     content = svc.handle_track_command(None, interaction, "add", [option("channel", "c1")])
     assert "tracking mode: all" in content
-    assert "stored channels: <#c1>" in content
+    assert "tracked channels: all voice channels" in content
+    assert "stored channels:" not in content
 
     repo.settings["g1"] = domain.new_guild_settings("g1", domain.GUILD_TRACKING_MODE_SPECIFIC, ["c1", "c2"], "")
     content = svc.handle_track_command(None, interaction, "clear", [])

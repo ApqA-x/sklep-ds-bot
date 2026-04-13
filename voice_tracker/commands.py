@@ -294,8 +294,6 @@ class Service:
         autorole_id = _optional_setting(settings, "auto_role_id", _optional_setting(settings, "autoRoleId", ""))
         autorole = _role_mention(autorole_id) if autorole_id else "not set"
         lines = [f"tracking mode: {mode}", f"tracked channels: {tracked}"]
-        if stored and stored != tracked:
-            lines.append(f"stored channels: {stored}")
         lines.append(f"audit channel: {summary_channel}")
         lines.append(f"autorole: {autorole}")
         created_at = format_time(settings.created_at)
@@ -961,15 +959,21 @@ def _parse_nested_route(
         return root, "", []
     first = options[0]
     if not _is_subcommand_group(first):
-        return root, first.name, list(first.options)
+        if _is_subcommand(first):
+            return root, first.name, list(first.options)
+        return root, "", list(options)
     if len(first.options) == 0:
-        return root, first.name, []
+        return root, "", []
     second = first.options[0]
     return root, f"{first.name}.{second.name}", list(second.options)
 
 
 def _is_subcommand_group(option: ApplicationCommandInteractionDataOption) -> bool:
     return _option_type_value(option.type) == _option_type_value(OPTION_TYPE_SUB_COMMAND_GROUP)
+
+
+def _is_subcommand(option: ApplicationCommandInteractionDataOption) -> bool:
+    return _option_type_value(option.type) == _option_type_value(OPTION_TYPE_SUB_COMMAND)
 
 
 def _option_type_value(value: Any) -> Any:

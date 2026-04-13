@@ -12,7 +12,7 @@ from voice_tracker.bus import Bus
 from voice_tracker import domain
 from voice_tracker.gateway import Service as GatewayService, summary_from_payload
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import load_config, require_event_signing_secret
+from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
 
 
 SUMMARY_EMBED_COLOR = 0x5865F2
@@ -44,6 +44,12 @@ async def _deliver_pending(client: discord.Client, repo: Repository) -> None:
         try:
             await _send_summary(client, session.summary_channel_id, session.summary_message)
         except Exception:
+            logger.exception(
+                "pending summary delivery failed session_id=%s guild_id=%s channel_id=%s",
+                session.id,
+                session.guild_id,
+                session.summary_channel_id,
+            )
             repo.release_session_summary_delivery_claim(None, session.id)
             continue
         repo.mark_session_summary_delivered(None, session.id, datetime.now(UTC))
@@ -119,10 +125,12 @@ def _autorole_is_safe(role: discord.Role, bot_member: discord.Member) -> bool:
 
 
 async def main() -> None:
+    configure_logging("gateway")
     cfg = load_config()
     if cfg.discord_token == "":
         raise SystemExit("DISCORD_TOKEN is required")
     require_event_signing_secret(cfg.event_signing_secret)
+    logger.info("gateway service starting guild=%s", cfg.discord_guild_id)
 
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
@@ -190,6 +198,13 @@ async def main() -> None:
             return
         repo.release_session_summary_delivery_claim(None, event.session_id)
         if last_error is not None:
+            logger.exception(
+                "summary delivery failed after retries session_id=%s guild_id=%s channel_id=%s",
+                event.session_id,
+                event.guild_id,
+                event.channel_id,
+                exc_info=last_error,
+            )
             raise last_error
 
     await bus.subscribe(None, domain.SUBJECT_SUMMARY_READY, repo, handle_summary)

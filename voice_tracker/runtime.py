@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from os import environ
 from typing import Any
 
@@ -36,6 +37,30 @@ def parse_user_ids(raw: str | None) -> list[str]:
         seen.add(token)
         user_ids.append(token)
     return user_ids
+
+
+def configure_logging(service_name: str = "", env: Any = None) -> None:
+    source = environ if env is None else env
+    requested_level = _clean(source.get("LOG_LEVEL", "INFO")).upper()
+    level = getattr(logging, requested_level, None)
+    if not isinstance(level, int):
+        requested_level = "INFO"
+        level = logging.INFO
+
+    root_logger = logging.getLogger()
+    if len(root_logger.handlers) == 0:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        )
+    else:
+        root_logger.setLevel(level)
+
+    logging.getLogger(__name__).info(
+        "logging configured service=%s level=%s",
+        service_name or "unknown",
+        requested_level,
+    )
 
 
 @dataclass(slots=True)

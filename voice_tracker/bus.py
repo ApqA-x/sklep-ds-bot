@@ -145,7 +145,7 @@ class Bus:
             try:
                 env, payload = decode_envelope(self.secret, subject, data)
             except Exception as exc:
-                logger.error("nats envelope error subject=%s: %s", subject, exc)
+                logger.warning("nats envelope error subject=%s: %s", subject, exc)
                 return
 
             if deduper is not None:
@@ -153,8 +153,8 @@ class Bus:
                     claimed = deduper.claim_message(ctx, subject, env.message_id, env.issuer, env.issued_at)
                     if inspect.isawaitable(claimed):
                         claimed = await claimed
-                except Exception as exc:
-                    logger.error("nats claim error subject=%s id=%s: %s", subject, env.message_id, exc)
+                except Exception:
+                    logger.exception("nats claim error subject=%s id=%s", subject, env.message_id)
                     return
                 if not claimed:
                     logger.info("nats duplicate dropped subject=%s id=%s", subject, env.message_id)
@@ -167,8 +167,8 @@ class Bus:
                 result = handler(payload)
                 if inspect.isawaitable(result):
                     await result
-            except Exception as exc:
-                logger.error("nats handler error subject=%s: %s", subject, exc)
+            except Exception:
+                logger.exception("nats handler error subject=%s id=%s", subject, env.message_id)
 
         subscribe = getattr(self.conn, "subscribe", None)
         if not callable(subscribe):

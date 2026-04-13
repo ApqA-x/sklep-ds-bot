@@ -21,7 +21,7 @@ from voice_tracker.discord_models import (
     User,
 )
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import load_config, register_commands_http
+from voice_tracker.runtime import configure_logging, load_config, register_commands_http
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ def _build_client(token: str) -> discord.Client:
 
 
 async def main() -> None:
+    configure_logging("commands")
     cfg = load_config()
     if cfg.discord_token == "":
         raise SystemExit("DISCORD_TOKEN is required")
@@ -56,7 +57,7 @@ async def main() -> None:
     if cfg.discord_guild_id == "":
         raise SystemExit("DISCORD_GUILD_ID is required")
 
-    print(f"commands service starting guild={cfg.discord_guild_id}")
+    logger.info("commands service starting guild=%s", cfg.discord_guild_id)
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
     repo.ensure_indexes(None)
@@ -74,13 +75,20 @@ async def main() -> None:
             return
         model = _interaction_model(interaction)
         root, command, options = parse_voice_route(model.application_command_data())
+        context = _command_context(interaction, root, command, options)
+        logger.info("command received %s", context)
         try:
-            content = await _dispatch_command(client, service, interaction, model, root, command, options, cfg.bot_admin_user_ids)
+            result = await _dispatch_command(client, service, interaction, model, root, command, options, cfg.bot_admin_user_ids)
         except ValueError as exc:
-            content = str(exc)
+            logger.warning("command rejected %s error=%s", context, exc)
+            result = str(exc)
         except Exception:
-            logger.exception("command failed")
-            content = "Command failed. Check service logs."
+            logger.exception("command failed %s", context)
+            result = "Command failed. Check service logs."
+        if isinstance(result, discord.Embed):
+            await interaction.response.send_message(embed=result, ephemeral=True)
+            return
+        content = result
         if content == "":
             content = "Done."
         embed = discord.Embed(title="Voice Tracker", description=content, color=0x5865F2)
@@ -89,7 +97,11 @@ async def main() -> None:
     await client.login(cfg.discord_token)
     try:
         await register_commands_http(cfg.discord_token, cfg.discord_application_id, cfg.discord_guild_id, registered_commands)
-        print(f"application commands registered count={len(registered_commands)} guild={cfg.discord_guild_id}")
+        logger.info(
+            "application commands registered count=%s guild=%s",
+            len(registered_commands),
+            cfg.discord_guild_id,
+        )
         await client.connect()
     finally:
         await client.close()
@@ -156,7 +168,7 @@ async def _dispatch_command(
     command: str,
     options: list[ApplicationCommandInteractionDataOption],
     bot_admin_user_ids: list[str],
-) -> str:
+) -> str | discord.Embed:
     if root == "audit":
         if not _is_admin_only(model):
             return "Insufficient permissions."
@@ -178,7 +190,7 @@ async def _dispatch_command(
     if root == "dashboard":
         return await _dispatch_service_method(service, "handle_dashboard_command", model, command, options)
     if root == "userinfo":
-        return await _dispatch_service_method(service, "handle_userinfo_command", model, command, options)
+        return await _dispatch_userinfo_command(client, interaction, options)
     if root == "track":
         if command in {"add", "remove", "list"}:
             if not _is_admin_only(model):
@@ -192,6 +204,7 @@ async def _dispatch_command(
         return _dispatch_inspect_channel_command(service, model, options)
     if root in {"settings", "inspect"} or (root == "track" and command == "clear"):
         return _dispatch_legacy_voice_command(service, model, root, command, options, bot_admin_user_ids)
+    logger.warning("unknown command route %s", _command_context(interaction, root, command, options))
     return "Unknown command."
 
 
@@ -326,6 +339,52 @@ async def _dispatch_jump_command(
     return f"Moved you to {target.mention}."
 
 
+async def _dispatch_userinfo_command(
+    client: discord.Client,
+    interaction: discord.Interaction,
+    options: list[ApplicationCommandInteractionDataOption],
+) -> discord.Embed:
+    guild = getattr(interaction, "guild", None)
+    if guild is None:
+        raise ValueError("guild is required")
+    requested_user_id = _option_string(options, "user")
+    fallback_user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+    user_id = requested_user_id or fallback_user_id
+    if user_id == "":
+        raise ValueError("user is required")
+    member = await _resolve_member_by_id(guild, user_id)
+    fetched_user = await _fetch_user_by_id(client, user_id)
+    display_name = _userinfo_display_name(member, fetched_user, user_id)
+    username = _userinfo_username(member, fetched_user, user_id)
+    nickname = _userinfo_nickname(member)
+    status_label = _userinfo_status(member)
+    joined_at = _format_discord_datetime(getattr(member, "joined_at", None))
+    created_at = _format_discord_datetime(_userinfo_created_at(member, fetched_user))
+    avatar_url = _userinfo_avatar_url(member, fetched_user)
+    banner_url = _userinfo_banner_url(member, fetched_user)
+    lines = [
+        f"User ID: `{user_id}`",
+        f"Username: {username}",
+        f"Nickname: {nickname}",
+        f"Status: {status_label}",
+        f"Joined at: {joined_at}",
+        f"Registered at: {created_at}",
+    ]
+    if avatar_url:
+        lines.append(f"Avatar: [open]({avatar_url})")
+    if banner_url:
+        lines.append(f"Banner: [open]({banner_url})")
+    else:
+        lines.append("Banner: not set")
+    embed = discord.Embed(title=f"Information about {display_name}", description="\n".join(lines), color=0x5865F2)
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+    if banner_url:
+        embed.set_image(url=banner_url)
+    embed.set_footer(text="Voice Tracker")
+    return embed
+
+
 async def _dispatch_service_method(
     service: VoiceService,
     method_name: str,
@@ -347,6 +406,41 @@ def _option_string(options: list[ApplicationCommandInteractionDataOption], name:
         if option.name == name and isinstance(option.value, str):
             return option.value.strip()
     return ""
+
+
+def _command_context(
+    interaction: discord.Interaction,
+    root: str,
+    command: str,
+    options: list[ApplicationCommandInteractionDataOption],
+) -> str:
+    interaction_id = str(getattr(interaction, "id", "") or "-")
+    guild_id = str(getattr(interaction, "guild_id", "") or "-")
+    channel_id = str(getattr(interaction, "channel_id", "") or "-")
+    user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "-")
+    option_summary = _options_summary(options)
+    return (
+        f"interaction_id={interaction_id} guild_id={guild_id} channel_id={channel_id} "
+        f"user_id={user_id} root={root or '-'} command={command or '-'} options={option_summary}"
+    )
+
+
+def _options_summary(options: list[ApplicationCommandInteractionDataOption]) -> str:
+    if len(options) == 0:
+        return "[]"
+    return "[" + ", ".join(_option_summary(option) for option in options) + "]"
+
+
+def _option_summary(option: ApplicationCommandInteractionDataOption) -> str:
+    if len(option.options) > 0:
+        return f"{option.name}={_options_summary(option.options)}"
+    value = option.value
+    if value is None:
+        return f"{option.name}=<none>"
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    if len(text) > 64:
+        text = text[:61] + "..."
+    return f"{option.name}={text!r}"
 
 
 def _is_admin_only(model: InteractionCreate) -> bool:
@@ -477,6 +571,113 @@ def _maybe_int(value: str) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+async def _resolve_member_by_id(guild: discord.Guild, user_id: str) -> discord.Member | None:
+    snowflake = _maybe_int(user_id)
+    if snowflake is None:
+        return None
+    cached = guild.get_member(snowflake)
+    if cached is not None:
+        return cached
+    try:
+        return await guild.fetch_member(snowflake)
+    except Exception:
+        return None
+
+
+async def _fetch_user_by_id(client: discord.Client, user_id: str) -> discord.User | None:
+    snowflake = _maybe_int(user_id)
+    if snowflake is None:
+        return None
+    cached = client.get_user(snowflake)
+    if cached is not None:
+        return cached
+    try:
+        return await client.fetch_user(snowflake)
+    except Exception:
+        return None
+
+
+def _userinfo_display_name(member: discord.Member | None, user: discord.User | None, fallback_user_id: str) -> str:
+    if member is not None:
+        return str(member.display_name or member.name or fallback_user_id)
+    if user is not None:
+        return str(user.display_name or user.name or fallback_user_id)
+    return fallback_user_id
+
+
+def _userinfo_username(member: discord.Member | None, user: discord.User | None, fallback_user_id: str) -> str:
+    source = member if member is not None else user
+    if source is None:
+        return fallback_user_id
+    username = str(getattr(source, "name", "") or "").strip()
+    if username == "":
+        return fallback_user_id
+    global_name = str(getattr(source, "global_name", "") or "").strip()
+    if global_name and global_name != username:
+        return f"{username} ({global_name})"
+    return username
+
+
+def _userinfo_nickname(member: discord.Member | None) -> str:
+    if member is None:
+        return "not set"
+    nickname = str(getattr(member, "nick", "") or "").strip()
+    if nickname == "":
+        return "not set"
+    return nickname
+
+
+def _userinfo_status(member: discord.Member | None) -> str:
+    if member is None:
+        return "Unknown"
+    status_key = str(getattr(member, "status", "unknown"))
+    labels = {
+        "online": "🟢 Online",
+        "idle": "🟡 Idle",
+        "dnd": "🔴 Do Not Disturb",
+        "offline": "⚫ Offline",
+        "invisible": "⚫ Invisible",
+    }
+    return labels.get(status_key, status_key.title())
+
+
+def _userinfo_created_at(member: discord.Member | None, user: discord.User | None) -> datetime | None:
+    if user is not None and getattr(user, "created_at", None) is not None:
+        return user.created_at
+    if member is not None:
+        return getattr(member, "created_at", None)
+    return None
+
+
+def _userinfo_avatar_url(member: discord.Member | None, user: discord.User | None) -> str:
+    if member is not None and getattr(member, "display_avatar", None) is not None:
+        return str(member.display_avatar.url)
+    if user is not None and getattr(user, "display_avatar", None) is not None:
+        return str(user.display_avatar.url)
+    return ""
+
+
+def _userinfo_banner_url(member: discord.Member | None, user: discord.User | None) -> str:
+    if member is not None:
+        member_banner = getattr(member, "display_banner", None)
+        if member_banner is not None:
+            return str(member_banner.url)
+    if user is not None:
+        user_banner = getattr(user, "banner", None)
+        if user_banner is not None:
+            return str(user_banner.url)
+    return ""
+
+
+def _format_discord_datetime(value: datetime | None) -> str:
+    if value is None:
+        return "unknown"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    unix_ts = int(value.timestamp())
+    return f"<t:{unix_ts}:F> (<t:{unix_ts}:R>)"
 
 
 def _public_command_payloads() -> list[dict[str, object]]:
