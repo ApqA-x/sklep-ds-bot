@@ -66,6 +66,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Repository name lowercase
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -74,8 +78,8 @@ jobs:
           push: true
           build-args: SERVICE=${{ matrix.service }}
           tags: |
-            ghcr.io/${{ github.repository }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha }}
-            ghcr.io/${{ github.repository }}/${{ matrix.service }}:v${{ needs.version.outputs.new_version }}
+            ghcr.io/${{ steps.repo.outputs.name }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha }}
+            ghcr.io/${{ steps.repo.outputs.name }}/${{ matrix.service }}:v${{ needs.version.outputs.new_version }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
