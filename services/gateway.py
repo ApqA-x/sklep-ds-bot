@@ -195,7 +195,7 @@ async def main() -> None:
             return
         if getattr(member, "bot", False):
             return
-        if before.mute is True or after.mute is not True:
+        if not after.mute:
             return
         user_id = str(member.id)
         auto_unmute_ids = _auto_unmute_user_ids_for_guild(repo, str(member.guild.id))

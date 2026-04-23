@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: voice-tracker
+Version: 0.1.0
+Summary: Modular Discord voice-session tracker built with Python, MongoDB, and NATS.
+Requires-Python: >=3.11
+Requires-Dist: aiohttp<4,>=3.9
+Requires-Dist: discord.py<3,>=2.3
+Requires-Dist: nats-py<3,>=2.7
+Requires-Dist: pymongo<5,>=4.6
+Provides-Extra: test
+Requires-Dist: pytest<9,>=8; extra == "test"
+Requires-Dist: pytest-asyncio<1,>=0.23; extra == "test"
