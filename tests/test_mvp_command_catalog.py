@@ -22,6 +22,7 @@ TARGET_TOP_LEVEL_COMMAND_NAMES = {
     "jump",
     "inspect",
     "autorole",
+    "unmute",
     "dashboard",
     "userinfo",
 }

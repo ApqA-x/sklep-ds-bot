@@ -73,6 +73,7 @@ def test_default_commands_match_mvp_catalog() -> None:
         "jump",
         "inspect",
         "autorole",
+        "unmute",
         "dashboard",
         "userinfo",
     ]

@@ -34,6 +34,7 @@ TARGET_COMMAND_NAMES = {
     "jump",
     "inspect",
     "autorole",
+    "unmute",
     "dashboard",
     "userinfo",
 }
@@ -187,6 +188,10 @@ async def _dispatch_command(
         if not _is_admin_only(model):
             return "Insufficient permissions."
         return await _dispatch_autorole_command(service, interaction, model, options)
+    if root == "unmute":
+        if not _is_admin_only(model):
+            return "Insufficient permissions."
+        return _dispatch_unmute_command(service, model, command, options)
     if root == "dashboard":
         return await _dispatch_service_method(service, "handle_dashboard_command", model, command, options)
     if root == "userinfo":
@@ -236,6 +241,17 @@ def _dispatch_track_command(
     if command == "remove":
         return service.handle_track_command(None, model, "remove", options)
     return service.handle_track_command(None, model, "list", options)
+
+
+def _dispatch_unmute_command(
+    service: VoiceService,
+    model: InteractionCreate,
+    command: str,
+    options: list[ApplicationCommandInteractionDataOption],
+) -> str:
+    if command not in {"add", "remove", "list"}:
+        return "Unknown unmute command."
+    return service.handle_unmute_command(None, model, command, options)
 
 
 def _dispatch_track_list_command(

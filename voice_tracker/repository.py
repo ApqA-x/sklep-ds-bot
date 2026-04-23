@@ -105,6 +105,7 @@ class Repository:
                     "summaryChannelId": settings.summary_channel_id,
                     "fallbackSummaryChannelId": settings.fallback_summary_channel_id,
                     "autoRoleId": settings.auto_role_id,
+                    "autoUnmuteUserIds": settings.auto_unmute_user_ids,
                     "updatedAt": settings.updated_at,
                 },
                 "$setOnInsert": {"createdAt": settings.created_at},
@@ -125,6 +126,31 @@ class Repository:
         settings.auto_role_id = str(role_id or "").strip()
         self.upsert_guild_settings(ctx, settings)
         return settings.auto_role_id
+
+    def get_auto_unmute_user_ids(self, ctx: Any, guild_id: str) -> list[str]:
+        settings = self.get_guild_settings(ctx, guild_id)
+        if settings is None:
+            return []
+        return list(settings.auto_unmute_user_ids)
+
+    def add_auto_unmute_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]:
+        settings = self.get_guild_settings(ctx, guild_id)
+        if settings is None:
+            settings = GuildSettings(guild_id=guild_id)
+        user_id = str(user_id or "").strip()
+        if user_id and user_id not in settings.auto_unmute_user_ids:
+            settings.auto_unmute_user_ids = sorted({*settings.auto_unmute_user_ids, user_id})
+        self.upsert_guild_settings(ctx, settings)
+        return list(settings.auto_unmute_user_ids)
+
+    def remove_auto_unmute_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]:
+        settings = self.get_guild_settings(ctx, guild_id)
+        if settings is None:
+            settings = GuildSettings(guild_id=guild_id)
+        user_id = str(user_id or "").strip()
+        settings.auto_unmute_user_ids = [uid for uid in settings.auto_unmute_user_ids if uid != user_id]
+        self.upsert_guild_settings(ctx, settings)
+        return list(settings.auto_unmute_user_ids)
 
     def list_closed_sessions_pending_notification(self, _ctx: Any) -> list[Session]:
         cursor = self.sessions.find(

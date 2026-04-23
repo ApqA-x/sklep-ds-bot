@@ -51,6 +51,7 @@ class GuildSettings:
     updated_at: datetime | None = None
     fallback_summary_channel_id: str = ""
     auto_role_id: str = ""
+    auto_unmute_user_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.guild_id = _clean(self.guild_id)
@@ -59,6 +60,7 @@ class GuildSettings:
         self.summary_channel_id = _clean(self.summary_channel_id)
         self.fallback_summary_channel_id = _clean(self.fallback_summary_channel_id)
         self.auto_role_id = _clean(self.auto_role_id)
+        self.auto_unmute_user_ids = clean_channel_ids(self.auto_unmute_user_ids)
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
 
@@ -89,6 +91,7 @@ class GuildSettings:
             summary_channel_id=data.get("summaryChannelId", ""),
             fallback_summary_channel_id=data.get("fallbackSummaryChannelId", ""),
             auto_role_id=data.get("autoRoleId", ""),
+            auto_unmute_user_ids=list(data.get("autoUnmuteUserIds") or []),
             created_at=parse_datetime(data.get("createdAt")),
             updated_at=parse_datetime(data.get("updatedAt")),
         )
@@ -101,6 +104,7 @@ def new_guild_settings(
     summary_channel_id: str,
     fallback_summary_channel_id: str = "",
     auto_role_id: str = "",
+    auto_unmute_user_ids: list[str] | None = None,
 ) -> GuildSettings:
     return GuildSettings(
         guild_id,
@@ -109,6 +113,7 @@ def new_guild_settings(
         summary_channel_id,
         fallback_summary_channel_id=fallback_summary_channel_id,
         auto_role_id=auto_role_id,
+        auto_unmute_user_ids=auto_unmute_user_ids or [],
     )
 
 

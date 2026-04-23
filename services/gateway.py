@@ -124,6 +124,23 @@ def _autorole_is_safe(role: discord.Role, bot_member: discord.Member) -> bool:
     return role.is_assignable()
 
 
+def _auto_unmute_user_ids_for_guild(repo: Repository, guild_id: str) -> list[str]:
+    getter = getattr(repo, "get_auto_unmute_user_ids", None)
+    if callable(getter):
+        try:
+            return getter(None, guild_id)
+        except Exception:
+            return []
+    settings = None
+    settings_getter = getattr(repo, "get_guild_settings", None)
+    if callable(settings_getter):
+        try:
+            settings = settings_getter(None, guild_id)
+        except Exception:
+            return []
+    return list(getattr(settings, "auto_unmute_user_ids", []) or [])
+
+
 async def main() -> None:
     configure_logging("gateway")
     cfg = load_config()
@@ -170,6 +187,36 @@ async def main() -> None:
             await member.add_roles(role, reason="Voice Tracker autorole")
         except Exception:
             logger.exception("autorole assignment failed guild=%s member=%s role=%s", member.guild.id, member.id, role_id)
+
+    async def _on_voice_state_update_unmute(
+        member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
+    ) -> None:
+        if str(getattr(member.guild, "id", "") or "") != cfg.discord_guild_id:
+            return
+        if getattr(member, "bot", False):
+            return
+        if before.mute is True or after.mute is not True:
+            return
+        user_id = str(member.id)
+        auto_unmute_ids = _auto_unmute_user_ids_for_guild(repo, str(member.guild.id))
+        if user_id not in auto_unmute_ids:
+            return
+        bot_member = await _resolve_bot_member(client, member.guild)
+        if bot_member is None:
+            logger.warning("auto-unmute skipped guild=%s missing bot member", member.guild.id)
+            return
+        if not bot_member.guild_permissions.mute_members:
+            logger.warning("auto-unmute skipped guild=%s missing mute_members permission", member.guild.id)
+            return
+        try:
+            await member.edit(mute=False, reason="Voice Tracker auto-unmute")
+            logger.info("auto-unmute applied guild=%s user=%s", member.guild.id, user_id)
+        except discord.Forbidden:
+            logger.warning("auto-unmute forbidden guild=%s user=%s", member.guild.id, user_id)
+        except Exception:
+            logger.exception("auto-unmute failed guild=%s user=%s", member.guild.id, user_id)
+
+    client.add_listener(_on_voice_state_update_unmute, "on_voice_state_update")
 
     async def handle_summary(payload: bytes) -> None:
         event = summary_from_payload(payload)

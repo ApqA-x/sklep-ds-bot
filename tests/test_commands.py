@@ -223,6 +223,7 @@ def test_voice_application_commands_have_expected_routes() -> None:
         "jump",
         "inspect",
         "autorole",
+        "unmute",
         "dashboard",
         "userinfo",
     ]
@@ -231,6 +232,7 @@ def test_voice_application_commands_have_expected_routes() -> None:
     assert track_routes == ["add", "remove", "list"]
     assert [option.name for option in commands["track-list"].options] == ["clear"]
     assert [option.name for option in commands[INSPECT_COMMAND_NAME].options] == ["channel"]
+    assert [option.name for option in commands["unmute"].options] == ["add", "remove", "list"]
 
 
 def test_handle_track_add_and_clear() -> None:

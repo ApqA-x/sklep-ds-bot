@@ -44,6 +44,7 @@ TRACK_LIST_COMMAND_NAME = "track-list"
 JUMP_COMMAND_NAME = "jump"
 INSPECT_COMMAND_NAME = "inspect"
 AUTOROLE_COMMAND_NAME = "autorole"
+UNMUTE_COMMAND_NAME = "unmute"
 DASHBOARD_COMMAND_NAME = "dashboard"
 USERINFO_COMMAND_NAME = "userinfo"
 
@@ -55,6 +56,7 @@ VOICE_COMMAND_NAMES = {
     JUMP_COMMAND_NAME,
     INSPECT_COMMAND_NAME,
     AUTOROLE_COMMAND_NAME,
+    UNMUTE_COMMAND_NAME,
     DASHBOARD_COMMAND_NAME,
     USERINFO_COMMAND_NAME,
     LEGACY_SETTINGS_COMMAND_NAME,
@@ -116,6 +118,9 @@ COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
     (INSPECT_COMMAND_NAME, INSPECT_HISTORY_ALL_COMMAND): CommandPolicy(INSPECT_COMMAND_NAME, INSPECT_HISTORY_ALL_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
     (INSPECT_COMMAND_NAME, INSPECT_HISTORY_PICK_COMMAND): CommandPolicy(INSPECT_COMMAND_NAME, INSPECT_HISTORY_PICK_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
     (AUTOROLE_COMMAND_NAME, "role"): CommandPolicy(AUTOROLE_COMMAND_NAME, "role", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_autorole_command"),
+    (UNMUTE_COMMAND_NAME, "add"): CommandPolicy(UNMUTE_COMMAND_NAME, "add", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_unmute_command"),
+    (UNMUTE_COMMAND_NAME, "remove"): CommandPolicy(UNMUTE_COMMAND_NAME, "remove", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_unmute_command"),
+    (UNMUTE_COMMAND_NAME, "list"): CommandPolicy(UNMUTE_COMMAND_NAME, "list", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_unmute_command"),
     (DASHBOARD_COMMAND_NAME, ""): CommandPolicy(DASHBOARD_COMMAND_NAME, "", COMMAND_ACCESS_ALL_USER, None, "handle_dashboard_command"),
     (USERINFO_COMMAND_NAME, "user"): CommandPolicy(USERINFO_COMMAND_NAME, "user", COMMAND_ACCESS_ALL_USER, None, "handle_userinfo_command"),
 }
@@ -293,9 +298,12 @@ class Service:
 
         autorole_id = _optional_setting(settings, "auto_role_id", _optional_setting(settings, "autoRoleId", ""))
         autorole = _role_mention(autorole_id) if autorole_id else "not set"
+        auto_unmute_ids = list(getattr(settings, "auto_unmute_user_ids", []) or [])
+        auto_unmute = f"{len(auto_unmute_ids)} user(s)" if auto_unmute_ids else "none"
         lines = [f"tracking mode: {mode}", f"tracked channels: {tracked}"]
         lines.append(f"audit channel: {summary_channel}")
         lines.append(f"autorole: {autorole}")
+        lines.append(f"auto-unmute: {auto_unmute}")
         created_at = format_time(settings.created_at)
         if created_at != "":
             lines.append(f"created: {created_at}")
@@ -522,6 +530,8 @@ class Service:
             return self.handle_inspect_command(ctx, interaction, command, options)
         if root == AUTOROLE_COMMAND_NAME:
             return self.handle_autorole_command(ctx, interaction, command, options)
+        if root == UNMUTE_COMMAND_NAME:
+            return self.handle_unmute_command(ctx, interaction, command, options)
         if root == DASHBOARD_COMMAND_NAME:
             return self.handle_dashboard_command(ctx, interaction, command, options)
         if root == USERINFO_COMMAND_NAME:
@@ -673,6 +683,33 @@ class Service:
             self._save(ctx, settings)
         return f"Autorole configured: {_role_mention(role_id)}"
 
+    def handle_unmute_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        if self.repo is None:
+            raise ValueError("repository unavailable")
+        guild_id = interaction.guild_id
+        if command == "add":
+            user_id = option_user_id(options, "user")
+            if not user_id:
+                raise ValueError("user is required")
+            ids = self.repo.add_auto_unmute_user(ctx, guild_id, user_id)
+            return f"Added <@{user_id}> to auto-unmute list.\n{_describe_auto_unmute_list(ids)}"
+        if command == "remove":
+            user_id = option_user_id(options, "user")
+            if not user_id:
+                raise ValueError("user is required")
+            ids = self.repo.remove_auto_unmute_user(ctx, guild_id, user_id)
+            return f"Removed <@{user_id}> from auto-unmute list.\n{_describe_auto_unmute_list(ids)}"
+        if command == "list":
+            ids = self.repo.get_auto_unmute_user_ids(ctx, guild_id)
+            return _describe_auto_unmute_list(ids)
+        raise ValueError("unknown unmute command")
+
     def handle_dashboard_command(
         self,
         ctx: Any,
@@ -767,6 +804,7 @@ def voice_application_commands() -> list[ApplicationCommand]:
         jump_application_command(),
         inspect_application_command(),
         autorole_application_command(),
+        unmute_application_command(),
         dashboard_application_command(),
         userinfo_application_command(),
     ]
@@ -853,6 +891,29 @@ def autorole_application_command() -> CommandDefinition:
         name=AUTOROLE_COMMAND_NAME,
         description="Configure the guild autorole",
         options=[_role_option("role", "Role to assign when members join")],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def unmute_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=UNMUTE_COMMAND_NAME,
+        description="Manage auto-unmute user list",
+        options=[
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="add",
+                description="Add a user to the auto-unmute list",
+                options=[_user_option("user", "User to auto-unmute")],
+            ),
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="remove",
+                description="Remove a user from the auto-unmute list",
+                options=[_user_option("user", "User to remove from auto-unmute")],
+            ),
+            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="list", description="List auto-unmute users"),
+        ],
         default_member_permissions=PERMISSION_ADMINISTRATOR,
     )
 
@@ -1145,6 +1206,13 @@ def interval_label(count: int) -> str:
     if count == 1:
         return "1 interval"
     return f"{count} intervals"
+
+
+def _describe_auto_unmute_list(user_ids: list[str]) -> str:
+    if not user_ids:
+        return "Auto-unmute list is empty."
+    mentions = ", ".join(f"<@{uid}>" for uid in user_ids)
+    return f"Auto-unmute list ({len(user_ids)}): {mentions}"
 
 
 def _remove_channel_id(ids: list[str], target: str) -> list[str]:
