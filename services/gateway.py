@@ -10,7 +10,7 @@ from pymongo import MongoClient
 
 from voice_tracker.bus import Bus
 from voice_tracker import domain
-from voice_tracker.gateway import Service as GatewayService, summary_from_payload
+from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
 
@@ -78,6 +78,18 @@ def _autorole_id_for_guild(repo: Repository, guild_id: str) -> str:
     return str(document.get("autoRoleId") or document.get("auto_role_id") or "").strip()
 
 
+def _normalize_ids(values: object) -> list[str]:
+    seen: set[str] = set()
+    ids: list[str] = []
+    for raw in values if isinstance(values, (list, tuple, set)) else []:
+        value = str(raw or "").strip()
+        if value == "" or value in seen:
+            continue
+        seen.add(value)
+        ids.append(value)
+    return sorted(ids)
+
+
 async def _resolve_bot_member(client: discord.Client, guild: discord.Guild) -> discord.Member | None:
     me = getattr(guild, "me", None)
     if isinstance(me, discord.Member):
@@ -90,6 +102,23 @@ async def _resolve_bot_member(client: discord.Client, guild: discord.Guild) -> d
         return cached
     try:
         return await guild.fetch_member(int(user.id))
+    except Exception:
+        return None
+
+
+async def _resolve_member(guild: discord.Guild, user_id: str) -> discord.Member | None:
+    try:
+        snowflake = int(user_id)
+    except ValueError:
+        return None
+    cached = guild.get_member(snowflake)
+    if cached is not None:
+        return cached
+    fetch_member = getattr(guild, "fetch_member", None)
+    if not callable(fetch_member):
+        return None
+    try:
+        return await fetch_member(snowflake)
     except Exception:
         return None
 
@@ -124,11 +153,15 @@ def _autorole_is_safe(role: discord.Role, bot_member: discord.Member) -> bool:
     return role.is_assignable()
 
 
+def _voice_state_is_muted(state: object) -> bool:
+    return bool(getattr(state, "mute", False))
+
+
 def _auto_unmute_user_ids_for_guild(repo: Repository, guild_id: str) -> list[str]:
     getter = getattr(repo, "get_auto_unmute_user_ids", None)
     if callable(getter):
         try:
-            return getter(None, guild_id)
+            return _normalize_ids(getter(None, guild_id))
         except Exception:
             return []
     settings = None
@@ -138,7 +171,7 @@ def _auto_unmute_user_ids_for_guild(repo: Repository, guild_id: str) -> list[str
             settings = settings_getter(None, guild_id)
         except Exception:
             return []
-    return list(getattr(settings, "auto_unmute_user_ids", []) or [])
+    return _normalize_ids(getattr(settings, "auto_unmute_user_ids", []) or [])
 
 
 async def main() -> None:
@@ -195,7 +228,8 @@ async def main() -> None:
             return
         if getattr(member, "bot", False):
             return
-        if not after.mute:
+        current_state = getattr(member, "voice", None) or after
+        if not _voice_state_is_muted(after) and not _voice_state_is_muted(current_state):
             return
         user_id = str(member.id)
         auto_unmute_ids = _auto_unmute_user_ids_for_guild(repo, str(member.guild.id))
@@ -208,15 +242,27 @@ async def main() -> None:
         if not bot_member.guild_permissions.mute_members:
             logger.warning("auto-unmute skipped guild=%s missing mute_members permission", member.guild.id)
             return
-        try:
-            await member.edit(mute=False, reason="Voice Tracker auto-unmute")
-            logger.info("auto-unmute applied guild=%s user=%s", member.guild.id, user_id)
-        except discord.Forbidden:
-            logger.warning("auto-unmute forbidden guild=%s user=%s", member.guild.id, user_id)
-        except Exception:
-            logger.exception("auto-unmute failed guild=%s user=%s", member.guild.id, user_id)
+        await asyncio.sleep(0.25)
+        for attempt in range(3):
+            try:
+                await member.edit(mute=False, reason="Voice Tracker auto-unmute")
+            except discord.Forbidden:
+                logger.warning("auto-unmute forbidden guild=%s user=%s", member.guild.id, user_id)
+                return
+            except Exception:
+                if attempt == 2:
+                    logger.exception("auto-unmute failed guild=%s user=%s", member.guild.id, user_id)
+                    return
+            else:
+                refreshed_member = await _resolve_member(member.guild, user_id)
+                refreshed_state = getattr(refreshed_member, "voice", None) if refreshed_member is not None else None
+                if refreshed_state is None or not _voice_state_is_muted(refreshed_state):
+                    logger.info("auto-unmute applied guild=%s user=%s attempt=%s", member.guild.id, user_id, attempt + 1)
+                    return
+            await asyncio.sleep(0.25 * (attempt + 1))
+        logger.warning("auto-unmute did not clear mute state guild=%s user=%s", member.guild.id, user_id)
 
-    client.add_listener(_on_voice_state_update_unmute, "on_voice_state_update")
+    install_event_listener(client, "on_voice_state_update", _on_voice_state_update_unmute)
 
     async def handle_summary(payload: bytes) -> None:
         event = summary_from_payload(payload)

@@ -125,6 +125,35 @@ def voice_event_from_discord(session: Any, update: Any) -> VoiceStateEvent:
     )
 
 
+def install_event_listener(session: Any, event_name: str, listener: Any) -> bool:
+    if session is None:
+        return False
+
+    add_listener = getattr(session, "add_listener", None)
+    if callable(add_listener):
+        add_listener(listener, event_name)
+        return True
+
+    add_handler = getattr(session, "add_handler", None)
+    if callable(add_handler):
+        add_handler(listener)
+        return True
+
+    existing = getattr(session, event_name, None)
+
+    async def _composed(*args: Any, **kwargs: Any) -> None:
+        if callable(existing):
+            result = existing(*args, **kwargs)
+            if inspect.isawaitable(result):
+                await result
+        result = listener(*args, **kwargs)
+        if inspect.isawaitable(result):
+            await result
+
+    setattr(session, event_name, _composed)
+    return True
+
+
 class Service:
     def __init__(self, session: Any, bus: Publisher) -> None:
         self.session = session
@@ -151,14 +180,7 @@ class Service:
             if inspect.isawaitable(result):
                 await result
 
-        add_listener = getattr(self.session, "add_listener", None)
-        if callable(add_listener):
-            add_listener(_listener, "on_voice_state_update")
-            return
-
-        add_handler = getattr(self.session, "add_handler", None)
-        if callable(add_handler):
-            add_handler(_listener)
+        install_event_listener(self.session, "on_voice_state_update", _listener)
 
 
 def summary_from_payload(payload: bytes | bytearray | str) -> SummaryReadyEvent:

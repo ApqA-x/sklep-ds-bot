@@ -48,13 +48,10 @@ class FakeClient:
 
     def __init__(self, *args, **kwargs) -> None:
         self.user = SimpleNamespace(id="999")
-        self.listeners: list[tuple[object, str]] = []
         FakeClient.instances.append(self)
 
-    def add_listener(self, callback, name: str) -> None:
-        self.listeners.append((callback, name))
-
     def event(self, callback):
+        setattr(self, callback.__name__, callback)
         return callback
 
     async def login(self, _token: str) -> None:
@@ -68,8 +65,7 @@ async def _noop(*_args, **_kwargs) -> None:
     return None
 
 
-async def test_auto_unmute_listener_runs_when_member_is_already_muted(monkeypatch) -> None:
-    fake_repo = FakeRepo({"123": ["42"]})
+async def _boot_gateway(monkeypatch, fake_repo: FakeRepo) -> object:
     fake_mongo = FakeMongoClient("mongodb://example")
 
     monkeypatch.setattr(gateway, "configure_logging", lambda _name: None)
@@ -88,13 +84,19 @@ async def test_auto_unmute_listener_runs_when_member_is_already_muted(monkeypatc
     monkeypatch.setattr(gateway, "Bus", FakeBus)
     monkeypatch.setattr(gateway.discord, "Client", FakeClient)
     monkeypatch.setattr(gateway, "_deliver_pending", _noop)
+    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
 
     FakeClient.instances.clear()
     await gateway.main()
 
     client = FakeClient.instances[0]
-    callback, name = client.listeners[-1]
-    assert name == "on_voice_state_update"
+    callback = getattr(client, "on_voice_state_update", None)
+    assert callback is not None
+    return callback
+
+
+async def test_auto_unmute_listener_runs_when_member_is_already_muted(monkeypatch) -> None:
+    callback = await _boot_gateway(monkeypatch, FakeRepo({"123": ["42"]}))
 
     edit_calls: list[dict[str, object]] = []
 
@@ -112,3 +114,76 @@ async def test_auto_unmute_listener_runs_when_member_is_already_muted(monkeypatc
     await callback(member, SimpleNamespace(mute=True), SimpleNamespace(mute=True))
 
     assert edit_calls == [{"mute": False, "reason": "Voice Tracker auto-unmute"}]
+
+
+async def test_auto_unmute_listener_runs_when_member_is_newly_muted(monkeypatch) -> None:
+    callback = await _boot_gateway(monkeypatch, FakeRepo({"123": ["42"]}))
+
+    edit_calls: list[dict[str, object]] = []
+
+    async def edit(**kwargs):
+        edit_calls.append(kwargs)
+
+    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(mute_members=True))
+    guild = SimpleNamespace(
+        id="123",
+        me=None,
+        get_member=lambda user_id: bot_member if str(user_id) == "999" else None,
+    )
+    member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit)
+
+    await callback(member, SimpleNamespace(mute=False), SimpleNamespace(mute=True))
+
+    assert edit_calls == [{"mute": False, "reason": "Voice Tracker auto-unmute"}]
+
+
+async def test_auto_unmute_listener_normalizes_repo_ids(monkeypatch) -> None:
+    callback = await _boot_gateway(monkeypatch, FakeRepo({"123": [42, " 42 ", ""]}))
+
+    edit_calls: list[dict[str, object]] = []
+
+    async def edit(**kwargs):
+        edit_calls.append(kwargs)
+
+    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(mute_members=True))
+    guild = SimpleNamespace(
+        id="123",
+        me=None,
+        get_member=lambda user_id: bot_member if str(user_id) == "999" else None,
+    )
+    member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit)
+
+    await callback(member, SimpleNamespace(mute=False), SimpleNamespace(mute=True))
+
+    assert edit_calls == [{"mute": False, "reason": "Voice Tracker auto-unmute"}]
+
+
+async def test_auto_unmute_listener_retries_until_voice_state_clears(monkeypatch) -> None:
+    callback = await _boot_gateway(monkeypatch, FakeRepo({"123": ["42"]}))
+
+    edit_calls: list[dict[str, object]] = []
+    refreshed_states = [
+        SimpleNamespace(id="42", voice=SimpleNamespace(mute=True)),
+        SimpleNamespace(id="42", voice=SimpleNamespace(mute=False)),
+    ]
+
+    async def edit(**kwargs):
+        edit_calls.append(kwargs)
+
+    def get_member(user_id):
+        if str(user_id) == "999":
+            return bot_member
+        if str(user_id) == "42" and refreshed_states:
+            return refreshed_states.pop(0)
+        return None
+
+    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(mute_members=True))
+    guild = SimpleNamespace(id="123", me=None, get_member=get_member)
+    member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit, voice=SimpleNamespace(mute=True))
+
+    await callback(member, SimpleNamespace(mute=False), SimpleNamespace(mute=True))
+
+    assert edit_calls == [
+        {"mute": False, "reason": "Voice Tracker auto-unmute"},
+        {"mute": False, "reason": "Voice Tracker auto-unmute"},
+    ]

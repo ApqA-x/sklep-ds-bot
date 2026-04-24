@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from voice_tracker.domain import SummaryReadyEvent
-from voice_tracker.gateway import Service, summary_from_payload, voice_event_from_discord
+from voice_tracker.gateway import Service, install_event_listener, summary_from_payload, voice_event_from_discord
 
 
 class FakeGuild:
@@ -67,6 +67,26 @@ def test_service_install_registers_voice_listener() -> None:
     asyncio.run(callback(member, SimpleNamespace(channel_id="old"), SimpleNamespace(channel_id="new")))
     assert bus.calls and bus.calls[0][0] == "voice.events"
     assert bus.calls[0][1].guild_id == "123"
+
+
+def test_install_event_listener_composes_existing_client_event() -> None:
+    calls: list[str] = []
+    session = SimpleNamespace()
+
+    async def existing(member, before, after):
+        calls.append(f"existing:{member.id}:{before.channel_id}:{after.channel_id}")
+
+    async def listener(member, before, after):
+        calls.append(f"listener:{member.id}:{before.channel_id}:{after.channel_id}")
+
+    session.on_voice_state_update = existing
+
+    assert install_event_listener(session, "on_voice_state_update", listener) is True
+
+    member = SimpleNamespace(id=42)
+    asyncio.run(session.on_voice_state_update(member, SimpleNamespace(channel_id="old"), SimpleNamespace(channel_id="new")))
+
+    assert calls == ["existing:42:old:new", "listener:42:old:new"]
 
 
 def test_summary_from_payload_decodes_event() -> None:
