@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from datetime import UTC, datetime
 
-import discord
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message="'audioop' is deprecated and slated for removal in Python 3.13",
+        category=DeprecationWarning,
+    )
+    import discord
 from pymongo import MongoClient
 
 from voice_tracker.appcommands import commands as application_commands
