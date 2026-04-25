@@ -49,7 +49,8 @@ Full command reference lives in [COMMANDS.md](COMMANDS.md).
 - Python 3.11+
 - MongoDB
 - NATS
-- PyNaCl (required by Discord voice connection)
+- davey (required by current discord.py voice connection)
+- PyNaCl (legacy voice backend support)
 - Discord bot token + app/guild IDs
 
 ## Configuration
