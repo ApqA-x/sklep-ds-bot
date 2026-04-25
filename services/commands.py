@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import warnings
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 with warnings.catch_warnings():
     warnings.filterwarnings(
@@ -57,6 +58,73 @@ TARGET_COMMAND_NAMES = {
 }
 
 SUPPORTED_COMMAND_NAMES = (VOICE_COMMAND_NAMES | TARGET_COMMAND_NAMES) - LEGACY_ROOT_COMMAND_NAMES
+DASHBOARD_PAGE_SIZE = 10
+
+
+@dataclass(slots=True)
+class InteractionMessage:
+    embed: discord.Embed | None = None
+    view: discord.ui.View | None = None
+    content: str | None = None
+    ephemeral: bool = True
+
+
+class DashboardView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        owner_user_id: str,
+        rows: list[object],
+        page: int = 1,
+        page_size: int = DASHBOARD_PAGE_SIZE,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.owner_user_id = owner_user_id
+        self.rows = list(rows)
+        self.page = max(1, page)
+        self.page_size = max(1, page_size)
+        self.total_pages = max(1, (len(self.rows) + self.page_size - 1) // self.page_size)
+        self._sync_buttons()
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="Ranking Top",
+            description=_dashboard_description(self.rows, self.page, self.page_size),
+            color=0x2B2D42,
+        )
+        embed.set_footer(text=f"Page {self.page} of {self.total_pages} • Total members: {len(self.rows)}")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        interaction_user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+        return interaction_user_id == self.owner_user_id
+
+    async def _change_page(self, interaction: discord.Interaction, page: int) -> None:
+        self.page = min(max(1, page), self.total_pages)
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    def _sync_buttons(self) -> None:
+        self.first_page.disabled = self.page <= 1
+        self.previous_page.disabled = self.page <= 1
+        self.next_page.disabled = self.page >= self.total_pages
+        self.last_page.disabled = self.page >= self.total_pages
+
+    @discord.ui.button(label="<<", style=discord.ButtonStyle.secondary)
+    async def first_page(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._change_page(interaction, 1)
+
+    @discord.ui.button(label="<", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._change_page(interaction, self.page - 1)
+
+    @discord.ui.button(label=">", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._change_page(interaction, self.page + 1)
+
+    @discord.ui.button(label=">>", style=discord.ButtonStyle.secondary)
+    async def last_page(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self._change_page(interaction, self.total_pages)
 
 
 def _build_client(token: str) -> discord.Client:
@@ -106,6 +174,16 @@ async def main() -> None:
         except Exception:
             logger.exception("command failed %s", context)
             result = "Command failed. Check service logs."
+        if isinstance(result, InteractionMessage):
+            kwargs: dict[str, object] = {"ephemeral": result.ephemeral}
+            if result.content is not None:
+                kwargs["content"] = result.content
+            if result.embed is not None:
+                kwargs["embed"] = result.embed
+            if result.view is not None:
+                kwargs["view"] = result.view
+            await interaction.response.send_message(**kwargs)
+            return
         if isinstance(result, discord.Embed):
             await interaction.response.send_message(embed=result, ephemeral=True)
             return
@@ -189,7 +267,7 @@ async def _dispatch_command(
     command: str,
     options: list[ApplicationCommandInteractionDataOption],
     bot_admin_user_ids: list[str],
-) -> str | discord.Embed:
+) -> str | discord.Embed | InteractionMessage:
     options = _normalize_snowflake_options(options)
     if root == "jump":
         return await _dispatch_jump_command(client, interaction, model, options)
@@ -202,7 +280,7 @@ async def _dispatch_command(
             return "Insufficient permissions."
         return _dispatch_unmute_command(service, model, command, options)
     if root == "dashboard":
-        return await _dispatch_service_method(service, "handle_dashboard_command", model, command, options)
+        return await _dispatch_dashboard_command(service, model, interaction)
     if root == "userinfo":
         return await _dispatch_userinfo_command(client, service, model, interaction, options)
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
@@ -355,6 +433,19 @@ async def _dispatch_userinfo_command(
     return embed
 
 
+async def _dispatch_dashboard_command(
+    service: VoiceService,
+    model: InteractionCreate,
+    interaction: discord.Interaction,
+) -> InteractionMessage | str:
+    rows = service.list_dashboard_totals(None, model.guild_id)
+    if len(rows) == 0:
+        return "No voice totals yet."
+    owner_user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+    view = DashboardView(owner_user_id=owner_user_id, rows=rows)
+    return InteractionMessage(embed=view.build_embed(), view=view)
+
+
 async def _dispatch_service_method(
     service: VoiceService,
     method_name: str,
@@ -369,6 +460,39 @@ async def _dispatch_service_method(
             result = await result
         return str(result or "")
     return "Command unavailable."
+
+
+def _dashboard_description(rows: list[object], page: int, page_size: int) -> str:
+    page = max(1, page)
+    page_size = max(1, page_size)
+    start = (page - 1) * page_size
+    visible_rows = rows[start : start + page_size]
+    if len(visible_rows) == 0:
+        return "No voice totals yet."
+    lines = ["Sorted by voice time", ""]
+    for index, row in enumerate(visible_rows, start=start + 1):
+        display_name = _sanitize_public_text(str(getattr(row, "user_name", getattr(row, "display_name", "")) or "")) or str(
+            getattr(row, "user_id", "")
+        )
+        user_id = str(getattr(row, "user_id", "") or "")
+        clickable_tag = f"<@{user_id}>" if user_id else display_name
+        lines.append(f"**#{index}.** {display_name} {clickable_tag}")
+        lines.append(f"Hours: `{_dashboard_duration(getattr(row, 'total_for', None))}`")
+        if index != start + len(visible_rows):
+            lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _dashboard_duration(value: object) -> str:
+    if isinstance(value, timedelta):
+        total_seconds = max(0, int(value.total_seconds()))
+    elif isinstance(value, (int, float)):
+        total_seconds = max(0, int(value))
+    else:
+        total_seconds = 0
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}"
 
 
 def _normalize_snowflake_options(

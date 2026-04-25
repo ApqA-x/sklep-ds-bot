@@ -41,7 +41,8 @@ Last updated: April 25, 2026.
   - Move invoking user to target channel if visibility/permission checks pass.
 
 - `/dashboard`
-  - Show top voice-time leaderboard from repository aggregates.
+  - Show a paginated voice-time leaderboard with bottom arrow buttons.
+  - Each row shows display name, clickable member mention, and total time as `hours:minutes:seconds`.
 
 - `/userinfo user:<member>`
   - Show member profile summary and total voice time.

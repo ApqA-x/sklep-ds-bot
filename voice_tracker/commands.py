@@ -646,6 +646,9 @@ class Service:
             lines.append(f"+{len(totals) - 10} more users")
         return "\n".join(lines)
 
+    def list_dashboard_totals(self, ctx: Any, guild_id: str) -> list[VoiceTotalView]:
+        return _load_voice_totals(self.repo, ctx, guild_id)
+
     def handle_userinfo_command(
         self,
         ctx: Any,
