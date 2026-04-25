@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import services.gateway as gateway
+from voice_tracker import domain
 
 
 class FakeRepo:
@@ -11,6 +12,12 @@ class FakeRepo:
 
     def get_auto_unmute_user_ids(self, _ctx, guild_id: str) -> list[str]:
         return list(self.auto_unmute_ids.get(str(guild_id), []))
+
+    def get_guild_settings(self, _ctx, guild_id: str):
+        return domain.GuildSettings(guild_id=str(guild_id))
+
+    def upsert_guild_settings(self, _ctx, settings: domain.GuildSettings) -> None:
+        return None
 
 
 class FakeMongoClient:
@@ -293,3 +300,145 @@ async def test_auto_unmute_listener_retries_until_voice_state_clears(monkeypatch
         {"mute": False, "reason": "Voice Tracker auto-unmute"},
         {"mute": False, "reason": "Voice Tracker auto-unmute"},
     ]
+
+
+class _ManagedRepo:
+    def __init__(self, settings: domain.GuildSettings) -> None:
+        self.settings = settings
+
+    def get_guild_settings(self, _ctx, _guild_id: str) -> domain.GuildSettings:
+        return self.settings
+
+    def upsert_guild_settings(self, _ctx, settings: domain.GuildSettings) -> None:
+        self.settings = settings
+
+
+class _ManagedVoiceClient:
+    def __init__(self, channel: object | None) -> None:
+        self.channel = channel
+        self.move_calls: list[object] = []
+
+    def is_connected(self) -> bool:
+        return self.channel is not None
+
+    async def move_to(self, channel: object) -> None:
+        self.move_calls.append(channel)
+        self.channel = channel
+
+    async def disconnect(self) -> None:
+        self.channel = None
+
+
+class _ManagedChannel:
+    def __init__(self, guild: object, channel_id: str, *, can_move: bool = True) -> None:
+        self.guild = guild
+        self.id = int(channel_id)
+        self.type = gateway.discord.ChannelType.voice
+        self.connect_calls = 0
+        self._can_move = can_move
+
+    def permissions_for(self, _member: object):
+        return SimpleNamespace(view_channel=True, connect=True, move_members=self._can_move)
+
+    async def connect(self) -> _ManagedVoiceClient:
+        self.connect_calls += 1
+        voice_client = _ManagedVoiceClient(self)
+        setattr(self.guild, "voice_client", voice_client)
+        bot_member = getattr(self.guild, "members", {}).get("999")
+        if bot_member is not None:
+            setattr(bot_member, "voice", SimpleNamespace(channel=self))
+        return voice_client
+
+
+class _ManagedGuild:
+    def __init__(self, guild_id: str, channel_id: str, *, can_move: bool = True) -> None:
+        self.id = int(guild_id)
+        self.voice_client: _ManagedVoiceClient | None = None
+        self.members: dict[str, object] = {}
+        self.channel = _ManagedChannel(self, channel_id, can_move=can_move)
+
+    def get_member(self, user_id: int):
+        return self.members.get(str(user_id))
+
+    def get_channel(self, channel_id: int):
+        if channel_id == self.channel.id:
+            return self.channel
+        return None
+
+    async def fetch_channel(self, channel_id: int):
+        return self.get_channel(channel_id)
+
+
+class _ManagedClient:
+    def __init__(self, guild: _ManagedGuild, bot_user_id: str = "999") -> None:
+        self.guild = guild
+        self.guilds = [guild]
+        self.voice_clients: list[_ManagedVoiceClient] = []
+        self.user = SimpleNamespace(id=bot_user_id)
+
+    def get_guild(self, guild_id: int):
+        if guild_id == self.guild.id:
+            return self.guild
+        return None
+
+
+async def test_managed_voice_controller_connects_to_configured_channel() -> None:
+    settings = domain.GuildSettings(guild_id="123", managed_voice_channel_id="42")
+    repo = _ManagedRepo(settings)
+    guild = _ManagedGuild("123", "42")
+    guild.members["999"] = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(), voice=None)
+    client = _ManagedClient(guild)
+    controller = gateway.ManagedVoiceController(client=client, repo=repo, guild_id="123")
+
+    await controller.reconcile()
+
+    assert guild.channel.connect_calls == 1
+    assert repo.settings.managed_voice_connected_at is not None
+
+
+async def test_managed_voice_controller_moves_bot_back_to_managed_channel() -> None:
+    settings = domain.GuildSettings(guild_id="123", managed_voice_channel_id="42")
+    repo = _ManagedRepo(settings)
+    guild = _ManagedGuild("123", "42")
+    other_channel = SimpleNamespace(id=777)
+    guild.voice_client = _ManagedVoiceClient(other_channel)
+    guild.members["999"] = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(), voice=SimpleNamespace(channel=other_channel))
+    client = _ManagedClient(guild)
+    controller = gateway.ManagedVoiceController(client=client, repo=repo, guild_id="123")
+
+    await controller.reconcile()
+
+    assert guild.voice_client is not None
+    assert len(guild.voice_client.move_calls) == 1
+    assert getattr(guild.voice_client.channel, "id", None) == 42
+
+
+async def test_soundboard_enforcement_disconnects_member_only_when_enabled() -> None:
+    settings = domain.GuildSettings(
+        guild_id="123",
+        managed_voice_channel_id="42",
+        soundboard_enforcement_enabled=True,
+    )
+    repo = _ManagedRepo(settings)
+    guild = _ManagedGuild("123", "42", can_move=True)
+    managed_channel = guild.channel
+
+    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(), voice=SimpleNamespace(channel=managed_channel))
+    moved: list[object] = []
+
+    async def _move_to(channel, reason: str | None = None):
+        moved.append((channel, reason))
+
+    user_member = SimpleNamespace(id="42", bot=False, voice=SimpleNamespace(channel=managed_channel), move_to=_move_to)
+    guild.members["999"] = bot_member
+    guild.members["42"] = user_member
+
+    client = _ManagedClient(guild)
+    controller = gateway.ManagedVoiceController(client=client, repo=repo, guild_id="123")
+    enforcement = gateway.SoundboardEnforcement(client=client, repo=repo, guild_id="123", voice_controller=controller)
+
+    effect = SimpleNamespace(guild=guild, channel=managed_channel, user_id="42", sound_id="abc")
+    await enforcement.on_voice_channel_effect(effect)
+
+    assert len(moved) == 1
+    assert moved[0][0] is None

@@ -11,6 +11,7 @@ dependencies = [
     "aiohttp>=3.9,<4",
     "discord.py>=2.3,<3",
     "nats-py>=2.7,<3",
+    "PyNaCl>=1.5,<2",
     "pymongo>=4.6,<5",
 ]
 

@@ -16,6 +16,8 @@ from voice_tracker.discord_models import (
 
 TARGET_TOP_LEVEL_COMMAND_NAMES = {
     "settings",
+    "connect",
+    "disconnect",
     "jump",
     "inspect",
     "autorole",
@@ -33,6 +35,8 @@ REMOVED_TOP_LEVEL_COMMAND_NAMES = {
 
 ADMIN_ONLY_TOP_LEVEL_COMMAND_NAMES = {
     "settings",
+    "connect",
+    "disconnect",
     "inspect",
     "autorole",
     "unmute",
@@ -42,8 +46,12 @@ ADMIN_ONLY_COMMAND_ROUTES = (
     ("settings", ""),
     ("settings", "show"),
     ("settings", "mode"),
+    ("settings", "soundboard"),
     ("settings", "summary-set"),
     ("settings", "summary-clear"),
+    ("connect", ""),
+    ("connect", "channel"),
+    ("disconnect", ""),
     ("inspect", ""),
     ("inspect", "channel"),
     ("autorole", ""),

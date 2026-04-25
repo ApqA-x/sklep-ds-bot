@@ -67,6 +67,8 @@ def test_default_commands_match_mvp_catalog() -> None:
 
     assert list(commands) == [
         "settings",
+        "connect",
+        "disconnect",
         "jump",
         "inspect",
         "autorole",
@@ -84,16 +86,20 @@ def test_default_commands_match_mvp_catalog() -> None:
 def test_mvp_command_payloads_have_expected_shapes_and_permissions() -> None:
     commands = {command["name"]: command for command in appcommands.default_commands()}
 
-    admin_commands = {"settings", "inspect", "autorole", "unmute"}
+    admin_commands = {"settings", "connect", "disconnect", "inspect", "autorole", "unmute"}
     all_user_commands = {"jump", "dashboard", "userinfo"}
     for name in admin_commands:
         assert str(commands[name].get("default_member_permissions")) == str(PERMISSION_ADMINISTRATOR)
     for name in all_user_commands:
         assert "default_member_permissions" not in commands[name]
 
-    assert _option_names(commands["settings"]["options"]) == ["show", "mode", "summary-set", "summary-clear"]
+    assert _option_names(commands["settings"]["options"]) == ["show", "mode", "soundboard", "summary-set", "summary-clear"]
     mode_option = _nested_option_by_name(commands["settings"]["options"], "mode", "mode")
     assert _choice_names(mode_option) == ["all"]
+    soundboard_option = _nested_option_by_name(commands["settings"]["options"], "soundboard", "state")
+    assert _choice_names(soundboard_option) == ["on", "off"]
+    assert _channel_types(_option_by_name(commands["connect"]["options"], "channel")) == [2, 13]
+    assert commands["disconnect"].get("options", []) == []
     assert _channel_types(_option_by_name(commands["jump"]["options"], "channel")) == [2, 13]
     assert _channel_types(_option_by_name(commands["inspect"]["options"], "channel")) == [2, 13]
     assert _option_type(_option_by_name(commands["autorole"]["options"], "role")) == 8

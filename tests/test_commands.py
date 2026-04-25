@@ -57,6 +57,9 @@ class FakeRepo:
             settings.created_at,
             settings.updated_at,
             fallback_summary_channel_id=settings.fallback_summary_channel_id,
+            soundboard_enforcement_enabled=settings.soundboard_enforcement_enabled,
+            managed_voice_channel_id=settings.managed_voice_channel_id,
+            managed_voice_connected_at=settings.managed_voice_connected_at,
         )
 
     def upsert_guild_settings(self, _ctx, settings: domain.GuildSettings) -> None:
@@ -68,6 +71,9 @@ class FakeRepo:
             settings.created_at,
             settings.updated_at,
             fallback_summary_channel_id=settings.fallback_summary_channel_id,
+            soundboard_enforcement_enabled=settings.soundboard_enforcement_enabled,
+            managed_voice_channel_id=settings.managed_voice_channel_id,
+            managed_voice_connected_at=settings.managed_voice_connected_at,
         )
 
     def list_active_sessions_by_guild(self, _ctx, guild_id: str):
@@ -201,8 +207,11 @@ def test_can_use_voice_command_requires_admin_for_admin_only_commands() -> None:
     admin_only_routes = [
         (SETTINGS_COMMAND_NAME, "show"),
         (SETTINGS_COMMAND_NAME, "mode"),
+        (SETTINGS_COMMAND_NAME, "soundboard"),
         (SETTINGS_COMMAND_NAME, "summary-set"),
         (SETTINGS_COMMAND_NAME, "summary-clear"),
+        ("connect", ""),
+        ("disconnect", ""),
         (INSPECT_COMMAND_NAME, ""),
         ("autorole", ""),
     ]
@@ -225,6 +234,8 @@ def test_voice_application_commands_have_expected_routes() -> None:
     commands = {command.name: command for command in voice_application_commands()}
     assert list(commands) == [
         "settings",
+        "connect",
+        "disconnect",
         "jump",
         "inspect",
         "autorole",
@@ -233,10 +244,15 @@ def test_voice_application_commands_have_expected_routes() -> None:
         "userinfo",
     ]
 
-    assert [option.name for option in commands[SETTINGS_COMMAND_NAME].options] == ["show", "mode", "summary-set", "summary-clear"]
+    assert [option.name for option in commands[SETTINGS_COMMAND_NAME].options] == ["show", "mode", "soundboard", "summary-set", "summary-clear"]
     mode_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "mode")
     assert len(mode_option.options) == 1
     assert [choice.name for choice in mode_option.options[0].choices] == [domain.GUILD_TRACKING_MODE_ALL]
+    soundboard_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "soundboard")
+    assert len(soundboard_option.options) == 1
+    assert [choice.name for choice in soundboard_option.options[0].choices] == ["on", "off"]
+    assert [option.name for option in commands["connect"].options] == ["channel"]
+    assert commands["disconnect"].options == []
     assert [option.name for option in commands[INSPECT_COMMAND_NAME].options] == ["channel"]
     assert [option.name for option in commands["unmute"].options] == ["add", "remove", "list"]
 
@@ -248,6 +264,12 @@ def test_handle_settings_commands() -> None:
     content = svc.handle_settings_command(None, interaction, "mode", [option("mode", domain.GUILD_TRACKING_MODE_NONE)])
     assert "Tracking mode is fixed to 'all'" in content
     assert "tracking mode: all" in content
+
+    content = svc.handle_settings_command(None, interaction, "soundboard", [option("state", "on")])
+    assert "soundboard enforcement: on" in content
+
+    content = svc.handle_settings_command(None, interaction, "soundboard", [option("state", "off")])
+    assert "soundboard enforcement: off" in content
 
     content = svc.handle_settings_command(None, interaction, "summary-set", [option("channel", "t1")])
     assert "summary channel: <#t1>" in content
@@ -378,6 +400,8 @@ def test_policy_coverage_for_registered_routes_is_deterministic() -> None:
         assert command_policy(root, command) is not None
 
     assert command_policy("settings", "") is not None
+    assert command_policy("connect", "") is not None
+    assert command_policy("disconnect", "") is not None
     assert command_policy("inspect", "channel") is not None
     assert command_policy("autorole", "role") is not None
     assert command_policy("userinfo", "user") is not None

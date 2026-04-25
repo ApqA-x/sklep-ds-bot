@@ -35,6 +35,8 @@ COMMAND_ACCESS_ADMIN_ONLY = "ADMIN_ONLY"
 COMMAND_ACCESS_ALL_USER = "ALL_USER"
 
 SETTINGS_COMMAND_NAME = "settings"
+CONNECT_COMMAND_NAME = "connect"
+DISCONNECT_COMMAND_NAME = "disconnect"
 JUMP_COMMAND_NAME = "jump"
 INSPECT_COMMAND_NAME = "inspect"
 AUTOROLE_COMMAND_NAME = "autorole"
@@ -44,6 +46,8 @@ USERINFO_COMMAND_NAME = "userinfo"
 
 VOICE_COMMAND_NAMES = {
     SETTINGS_COMMAND_NAME,
+    CONNECT_COMMAND_NAME,
+    DISCONNECT_COMMAND_NAME,
     JUMP_COMMAND_NAME,
     INSPECT_COMMAND_NAME,
     AUTOROLE_COMMAND_NAME,
@@ -92,8 +96,11 @@ class CommandPolicy:
 COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
     (SETTINGS_COMMAND_NAME, "show"): CommandPolicy(SETTINGS_COMMAND_NAME, "show", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "mode"): CommandPolicy(SETTINGS_COMMAND_NAME, "mode", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
+    (SETTINGS_COMMAND_NAME, "soundboard"): CommandPolicy(SETTINGS_COMMAND_NAME, "soundboard", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "summary-set"): CommandPolicy(SETTINGS_COMMAND_NAME, "summary-set", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "summary-clear"): CommandPolicy(SETTINGS_COMMAND_NAME, "summary-clear", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
+    (CONNECT_COMMAND_NAME, ""): CommandPolicy(CONNECT_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_connect_command"),
+    (DISCONNECT_COMMAND_NAME, ""): CommandPolicy(DISCONNECT_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_disconnect_command"),
     (JUMP_COMMAND_NAME, ""): CommandPolicy(JUMP_COMMAND_NAME, "", COMMAND_ACCESS_ALL_USER, None, "handle_jump_command"),
     (INSPECT_COMMAND_NAME, ""): CommandPolicy(INSPECT_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
     (INSPECT_COMMAND_NAME, INSPECT_ACTIVE_ALL_COMMAND): CommandPolicy(INSPECT_COMMAND_NAME, INSPECT_ACTIVE_ALL_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
@@ -110,6 +117,7 @@ COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
 
 COMMAND_ROUTE_ALIASES: dict[tuple[str, str], tuple[str, str]] = {
     (SETTINGS_COMMAND_NAME, ""): (SETTINGS_COMMAND_NAME, "show"),
+    (CONNECT_COMMAND_NAME, "channel"): (CONNECT_COMMAND_NAME, ""),
     (JUMP_COMMAND_NAME, "channel"): (JUMP_COMMAND_NAME, ""),
     (INSPECT_COMMAND_NAME, "channel"): (INSPECT_COMMAND_NAME, ""),
     (AUTOROLE_COMMAND_NAME, "role"): (AUTOROLE_COMMAND_NAME, ""),
@@ -252,6 +260,23 @@ class Service:
     def clear_summary_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
         return self.set_summary_channel(ctx, guild_id, "")
 
+    def set_soundboard_enforcement(self, ctx: Any, guild_id: str, enabled: bool) -> domain.GuildSettings:
+        settings = self.get_guild_settings(ctx, guild_id)
+        settings.soundboard_enforcement_enabled = bool(enabled)
+        self._save(ctx, settings)
+        return settings
+
+    def set_managed_voice_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
+        settings = self.get_guild_settings(ctx, guild_id)
+        settings.managed_voice_channel_id = (channel_id or "").strip()
+        if settings.managed_voice_channel_id == "":
+            settings.managed_voice_connected_at = None
+        self._save(ctx, settings)
+        return settings
+
+    def clear_managed_voice_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
+        return self.set_managed_voice_channel(ctx, guild_id, "")
+
     def remember_fallback_summary_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
         settings = self.get_guild_settings(ctx, guild_id)
         channel_id = (channel_id or "").strip()
@@ -285,10 +310,19 @@ class Service:
         autorole = _role_mention(autorole_id) if autorole_id else "not set"
         auto_unmute_ids = list(getattr(settings, "auto_unmute_user_ids", []) or [])
         auto_unmute = f"{len(auto_unmute_ids)} user(s)" if auto_unmute_ids else "none"
+        managed_voice_channel_id = _optional_setting(
+            settings,
+            "managed_voice_channel_id",
+            _optional_setting(settings, "managedVoiceChannelId", ""),
+        )
+        managed_voice_channel = _channel_mention(managed_voice_channel_id) if managed_voice_channel_id else "not connected"
+        soundboard_enforcement = "on" if bool(getattr(settings, "soundboard_enforcement_enabled", False)) else "off"
         lines = [f"tracking mode: {mode}", f"tracked channels: {tracked}"]
         lines.append(f"summary channel: {summary_channel}")
         lines.append(f"autorole: {autorole}")
         lines.append(f"auto-unmute: {auto_unmute}")
+        lines.append(f"voice connection: {managed_voice_channel}")
+        lines.append(f"soundboard enforcement: {soundboard_enforcement}")
         created_at = format_time(settings.created_at)
         if created_at != "":
             lines.append(f"created: {created_at}")
@@ -447,6 +481,10 @@ class Service:
         settings.guild_id = settings.guild_id.strip()
         settings.tracking_mode = domain.normalize_tracking_mode(settings.tracking_mode)
         settings.tracked_channel_ids = domain.clean_channel_ids(settings.tracked_channel_ids)
+        settings.soundboard_enforcement_enabled = bool(settings.soundboard_enforcement_enabled)
+        settings.managed_voice_channel_id = (settings.managed_voice_channel_id or "").strip()
+        if settings.managed_voice_channel_id == "":
+            settings.managed_voice_connected_at = None
         self.repo.upsert_guild_settings(ctx, settings)
 
     def install(self, session: Any, allowed_guild_id: str, bot_admin_user_ids: list[str]) -> Any:
@@ -524,6 +562,12 @@ class Service:
                     f"{self.describe_settings(settings)}"
                 )
             return self.describe_settings(settings)
+        if command == "soundboard":
+            requested_state = option_string(options, "state").lower()
+            if requested_state not in {"on", "off"}:
+                raise ValueError("state must be 'on' or 'off'")
+            settings = self.set_soundboard_enforcement(ctx, interaction.guild_id, requested_state == "on")
+            return self.describe_settings(settings)
         if command == "summary-set":
             channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_TEXT)
             settings = self.set_summary_channel(ctx, interaction.guild_id, channel_id)
@@ -573,6 +617,32 @@ class Service:
             pick = option_int_in_range(options, "pick", 1, 1, MAX_CLOSED_HISTORY_ITEMS)
             return self.describe_closed_session_detail(ctx, interaction.guild_id, channel_id, pick)
         raise ValueError("unknown inspect command")
+
+    def handle_connect_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        channel_id = resolve_command_channel(
+            interaction, options, "channel", CHANNEL_TYPE_GUILD_VOICE, CHANNEL_TYPE_GUILD_STAGE_VOICE
+        )
+        settings = self.set_managed_voice_channel(ctx, interaction.guild_id, channel_id)
+        return (
+            f"Managed voice channel set to <#{channel_id}>. "
+            f"Soundboard enforcement is {'on' if settings.soundboard_enforcement_enabled else 'off'}."
+        )
+
+    def handle_disconnect_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        self.clear_managed_voice_channel(ctx, interaction.guild_id)
+        return "Managed voice connection disabled."
 
     def handle_jump_command(
         self,
@@ -723,6 +793,8 @@ BuildUserInfoPage = build_userinfo_page
 def voice_application_commands() -> list[ApplicationCommand]:
     return [
         settings_application_command(),
+        connect_application_command(),
+        disconnect_application_command(),
         jump_application_command(),
         inspect_application_command(),
         autorole_application_command(),
@@ -741,6 +813,23 @@ def jump_application_command() -> CommandDefinition:
         name=JUMP_COMMAND_NAME,
         description="Move yourself to a visible voice channel",
         options=[_voice_channel_option("channel", "Voice channel to join")],
+    )
+
+
+def connect_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=CONNECT_COMMAND_NAME,
+        description="Pin bot to a voice channel",
+        options=[_voice_channel_option("channel", "Voice channel to manage")],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def disconnect_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=DISCONNECT_COMMAND_NAME,
+        description="Unpin bot and disconnect from voice",
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
     )
 
 
@@ -813,6 +902,12 @@ def settings_application_command() -> CommandDefinition:
                 name="mode",
                 description="Tracking mode (fixed to all)",
                 options=[_tracking_mode_option()],
+            ),
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="soundboard",
+                description="Toggle soundboard kick enforcement",
+                options=[_soundboard_state_option()],
             ),
             ApplicationCommandOption(
                 type=OPTION_TYPE_SUB_COMMAND,
@@ -893,6 +988,19 @@ def _tracking_mode_option() -> ApplicationCommandOption:
         required=True,
         choices=[
             ApplicationCommandOptionChoice(name=domain.GUILD_TRACKING_MODE_ALL, value=domain.GUILD_TRACKING_MODE_ALL),
+        ],
+    )
+
+
+def _soundboard_state_option() -> ApplicationCommandOption:
+    return ApplicationCommandOption(
+        type=OPTION_TYPE_STRING,
+        name="state",
+        description="Use on/off",
+        required=True,
+        choices=[
+            ApplicationCommandOptionChoice(name="on", value="on"),
+            ApplicationCommandOptionChoice(name="off", value="off"),
         ],
     )
 

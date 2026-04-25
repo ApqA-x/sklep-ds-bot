@@ -151,3 +151,91 @@ def test_normalize_snowflake_options_casts_int_channel_user_role_values() -> Non
     assert normalized[2].value == "303"
     assert normalized[3].value == 5
     assert normalized[4].options[0].value == "404"
+
+
+class _ManagedVoiceServiceStub:
+    def __init__(self) -> None:
+        self.set_calls: list[tuple[str, str]] = []
+        self.clear_calls: list[str] = []
+
+    def set_managed_voice_channel(self, _ctx, guild_id: str, channel_id: str):
+        self.set_calls.append((guild_id, channel_id))
+        return SimpleNamespace(soundboard_enforcement_enabled=False)
+
+    def clear_managed_voice_channel(self, _ctx, guild_id: str):
+        self.clear_calls.append(guild_id)
+
+
+class _ConnectChannel:
+    def __init__(self, channel_id: int) -> None:
+        self.id = channel_id
+        self.mention = f"<# {channel_id}>".replace(" ", "")
+        self.type = commands_service.discord.ChannelType.voice
+
+    def permissions_for(self, _member):
+        return SimpleNamespace(view_channel=True, connect=True)
+
+
+class _ConnectGuild:
+    def __init__(self, channel: _ConnectChannel, bot_member: object) -> None:
+        self.channel = channel
+        self.bot_member = bot_member
+        self.me = bot_member
+
+    def get_channel(self, snowflake: int):
+        return self.channel if snowflake == self.channel.id else None
+
+    def get_member(self, user_id: int):
+        if str(user_id) == str(getattr(self.bot_member, "id", "")):
+            return self.bot_member
+        return None
+
+
+class _ConnectClient:
+    def __init__(self) -> None:
+        self.user = SimpleNamespace(id="999")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_connect_sets_managed_voice_channel() -> None:
+    service = _ManagedVoiceServiceStub()
+    channel = _ConnectChannel(555)
+    bot_member = SimpleNamespace(id="999")
+    interaction = SimpleNamespace(
+        guild=_ConnectGuild(channel, bot_member),
+        user=SimpleNamespace(id="u1"),
+    )
+    options = [ApplicationCommandInteractionDataOption(name="channel", value="555")]
+
+    result = await commands_service._dispatch_command(
+        _ConnectClient(),
+        service,  # type: ignore[arg-type]
+        interaction,  # type: ignore[arg-type]
+        _interaction_model(PERMISSION_ADMINISTRATOR),
+        "connect",
+        "",
+        options,
+        [],
+    )
+
+    assert "Managed voice channel set to" in result
+    assert service.set_calls == [("g1", "555")]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_disconnect_clears_managed_voice_channel() -> None:
+    service = _ManagedVoiceServiceStub()
+
+    result = await commands_service._dispatch_command(
+        _ConnectClient(),
+        service,  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        _interaction_model(PERMISSION_ADMINISTRATOR),
+        "disconnect",
+        "",
+        [],
+        [],
+    )
+
+    assert result == "Managed voice connection disabled."
+    assert service.clear_calls == ["g1"]
