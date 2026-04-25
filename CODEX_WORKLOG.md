@@ -2,7 +2,7 @@
 
 Updated: 2026-04-25, Europe/Berlin.
 
-Current task: keep maintainer memory aligned with the repo-root `Problems` file and the active review artifact.
+Current task: keep maintainer memory aligned with the repo-root `Problems` file and the active review artifact, and track the paginated `/dashboard` leaderboard UX change.
 
 ## Current State
 
@@ -13,6 +13,7 @@ Current task: keep maintainer memory aligned with the repo-root `Problems` file 
   - extend auto-unmute to the reported headphones/deafen case
   - fix tracking so all channels are tracked instead of one live channel with stale others
   - fix `/userinfo` status and banner behavior
+- `/dashboard` now has a Discord-only paginated embed with bottom arrow buttons, clickable member mentions, and `hours:minutes:seconds` totals.
 
 ## Documentation Notes
 

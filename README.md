@@ -13,6 +13,7 @@ Recent production stabilization changes include:
 - Fixed `/inspect` routing/permission edge cases for top-level options.
 - Auto-unmute handling covers server-controlled mute and deafen states for listed users.
 - `/userinfo` shows presence status only when Presence Intent is enabled.
+- `/dashboard` now renders a paginated leaderboard with arrow buttons and `hours:minutes:seconds` totals.
 - Added repository read models for dashboard and user profile totals.
 - Hardened tracker leave/close fallback behavior when runtime state is missing.
 - Added startup retry/backoff in writer service and expanded CI test lanes.
