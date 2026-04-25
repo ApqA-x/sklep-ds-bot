@@ -14,13 +14,17 @@ Recent production stabilization changes include:
 - Auto-unmute handling covers server-controlled mute and deafen states for listed users.
 - `/userinfo` shows presence status only when Presence Intent is enabled.
 - `/dashboard` now renders a paginated leaderboard with arrow buttons and `hours:minutes:seconds` totals.
+- Added `/connect channel:<voice>` and `/disconnect` for sticky managed voice connection.
+- Added `/settings soundboard on|off` as an independent enforcement toggle.
+- Gateway now auto-reconciles managed voice state and auto-returns the bot to the configured channel after move/kick/disconnect.
+- Soundboard enforcement is modular and only active when enabled.
 - Added repository read models for dashboard and user profile totals.
 - Hardened tracker leave/close fallback behavior when runtime state is missing.
 - Added startup retry/backoff in writer service and expanded CI test lanes.
 
 ## Services
 
-- `services.gateway`: consumes Discord voice-state updates and publishes `voice.events`; delivers session summaries back to Discord.
+- `services.gateway`: consumes Discord voice-state updates, supervises sticky managed voice connections, applies voice enforcement modules, publishes `voice.events`, and delivers session summaries.
 - `services.tracker`: owns session/participant lifecycle and emits `session.closed`.
 - `services.writer`: consumes `session.closed`, builds summary text, emits `session.summary`.
 - `services.commands`: owns slash command registration and command execution.
@@ -45,6 +49,7 @@ Full command reference lives in [COMMANDS.md](COMMANDS.md).
 - Python 3.11+
 - MongoDB
 - NATS
+- PyNaCl (required by Discord voice connection)
 - Discord bot token + app/guild IDs
 
 ## Configuration

@@ -17,10 +17,21 @@ Last updated: April 25, 2026.
   - Show current bot settings.
 - `/settings mode mode:all`
   - Show or confirm all-channel tracking mode. Only `all` is supported.
+- `/settings soundboard state:on|off`
+  - Toggle only soundboard kick enforcement.
+  - Does not connect/disconnect the bot from voice by itself.
 - `/settings summary-set channel:<text>`
   - Set summary/output channel.
 - `/settings summary-clear`
   - Clear configured summary channel (fallback behavior applies).
+
+- `/connect channel:<voice|stage>`
+  - Set managed voice channel and enable sticky voice presence.
+  - Gateway keeps the bot in that channel (auto-return on move/kick/disconnect).
+
+- `/disconnect`
+  - Clear managed voice channel and stop sticky voice behavior.
+  - Gateway disconnects the bot from voice.
 
 - `/inspect channel:<voice|stage>`
   - Show active session details for one channel.
@@ -51,6 +62,8 @@ Last updated: April 25, 2026.
 ## Notes
 
 - Tracking is all-channel; there are no public per-channel tracking commands.
+- Voice connection management is independent from enforcement toggles.
+- Soundboard enforcement runs only when both conditions are true: managed voice connection is active and `/settings soundboard` is `on`.
 - Command registration owner is `services.commands`.
 - Runtime policy enforcement exists in command handlers; Discord UI visibility alone is not treated as authorization.
 - `/inspect` supports additional internal route forms for compatibility/tests, but only the public route above is registered.

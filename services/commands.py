@@ -283,6 +283,14 @@ async def _dispatch_command(
     options = _normalize_snowflake_options(options)
     if root == "jump":
         return await _dispatch_jump_command(client, interaction, model, options)
+    if root == "connect":
+        if not _is_admin_only(model):
+            return "Insufficient permissions."
+        return await _dispatch_connect_command(client, service, interaction, model, options)
+    if root == "disconnect":
+        if not _is_admin_only(model):
+            return "Insufficient permissions."
+        return await _dispatch_disconnect_command(service, model)
     if root == "autorole":
         if not _is_admin_only(model):
             return "Insufficient permissions."
@@ -401,6 +409,39 @@ async def _dispatch_jump_command(
     _ensure_bot_can_move(bot_member, target)
     await member.move_to(target)
     return f"Moved you to {target.mention}."
+
+
+async def _dispatch_connect_command(
+    client: discord.Client,
+    service: VoiceService,
+    interaction: discord.Interaction,
+    model: InteractionCreate,
+    options: list[ApplicationCommandInteractionDataOption],
+) -> str:
+    channel_id = _option_string(options, "channel")
+    if channel_id == "":
+        raise ValueError("channel is required")
+    guild = getattr(interaction, "guild", None)
+    if guild is None:
+        raise ValueError("guild is required")
+    target = await _resolve_voice_target_channel(guild, channel_id)
+    if target is None:
+        raise ValueError("unable to resolve channel")
+    bot_member = await _bot_member(interaction, client)
+    if bot_member is None:
+        raise ValueError("bot member is unavailable")
+    _ensure_bot_can_connect(bot_member, target)
+
+    settings = service.set_managed_voice_channel(None, model.guild_id, str(target.id))
+    return (
+        f"Managed voice channel set to {target.mention}. "
+        f"Soundboard enforcement is {'on' if settings.soundboard_enforcement_enabled else 'off'}."
+    )
+
+
+async def _dispatch_disconnect_command(service: VoiceService, model: InteractionCreate) -> str:
+    service.clear_managed_voice_channel(None, model.guild_id)
+    return "Managed voice connection disabled."
 
 
 async def _dispatch_userinfo_command(
@@ -703,6 +744,14 @@ def _ensure_bot_can_move(bot_member: discord.Member, channel: discord.abc.GuildC
         raise ValueError("bot cannot connect to the target channel")
     if not permissions.move_members:
         raise ValueError("bot cannot move members in the target channel")
+
+
+def _ensure_bot_can_connect(bot_member: discord.Member, channel: discord.abc.GuildChannel) -> None:
+    permissions = channel.permissions_for(bot_member)
+    if not permissions.view_channel:
+        raise ValueError("bot cannot view the target channel")
+    if not permissions.connect:
+        raise ValueError("bot cannot connect to the target channel")
 
 
 def _member_can_view_channel(member: discord.Member, channel: discord.abc.GuildChannel) -> bool:

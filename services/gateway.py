@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import warnings
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 with warnings.catch_warnings():
     warnings.filterwarnings(
@@ -24,6 +25,31 @@ from voice_tracker.runtime import configure_logging, load_config, require_event_
 
 SUMMARY_EMBED_COLOR = 0x5865F2
 logger = logging.getLogger(__name__)
+
+
+def _channel_id(channel: object | None) -> str:
+    if channel is None:
+        return ""
+    if isinstance(channel, str):
+        return channel.strip()
+    return str(getattr(channel, "id", "") or getattr(channel, "channel_id", "") or "")
+
+
+def _guild_id(source: object | None) -> str:
+    if source is None:
+        return ""
+    guild = getattr(source, "guild", None)
+    if guild is not None:
+        guild_id = str(getattr(guild, "id", "") or "")
+        if guild_id:
+            return guild_id
+    channel = getattr(source, "channel", None)
+    if channel is not None:
+        guild = getattr(channel, "guild", None)
+        guild_id = str(getattr(guild, "id", "") or "")
+        if guild_id:
+            return guild_id
+    return str(getattr(source, "guild_id", "") or "")
 
 
 async def _resolve_channel(client: discord.Client, channel_id: str):
@@ -185,6 +211,294 @@ def _auto_unmute_user_ids_for_guild(repo: Repository, guild_id: str) -> list[str
     return _normalize_ids(getattr(settings, "auto_unmute_user_ids", []) or [])
 
 
+def _managed_voice_channel_id(settings: domain.GuildSettings | None) -> str:
+    if settings is None:
+        return ""
+    return str(getattr(settings, "managed_voice_channel_id", "") or "").strip()
+
+
+def _soundboard_enforcement_enabled(settings: domain.GuildSettings | None) -> bool:
+    return bool(getattr(settings, "soundboard_enforcement_enabled", False)) if settings is not None else False
+
+
+def _guild_from_client(client: discord.Client, guild_id: str) -> discord.Guild | None:
+    if guild_id == "":
+        return None
+    get_guild = getattr(client, "get_guild", None)
+    if callable(get_guild):
+        try:
+            snowflake = int(guild_id)
+        except ValueError:
+            snowflake = None
+        if snowflake is not None:
+            guild = get_guild(snowflake)
+            if guild is not None:
+                return guild
+        guild = get_guild(guild_id)
+        if guild is not None:
+            return guild
+    for guild in list(getattr(client, "guilds", []) or []):
+        if str(getattr(guild, "id", "") or "") == guild_id:
+            return guild
+    return None
+
+
+def _guild_voice_client(client: discord.Client, guild: discord.Guild) -> discord.VoiceClient | None:
+    voice_client = getattr(guild, "voice_client", None)
+    if voice_client is not None:
+        return voice_client
+    for candidate in list(getattr(client, "voice_clients", []) or []):
+        candidate_guild = getattr(candidate, "guild", None)
+        if candidate_guild is not None and str(getattr(candidate_guild, "id", "") or "") == str(guild.id):
+            return candidate
+    return None
+
+
+def _voice_client_connected(client: object | None) -> bool:
+    if client is None:
+        return False
+    is_connected = getattr(client, "is_connected", None)
+    if callable(is_connected):
+        try:
+            return bool(is_connected())
+        except Exception:
+            return False
+    return getattr(client, "channel", None) is not None
+
+
+async def _safe_voice_disconnect(client: object | None) -> None:
+    if client is None:
+        return
+    disconnect = getattr(client, "disconnect", None)
+    if not callable(disconnect):
+        return
+    try:
+        await disconnect()
+    except Exception:
+        logger.exception("managed voice disconnect failed")
+
+
+async def _resolve_managed_voice_channel(guild: discord.Guild, channel_id: str) -> discord.abc.GuildChannel | None:
+    try:
+        snowflake = int(channel_id)
+    except ValueError:
+        return None
+    channel = guild.get_channel(snowflake)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(snowflake)
+        except Exception:
+            return None
+    if channel is None:
+        return None
+    if getattr(channel, "type", None) not in {discord.ChannelType.voice, discord.ChannelType.stage_voice}:
+        return None
+    return channel
+
+
+def _bot_connected_channel_id(bot_member: discord.Member | None) -> str:
+    voice = getattr(bot_member, "voice", None)
+    return _channel_id(getattr(voice, "channel", None))
+
+
+def _is_soundboard_effect(effect: object) -> bool:
+    for name in ("sound_id", "soundboard_sound_id", "sound", "soundboard_sound"):
+        value = getattr(effect, name, None)
+        if value is not None and str(value) != "":
+            return True
+    return False
+
+
+def _voice_effect_user_id(effect: object) -> str:
+    user_id = str(getattr(effect, "user_id", "") or "")
+    if user_id:
+        return user_id
+    user = getattr(effect, "user", None)
+    if user is not None:
+        user_id = str(getattr(user, "id", "") or "")
+        if user_id:
+            return user_id
+    member = getattr(effect, "member", None)
+    return str(getattr(member, "id", "") or "")
+
+
+def _set_managed_connected_at(repo: Repository, guild_id: str, connected_at: datetime | None) -> None:
+    settings = repo.get_guild_settings(None, guild_id)
+    if connected_at is None:
+        if settings is None or settings.managed_voice_connected_at is None:
+            return
+        settings.managed_voice_connected_at = None
+        repo.upsert_guild_settings(None, settings)
+        return
+    if settings is None:
+        settings = domain.GuildSettings(guild_id=guild_id)
+    if settings.managed_voice_connected_at is not None:
+        return
+    settings.managed_voice_connected_at = connected_at
+    repo.upsert_guild_settings(None, settings)
+
+
+@dataclass(slots=True)
+class ManagedVoiceController:
+    client: discord.Client
+    repo: Repository
+    guild_id: str
+    reconnect_backoff_seconds: int = 5
+    _locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _retry_after: dict[str, datetime] = field(default_factory=dict)
+
+    async def reconcile(self) -> None:
+        await self.reconcile_guild(self.guild_id)
+
+    async def reconcile_guild(self, guild_id: str) -> None:
+        guild_id = str(guild_id or "").strip()
+        if guild_id == "" or guild_id != self.guild_id:
+            return
+        now = datetime.now(UTC)
+        retry_after = self._retry_after.get(guild_id)
+        if retry_after is not None and now < retry_after:
+            return
+        lock = self._locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            try:
+                await self._reconcile_guild_locked(guild_id)
+            except Exception:
+                self._retry_after[guild_id] = datetime.now(UTC) + timedelta(seconds=max(1, self.reconnect_backoff_seconds))
+                logger.exception("managed voice reconcile failed guild=%s", guild_id)
+            else:
+                self._retry_after.pop(guild_id, None)
+
+    async def _reconcile_guild_locked(self, guild_id: str) -> None:
+        settings = self.repo.get_guild_settings(None, guild_id)
+        managed_channel_id = _managed_voice_channel_id(settings)
+        guild = _guild_from_client(self.client, guild_id)
+        if guild is None:
+            _set_managed_connected_at(self.repo, guild_id, None)
+            return
+
+        voice_client = _guild_voice_client(self.client, guild)
+        if managed_channel_id == "":
+            if _voice_client_connected(voice_client):
+                await _safe_voice_disconnect(voice_client)
+            _set_managed_connected_at(self.repo, guild_id, None)
+            return
+
+        channel = await _resolve_managed_voice_channel(guild, managed_channel_id)
+        if channel is None:
+            logger.warning("managed voice channel missing guild=%s channel_id=%s", guild_id, managed_channel_id)
+            _set_managed_connected_at(self.repo, guild_id, None)
+            return
+
+        bot_member = await _resolve_bot_member(self.client, guild)
+        if bot_member is None:
+            _set_managed_connected_at(self.repo, guild_id, None)
+            return
+        permissions = channel.permissions_for(bot_member)
+        if not bool(getattr(permissions, "view_channel", False)) or not bool(getattr(permissions, "connect", False)):
+            logger.warning(
+                "managed voice connect blocked guild=%s channel_id=%s view=%s connect=%s",
+                guild_id,
+                managed_channel_id,
+                bool(getattr(permissions, "view_channel", False)),
+                bool(getattr(permissions, "connect", False)),
+            )
+            _set_managed_connected_at(self.repo, guild_id, None)
+            return
+
+        if voice_client is None:
+            await channel.connect()
+        elif not _voice_client_connected(voice_client):
+            await _safe_voice_disconnect(voice_client)
+            await channel.connect()
+        else:
+            current_channel_id = _channel_id(getattr(voice_client, "channel", None))
+            if current_channel_id != managed_channel_id:
+                await voice_client.move_to(channel)
+
+        refreshed_bot_member = await _resolve_bot_member(self.client, guild)
+        if _bot_connected_channel_id(refreshed_bot_member) == managed_channel_id:
+            _set_managed_connected_at(self.repo, guild_id, datetime.now(UTC))
+            return
+        _set_managed_connected_at(self.repo, guild_id, None)
+
+    async def is_connected_to_managed_channel(self, guild_id: str, managed_channel_id: str) -> bool:
+        guild = _guild_from_client(self.client, str(guild_id or "").strip())
+        if guild is None:
+            return False
+        bot_member = await _resolve_bot_member(self.client, guild)
+        if bot_member is None:
+            return False
+        return _bot_connected_channel_id(bot_member) == str(managed_channel_id or "").strip()
+
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
+        if guild_id != self.guild_id:
+            return
+        bot_user = getattr(self.client, "user", None)
+        bot_user_id = str(getattr(bot_user, "id", "") or "")
+        if str(getattr(member, "id", "") or "") != bot_user_id:
+            return
+        before_channel_id = _channel_id(getattr(before, "channel", None))
+        after_channel_id = _channel_id(getattr(after, "channel", None))
+        if before_channel_id == after_channel_id:
+            return
+        await self.reconcile_guild(guild_id)
+
+
+@dataclass(slots=True)
+class SoundboardEnforcement:
+    client: discord.Client
+    repo: Repository
+    guild_id: str
+    voice_controller: ManagedVoiceController
+
+    async def on_voice_channel_effect(self, effect: object) -> None:
+        guild_id = _guild_id(effect)
+        if guild_id != self.guild_id:
+            return
+        if not _is_soundboard_effect(effect):
+            return
+        settings = self.repo.get_guild_settings(None, guild_id)
+        managed_channel_id = _managed_voice_channel_id(settings)
+        if managed_channel_id == "" or not _soundboard_enforcement_enabled(settings):
+            return
+        effect_channel_id = _channel_id(getattr(effect, "channel", None) or getattr(effect, "channel_id", None))
+        if effect_channel_id != managed_channel_id:
+            return
+        if not await self.voice_controller.is_connected_to_managed_channel(guild_id, managed_channel_id):
+            return
+
+        user_id = _voice_effect_user_id(effect)
+        if user_id == "":
+            return
+        guild = getattr(effect, "guild", None)
+        if guild is None:
+            guild = _guild_from_client(self.client, guild_id)
+        if guild is None:
+            return
+        member = await _resolve_member(guild, user_id)
+        if member is None or bool(getattr(member, "bot", False)):
+            return
+        member_channel_id = _channel_id(getattr(getattr(member, "voice", None), "channel", None))
+        if member_channel_id != managed_channel_id:
+            return
+
+        bot_member = await _resolve_bot_member(self.client, guild)
+        managed_channel = await _resolve_managed_voice_channel(guild, managed_channel_id)
+        if bot_member is None or managed_channel is None:
+            return
+        permissions = managed_channel.permissions_for(bot_member)
+        if not bool(getattr(permissions, "move_members", False)):
+            logger.warning("soundboard enforcement blocked guild=%s missing move_members", guild_id)
+            return
+        try:
+            await member.move_to(None, reason="Voice Tracker soundboard enforcement")
+        except discord.Forbidden:
+            logger.warning("soundboard enforcement forbidden guild=%s user=%s", guild_id, user_id)
+        except Exception:
+            logger.exception("soundboard enforcement failed guild=%s user=%s", guild_id, user_id)
+
+
 async def main() -> None:
     configure_logging("gateway")
     cfg = load_config()
@@ -206,6 +520,17 @@ async def main() -> None:
     intents.members = True
     client = discord.Client(intents=intents)
     GatewayService(client, bus).install()
+    voice_controller = ManagedVoiceController(client=client, repo=repo, guild_id=cfg.discord_guild_id)
+    soundboard_enforcement = SoundboardEnforcement(
+        client=client,
+        repo=repo,
+        guild_id=cfg.discord_guild_id,
+        voice_controller=voice_controller,
+    )
+
+    @client.event
+    async def on_ready() -> None:
+        await voice_controller.reconcile()
 
     @client.event
     async def on_member_join(member: discord.Member) -> None:
@@ -316,6 +641,8 @@ async def main() -> None:
         )
 
     install_event_listener(client, "on_voice_state_update", _on_voice_state_update_unmute)
+    install_event_listener(client, "on_voice_state_update", voice_controller.on_voice_state_update)
+    install_event_listener(client, "on_voice_channel_effect", soundboard_enforcement.on_voice_channel_effect)
 
     async def handle_summary(payload: bytes) -> None:
         event = summary_from_payload(payload)
@@ -363,11 +690,18 @@ async def main() -> None:
             await asyncio.sleep(60)
             await _deliver_pending(client, repo)
 
+    async def reconcile_managed_voice() -> None:
+        while True:
+            await asyncio.sleep(5)
+            await voice_controller.reconcile()
+
     sweep = asyncio.create_task(sweep_pending())
+    reconcile = asyncio.create_task(reconcile_managed_voice())
     try:
         await client.connect()
     finally:
         sweep.cancel()
+        reconcile.cancel()
         await bus.aclose()
         mongo_client.close()
 

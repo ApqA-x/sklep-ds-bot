@@ -52,6 +52,9 @@ class GuildSettings:
     fallback_summary_channel_id: str = ""
     auto_role_id: str = ""
     auto_unmute_user_ids: list[str] = field(default_factory=list)
+    soundboard_enforcement_enabled: bool = False
+    managed_voice_channel_id: str = ""
+    managed_voice_connected_at: datetime | None = None
 
     def __post_init__(self) -> None:
         self.guild_id = _clean(self.guild_id)
@@ -61,6 +64,9 @@ class GuildSettings:
         self.fallback_summary_channel_id = _clean(self.fallback_summary_channel_id)
         self.auto_role_id = _clean(self.auto_role_id)
         self.auto_unmute_user_ids = clean_channel_ids(self.auto_unmute_user_ids)
+        self.soundboard_enforcement_enabled = bool(self.soundboard_enforcement_enabled)
+        self.managed_voice_channel_id = _clean(self.managed_voice_channel_id)
+        self.managed_voice_connected_at = ensure_utc(self.managed_voice_connected_at)
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
 
@@ -97,6 +103,9 @@ class GuildSettings:
             fallback_summary_channel_id=data.get("fallbackSummaryChannelId", ""),
             auto_role_id=data.get("autoRoleId", ""),
             auto_unmute_user_ids=list(data.get("autoUnmuteUserIds") or []),
+            soundboard_enforcement_enabled=bool(data.get("soundboardEnforcementEnabled", False)),
+            managed_voice_channel_id=data.get("managedVoiceChannelId", ""),
+            managed_voice_connected_at=parse_datetime(data.get("managedVoiceConnectedAt")),
             created_at=parse_datetime(data.get("createdAt")),
             updated_at=parse_datetime(data.get("updatedAt")),
         )
@@ -110,6 +119,9 @@ def new_guild_settings(
     fallback_summary_channel_id: str = "",
     auto_role_id: str = "",
     auto_unmute_user_ids: list[str] | None = None,
+    soundboard_enforcement_enabled: bool = False,
+    managed_voice_channel_id: str = "",
+    managed_voice_connected_at: datetime | None = None,
 ) -> GuildSettings:
     return GuildSettings(
         guild_id,
@@ -119,6 +131,9 @@ def new_guild_settings(
         fallback_summary_channel_id=fallback_summary_channel_id,
         auto_role_id=auto_role_id,
         auto_unmute_user_ids=auto_unmute_user_ids or [],
+        soundboard_enforcement_enabled=soundboard_enforcement_enabled,
+        managed_voice_channel_id=managed_voice_channel_id,
+        managed_voice_connected_at=managed_voice_connected_at,
     )
 
 

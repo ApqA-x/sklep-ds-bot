@@ -23,6 +23,7 @@ When behavior changes, update these files in the same PR:
 - Confirm command registration source remains `services.commands`.
 - Confirm access model (`ADMIN_ONLY` vs `ALL_USER`) still matches runtime checks.
 - If commands are removed, remove them from maintainer and user-facing docs instead of describing them as retained aliases.
+- Keep voice connection ownership (`/connect`, `/disconnect`) separate from enforcement toggles (`/settings soundboard on|off`).
 
 ## Reliability/Operations Checklist
 
