@@ -409,5 +409,5 @@ def test_option_int_in_range_rounds_and_defaults() -> None:
         option_int_in_range([option("limit", 7.5)], "limit", 5, 1, 10)
 
 
-def test_format_duration_matches_go_style() -> None:
-    assert format_duration(timedelta(hours=1)) == "1h0m0s"
+def test_format_duration_matches_hms_style() -> None:
+    assert format_duration(timedelta(hours=1)) == "1:00:00"

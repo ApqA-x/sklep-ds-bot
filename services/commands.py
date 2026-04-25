@@ -75,21 +75,33 @@ class DashboardView(discord.ui.View):
         *,
         owner_user_id: str,
         rows: list[object],
+        client: discord.Client | None = None,
+        guild: discord.Guild | None = None,
         page: int = 1,
         page_size: int = DASHBOARD_PAGE_SIZE,
     ) -> None:
         super().__init__(timeout=300)
+        self.client = client
+        self.guild = guild
         self.owner_user_id = owner_user_id
         self.rows = list(rows)
         self.page = max(1, page)
         self.page_size = max(1, page_size)
         self.total_pages = max(1, (len(self.rows) + self.page_size - 1) // self.page_size)
+        self.resolved_display_names: dict[str, str] = {}
         self._sync_buttons()
 
-    def build_embed(self) -> discord.Embed:
+    async def build_embed(self, guild: discord.Guild | None = None) -> discord.Embed:
         embed = discord.Embed(
             title="Ranking Top",
-            description=_dashboard_description(self.rows, self.page, self.page_size),
+            description=await _dashboard_description(
+                self.client,
+                guild or self.guild,
+                self.rows,
+                self.page,
+                self.page_size,
+                resolved_display_names=self.resolved_display_names,
+            ),
             color=0x2B2D42,
         )
         embed.set_footer(text=f"Page {self.page} of {self.total_pages} • Total members: {len(self.rows)}")
@@ -102,7 +114,7 @@ class DashboardView(discord.ui.View):
     async def _change_page(self, interaction: discord.Interaction, page: int) -> None:
         self.page = min(max(1, page), self.total_pages)
         self._sync_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await interaction.response.edit_message(embed=await self.build_embed(getattr(interaction, "guild", None)), view=self)
 
     def _sync_buttons(self) -> None:
         self.first_page.disabled = self.page <= 1
@@ -280,7 +292,7 @@ async def _dispatch_command(
             return "Insufficient permissions."
         return _dispatch_unmute_command(service, model, command, options)
     if root == "dashboard":
-        return await _dispatch_dashboard_command(service, model, interaction)
+        return await _dispatch_dashboard_command(client, service, model, interaction)
     if root == "userinfo":
         return await _dispatch_userinfo_command(client, service, model, interaction, options)
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
@@ -434,6 +446,7 @@ async def _dispatch_userinfo_command(
 
 
 async def _dispatch_dashboard_command(
+    client: discord.Client,
     service: VoiceService,
     model: InteractionCreate,
     interaction: discord.Interaction,
@@ -442,8 +455,13 @@ async def _dispatch_dashboard_command(
     if len(rows) == 0:
         return "No voice totals yet."
     owner_user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
-    view = DashboardView(owner_user_id=owner_user_id, rows=rows)
-    return InteractionMessage(embed=view.build_embed(), view=view)
+    view = DashboardView(
+        client=client,
+        guild=getattr(interaction, "guild", None),
+        owner_user_id=owner_user_id,
+        rows=rows,
+    )
+    return InteractionMessage(embed=await view.build_embed(), view=view)
 
 
 async def _dispatch_service_method(
@@ -462,21 +480,37 @@ async def _dispatch_service_method(
     return "Command unavailable."
 
 
-def _dashboard_description(rows: list[object], page: int, page_size: int) -> str:
+async def _dashboard_description(
+    client: discord.Client | None,
+    guild: discord.Guild | None,
+    rows: list[object],
+    page: int,
+    page_size: int,
+    *,
+    resolved_display_names: dict[str, str] | None = None,
+) -> str:
     page = max(1, page)
     page_size = max(1, page_size)
     start = (page - 1) * page_size
     visible_rows = rows[start : start + page_size]
     if len(visible_rows) == 0:
         return "No voice totals yet."
+    display_names = await asyncio.gather(
+        *[
+            _dashboard_display_name(client, guild, row, resolved_display_names)
+            for row in visible_rows
+        ]
+    )
     lines = ["Sorted by voice time", ""]
-    for index, row in enumerate(visible_rows, start=start + 1):
-        display_name = _sanitize_public_text(str(getattr(row, "user_name", getattr(row, "display_name", "")) or "")) or str(
-            getattr(row, "user_id", "")
-        )
+    for index, (row, display_name) in enumerate(zip(visible_rows, display_names, strict=False), start=start + 1):
         user_id = str(getattr(row, "user_id", "") or "")
         clickable_tag = f"<@{user_id}>" if user_id else display_name
-        lines.append(f"**#{index}.** {display_name} {clickable_tag}")
+        if display_name and clickable_tag and display_name != clickable_tag:
+            lines.append(f"**#{index}.** {display_name} {clickable_tag}")
+        elif clickable_tag:
+            lines.append(f"**#{index}.** {clickable_tag}")
+        else:
+            lines.append(f"**#{index}.** Unknown user")
         lines.append(f"Hours: `{_dashboard_duration(getattr(row, 'total_for', None))}`")
         if index != start + len(visible_rows):
             lines.append("")
@@ -517,7 +551,7 @@ def _normalize_snowflake_options(
 def _userinfo_total_voice_time(service: VoiceService, guild_id: str, user_id: str) -> str:
     profile = service.get_member_profile(None, guild_id, user_id)
     if profile is None:
-        return "0s"
+        return format_duration(timedelta())
     return format_duration(profile.total_for)
 
 
@@ -718,6 +752,55 @@ async def _fetch_user_by_id(client: discord.Client, user_id: str) -> discord.Use
         return await client.fetch_user(snowflake)
     except Exception:
         return client.get_user(snowflake)
+
+
+async def _dashboard_display_name(
+    client: discord.Client | None,
+    guild: discord.Guild | None,
+    row: object,
+    resolved_display_names: dict[str, str] | None = None,
+) -> str:
+    user_id = str(getattr(row, "user_id", "") or "")
+    if user_id and resolved_display_names is not None and user_id in resolved_display_names:
+        return resolved_display_names[user_id]
+
+    display_name = ""
+    if guild is not None and user_id != "":
+        member = await _resolve_member_by_id(guild, user_id)
+        display_name = _sanitize_public_text(_dashboard_member_name(member))
+    if display_name == "" and user_id != "" and client is not None:
+        user = await _fetch_user_by_id(client, user_id)
+        display_name = _sanitize_public_text(_dashboard_user_name(user))
+    if display_name == "":
+        display_name = _dashboard_stored_name(row, user_id)
+    if display_name == user_id:
+        display_name = ""
+    if user_id and resolved_display_names is not None:
+        resolved_display_names[user_id] = display_name
+    return display_name
+
+
+def _dashboard_member_name(member: discord.Member | None) -> str:
+    if member is None:
+        return ""
+    return str(member.display_name or "")
+
+
+def _dashboard_user_name(user: discord.User | None) -> str:
+    if user is None:
+        return ""
+    for attr in ("display_name", "global_name", "name"):
+        value = str(getattr(user, attr, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _dashboard_stored_name(row: object, user_id: str) -> str:
+    stored_name = _sanitize_public_text(str(getattr(row, "user_name", getattr(row, "display_name", "")) or ""))
+    if stored_name == "" or stored_name == user_id:
+        return ""
+    return stored_name
 
 
 def _userinfo_display_name(member: discord.Member | None, user: discord.User | None, fallback_user_id: str) -> str:

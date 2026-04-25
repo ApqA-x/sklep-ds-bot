@@ -27,7 +27,7 @@ from .discord_models import (
     PERMISSION_ADMINISTRATOR,
     PERMISSION_MANAGE_GUILD,
 )
-from .timeutil import discord_timestamp, go_duration
+from .timeutil import discord_timestamp, hms_duration
 
 logger = logging.getLogger(__name__)
 
@@ -661,7 +661,7 @@ class Service:
             raise ValueError("user is required")
         profile = _load_member_profile(self.repo, ctx, interaction.guild_id, user_id)
         if profile is None:
-            return f"User: {user_id}\nTotal voice time: 0s"
+            return f"User: {user_id}\nTotal voice time: {format_duration(timedelta())}"
         lines = [f"User: {profile.user_name or profile.user_id}", f"Total voice time: {format_duration(profile.total_for)}"]
         if len(profile.roles) > 0:
             lines.append(f"Roles: {_truncate_list(profile.roles, 10)}")
@@ -1093,9 +1093,7 @@ def respond_ephemeral(session: Any, interaction: InteractionCreate, content: str
 
 
 def format_duration(value: timedelta) -> str:
-    if value.total_seconds() < 0:
-        value = timedelta()
-    return go_duration(value, round_seconds=True)
+    return hms_duration(value, round_seconds=True)
 
 
 def format_time(value: datetime | None) -> str:
