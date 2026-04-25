@@ -164,6 +164,10 @@ def _voice_state_is_muted(state: object) -> bool:
     return bool(getattr(state, "mute", False))
 
 
+def _voice_state_is_deafened(state: object) -> bool:
+    return bool(getattr(state, "deaf", False))
+
+
 def _auto_unmute_user_ids_for_guild(repo: Repository, guild_id: str) -> list[str]:
     getter = getattr(repo, "get_auto_unmute_user_ids", None)
     if callable(getter):
@@ -236,7 +240,9 @@ async def main() -> None:
         if getattr(member, "bot", False):
             return
         current_state = getattr(member, "voice", None) or after
-        if not _voice_state_is_muted(after) and not _voice_state_is_muted(current_state):
+        should_clear_mute = _voice_state_is_muted(after) or _voice_state_is_muted(current_state)
+        should_clear_deafen = _voice_state_is_deafened(after) or _voice_state_is_deafened(current_state)
+        if not should_clear_mute and not should_clear_deafen:
             return
         user_id = str(member.id)
         auto_unmute_ids = _auto_unmute_user_ids_for_guild(repo, str(member.guild.id))
@@ -246,13 +252,37 @@ async def main() -> None:
         if bot_member is None:
             logger.warning("auto-unmute skipped guild=%s missing bot member", member.guild.id)
             return
-        if not bot_member.guild_permissions.mute_members:
-            logger.warning("auto-unmute skipped guild=%s missing mute_members permission", member.guild.id)
+        permissions = getattr(bot_member, "guild_permissions", None)
+        edit_kwargs: dict[str, bool] = {}
+        missing_permissions: list[str] = []
+        if should_clear_mute:
+            if bool(getattr(permissions, "mute_members", False)):
+                edit_kwargs["mute"] = False
+            else:
+                missing_permissions.append("mute_members")
+        if should_clear_deafen:
+            if bool(getattr(permissions, "deafen_members", False)):
+                edit_kwargs["deafen"] = False
+            else:
+                missing_permissions.append("deafen_members")
+        if not edit_kwargs:
+            logger.warning(
+                "auto-unmute skipped guild=%s missing permissions=%s",
+                member.guild.id,
+                ",".join(missing_permissions),
+            )
             return
+        if missing_permissions:
+            logger.warning(
+                "auto-unmute partial guild=%s user=%s missing permissions=%s",
+                member.guild.id,
+                user_id,
+                ",".join(missing_permissions),
+            )
         await asyncio.sleep(0.25)
         for attempt in range(3):
             try:
-                await member.edit(mute=False, reason="Voice Tracker auto-unmute")
+                await member.edit(reason="Voice Tracker auto-unmute", **edit_kwargs)
             except discord.Forbidden:
                 logger.warning("auto-unmute forbidden guild=%s user=%s", member.guild.id, user_id)
                 return
@@ -263,11 +293,27 @@ async def main() -> None:
             else:
                 refreshed_member = await _resolve_member(member.guild, user_id)
                 refreshed_state = getattr(refreshed_member, "voice", None) if refreshed_member is not None else None
-                if refreshed_state is None or not _voice_state_is_muted(refreshed_state):
-                    logger.info("auto-unmute applied guild=%s user=%s attempt=%s", member.guild.id, user_id, attempt + 1)
+                mute_cleared = "mute" not in edit_kwargs or refreshed_state is None or not _voice_state_is_muted(refreshed_state)
+                deafen_cleared = (
+                    "deafen" not in edit_kwargs
+                    or refreshed_state is None
+                    or not _voice_state_is_deafened(refreshed_state)
+                )
+                if mute_cleared and deafen_cleared:
+                    logger.info(
+                        "auto-unmute applied guild=%s user=%s attempt=%s",
+                        member.guild.id,
+                        user_id,
+                        attempt + 1,
+                    )
                     return
             await asyncio.sleep(0.25 * (attempt + 1))
-        logger.warning("auto-unmute did not clear mute state guild=%s user=%s", member.guild.id, user_id)
+        logger.warning(
+            "auto-unmute did not clear states guild=%s user=%s states=%s",
+            member.guild.id,
+            user_id,
+            ",".join(sorted(edit_kwargs)),
+        )
 
     install_event_listener(client, "on_voice_state_update", _on_voice_state_update_unmute)
 

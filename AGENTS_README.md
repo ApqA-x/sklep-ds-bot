@@ -22,7 +22,7 @@ When behavior changes, update these files in the same PR:
 - Confirm command names/subcommands in `voice_tracker/commands.py`.
 - Confirm command registration source remains `services.commands`.
 - Confirm access model (`ADMIN_ONLY` vs `ALL_USER`) still matches runtime checks.
-- Document deprecated aliases and expected migration path.
+- If commands are removed, remove them from maintainer and user-facing docs instead of describing them as retained aliases.
 
 ## Reliability/Operations Checklist
 
@@ -34,3 +34,8 @@ When behavior changes, update these files in the same PR:
 - Remove obsolete ad-hoc planning docs once work is shipped.
 - Keep historical design research in `docs/` if still useful, otherwise archive or delete.
 - Keep user-facing docs concise and accurate to the current code, not planned future behavior.
+
+## Review Artifacts
+
+- Active repo review/planning artifacts should live in `docs/` and be linked from `docs/README.md`.
+- If a user references an issue/problem file that is missing on disk, record that blocker explicitly in the review artifact instead of inventing the source material.

@@ -226,6 +226,69 @@ async def test_leave_falls_back_to_repo_when_state_not_hydrated() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tracking_mode", "tracked_channel_ids"),
+    [
+        (domain.GUILD_TRACKING_MODE_NONE, []),
+        (domain.GUILD_TRACKING_MODE_SPECIFIC, ["other-channel"]),
+    ],
+)
+async def test_legacy_tracking_modes_do_not_suppress_join_leave(
+    tracking_mode: str,
+    tracked_channel_ids: list[str],
+) -> None:
+    repo = FakeRepo()
+    repo.settings["g1"] = domain.GuildSettings(
+        guild_id="g1",
+        tracking_mode=tracking_mode,
+        tracked_channel_ids=tracked_channel_ids,
+    )
+    publisher = FakePublisher()
+    svc = Service(repo, publisher, Defaults())
+    start = datetime(2026, 4, 5, 18, 0, 0, tzinfo=UTC)
+    end = start + timedelta(minutes=3)
+
+    await svc.HandleVoiceEvent(
+        domain.VoiceStateEvent(
+            guild_id="g1",
+            channel_id="c1",
+            user_id="u1",
+            user_name="alice",
+            occurred_at=start,
+        )
+    )
+    await svc.HandleVoiceEvent(
+        domain.VoiceStateEvent(
+            guild_id="g1",
+            previous_channel_id="c1",
+            user_id="u1",
+            occurred_at=end,
+        )
+    )
+
+    assert len(repo.created_sessions) == 1
+    assert len(repo.closed_parts) == 1
+    assert len(repo.closed_events) == 1
+    assert len(publisher.events) == 1
+
+
+def test_guild_settings_canonical_for_voice_tracking_forces_all_channels() -> None:
+    settings = domain.GuildSettings(
+        guild_id="g1",
+        tracking_mode=domain.GUILD_TRACKING_MODE_SPECIFIC,
+        tracked_channel_ids=["c2"],
+        summary_channel_id="summary",
+    )
+
+    canonical = settings.canonical_for_voice_tracking()
+
+    assert canonical is not settings
+    assert canonical.tracking_mode == domain.GUILD_TRACKING_MODE_ALL
+    assert canonical.tracked_channel_ids == []
+    assert canonical.summary_channel_id == "summary"
+
+
+@pytest.mark.asyncio
 async def test_main_subscribes_before_start(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 

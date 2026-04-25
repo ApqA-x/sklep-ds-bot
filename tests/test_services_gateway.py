@@ -95,6 +95,16 @@ async def _boot_gateway(monkeypatch, fake_repo: FakeRepo) -> object:
     return callback
 
 
+def _bot_member(*, mute_members: bool = False, deafen_members: bool = False):
+    return SimpleNamespace(
+        id="999",
+        guild_permissions=SimpleNamespace(
+            mute_members=mute_members,
+            deafen_members=deafen_members,
+        ),
+    )
+
+
 async def test_auto_unmute_listener_runs_when_member_is_already_muted(monkeypatch) -> None:
     callback = await _boot_gateway(monkeypatch, FakeRepo({"123": ["42"]}))
 
@@ -103,7 +113,7 @@ async def test_auto_unmute_listener_runs_when_member_is_already_muted(monkeypatc
     async def edit(**kwargs):
         edit_calls.append(kwargs)
 
-    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(mute_members=True))
+    bot_member = _bot_member(mute_members=True)
     guild = SimpleNamespace(
         id="123",
         me=None,
@@ -124,7 +134,7 @@ async def test_auto_unmute_listener_runs_when_member_is_newly_muted(monkeypatch)
     async def edit(**kwargs):
         edit_calls.append(kwargs)
 
-    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(mute_members=True))
+    bot_member = _bot_member(mute_members=True)
     guild = SimpleNamespace(
         id="123",
         me=None,
@@ -145,7 +155,7 @@ async def test_auto_unmute_listener_normalizes_repo_ids(monkeypatch) -> None:
     async def edit(**kwargs):
         edit_calls.append(kwargs)
 
-    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(mute_members=True))
+    bot_member = _bot_member(mute_members=True)
     guild = SimpleNamespace(
         id="123",
         me=None,
@@ -154,6 +164,102 @@ async def test_auto_unmute_listener_normalizes_repo_ids(monkeypatch) -> None:
     member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit)
 
     await callback(member, SimpleNamespace(mute=False), SimpleNamespace(mute=True))
+
+    assert edit_calls == [{"mute": False, "reason": "Voice Tracker auto-unmute"}]
+
+
+async def test_auto_unmute_listener_clears_guild_deafen(monkeypatch) -> None:
+    callback = await _boot_gateway(monkeypatch, FakeRepo({"123": ["42"]}))
+
+    edit_calls: list[dict[str, object]] = []
+
+    async def edit(**kwargs):
+        edit_calls.append(kwargs)
+
+    bot_member = _bot_member(deafen_members=True)
+    guild = SimpleNamespace(
+        id="123",
+        me=None,
+        get_member=lambda user_id: bot_member if str(user_id) == "999" else None,
+    )
+    member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit)
+
+    await callback(member, SimpleNamespace(deaf=False), SimpleNamespace(deaf=True))
+
+    assert edit_calls == [{"deafen": False, "reason": "Voice Tracker auto-unmute"}]
+
+
+async def test_auto_unmute_listener_does_not_override_self_deafen(monkeypatch) -> None:
+    callback = await _boot_gateway(monkeypatch, FakeRepo({"123": ["42"]}))
+
+    edit_calls: list[dict[str, object]] = []
+
+    async def edit(**kwargs):
+        edit_calls.append(kwargs)
+
+    bot_member = _bot_member(mute_members=True, deafen_members=True)
+    guild = SimpleNamespace(
+        id="123",
+        me=None,
+        get_member=lambda user_id: bot_member if str(user_id) == "999" else None,
+    )
+    member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit)
+
+    await callback(
+        member,
+        SimpleNamespace(deaf=False, self_deaf=False),
+        SimpleNamespace(deaf=False, self_deaf=True),
+    )
+
+    assert edit_calls == []
+
+
+async def test_auto_unmute_listener_does_not_override_self_mute(monkeypatch) -> None:
+    callback = await _boot_gateway(monkeypatch, FakeRepo({"123": ["42"]}))
+
+    edit_calls: list[dict[str, object]] = []
+
+    async def edit(**kwargs):
+        edit_calls.append(kwargs)
+
+    bot_member = _bot_member(mute_members=True, deafen_members=True)
+    guild = SimpleNamespace(
+        id="123",
+        me=None,
+        get_member=lambda user_id: bot_member if str(user_id) == "999" else None,
+    )
+    member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit)
+
+    await callback(
+        member,
+        SimpleNamespace(mute=False, self_mute=False),
+        SimpleNamespace(mute=False, self_mute=True),
+    )
+
+    assert edit_calls == []
+
+
+async def test_auto_unmute_listener_clears_mute_without_deafen_permission(monkeypatch) -> None:
+    callback = await _boot_gateway(monkeypatch, FakeRepo({"123": ["42"]}))
+
+    edit_calls: list[dict[str, object]] = []
+
+    async def edit(**kwargs):
+        edit_calls.append(kwargs)
+
+    bot_member = _bot_member(mute_members=True, deafen_members=False)
+    guild = SimpleNamespace(
+        id="123",
+        me=None,
+        get_member=lambda user_id: bot_member if str(user_id) == "999" else None,
+    )
+    member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit)
+
+    await callback(
+        member,
+        SimpleNamespace(mute=False, deaf=False),
+        SimpleNamespace(mute=True, deaf=True),
+    )
 
     assert edit_calls == [{"mute": False, "reason": "Voice Tracker auto-unmute"}]
 
@@ -177,7 +283,7 @@ async def test_auto_unmute_listener_retries_until_voice_state_clears(monkeypatch
             return refreshed_states.pop(0)
         return None
 
-    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(mute_members=True))
+    bot_member = _bot_member(mute_members=True)
     guild = SimpleNamespace(id="123", me=None, get_member=get_member)
     member = SimpleNamespace(id="42", bot=False, guild=guild, edit=edit, voice=SimpleNamespace(mute=True))
 

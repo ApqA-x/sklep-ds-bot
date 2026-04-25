@@ -6,13 +6,15 @@ from typing import Any
 import pytest
 
 from voice_tracker.commands import (
-    AUDIT_COMMAND_NAME,
     AUTOROLE_COMMAND_NAME,
     INSPECT_ACTIVE_ALL_COMMAND,
     INSPECT_COMMAND_NAME,
     INSPECT_HISTORY_ALL_COMMAND,
+    SETTINGS_COMMAND_NAME,
+    UNMUTE_COMMAND_NAME,
     Service,
     can_use_voice_command,
+    command_policy,
     option_channel_id,
     option_role_id,
     option_user_id,
@@ -45,6 +47,33 @@ class _FakeDispatchSession:
 
     def interaction_respond(self, _interaction: Interaction, response: Any) -> None:
         self.responses.append(response)
+
+
+SUPPORTED_ADMIN_ONLY_ROUTES = [
+    (SETTINGS_COMMAND_NAME, ""),
+    (SETTINGS_COMMAND_NAME, "show"),
+    (SETTINGS_COMMAND_NAME, "mode"),
+    (SETTINGS_COMMAND_NAME, "summary-set"),
+    (SETTINGS_COMMAND_NAME, "summary-clear"),
+    (INSPECT_COMMAND_NAME, "channel"),
+    (INSPECT_COMMAND_NAME, INSPECT_ACTIVE_ALL_COMMAND),
+    (INSPECT_COMMAND_NAME, INSPECT_HISTORY_ALL_COMMAND),
+    (AUTOROLE_COMMAND_NAME, "role"),
+    (UNMUTE_COMMAND_NAME, "add"),
+    (UNMUTE_COMMAND_NAME, "remove"),
+    (UNMUTE_COMMAND_NAME, "list"),
+]
+
+REMOVED_ROUTES = [
+    ("audit", ""),
+    ("audit", "channel"),
+    ("bot-setting", ""),
+    ("track", "add"),
+    ("track", "remove"),
+    ("track", "list"),
+    ("track", "clear"),
+    ("track-list", "clear"),
+]
 
 
 def _inspect_interaction(*, permissions: int, channel_option_value: str | int = "c1") -> InteractionCreate:
@@ -84,16 +113,12 @@ def test_inspect_top_level_channel_option_routes_without_empty_command_failure()
     assert description == "No active session in that channel."
 
 
-@pytest.mark.parametrize(
-    ("root", "command"),
-    [
-        (AUDIT_COMMAND_NAME, "channel"),
-        (INSPECT_COMMAND_NAME, "channel"),
-        (INSPECT_COMMAND_NAME, INSPECT_ACTIVE_ALL_COMMAND),
-        (INSPECT_COMMAND_NAME, INSPECT_HISTORY_ALL_COMMAND),
-        (AUTOROLE_COMMAND_NAME, "role"),
-    ],
-)
+@pytest.mark.parametrize(("root", "command"), SUPPORTED_ADMIN_ONLY_ROUTES)
+def test_supported_admin_only_routes_keep_policies(root: str, command: str) -> None:
+    assert command_policy(root, command) is not None
+
+
+@pytest.mark.parametrize(("root", "command"), SUPPORTED_ADMIN_ONLY_ROUTES)
 def test_admin_only_routes_deny_non_admin_and_allow_administrator(root: str, command: str) -> None:
     plain_user = InteractionCreate(interaction=Interaction(member=Member(user=User(id="u-plain"), permissions=0)))
     guild_manager = InteractionCreate(interaction=Interaction(member=Member(user=User(id="u-manage"), permissions=PERMISSION_MANAGE_GUILD)))
@@ -104,6 +129,14 @@ def test_admin_only_routes_deny_non_admin_and_allow_administrator(root: str, com
     assert can_use_voice_command(guild_manager, [], root, command) is False
     assert can_use_voice_command(allowlisted_non_admin, ["u-allowlisted"], root, command) is False
     assert can_use_voice_command(administrator, [], root, command) is True
+
+
+@pytest.mark.parametrize(("root", "command"), REMOVED_ROUTES)
+def test_removed_routes_have_no_policy_and_are_denied(root: str, command: str) -> None:
+    administrator = InteractionCreate(interaction=Interaction(member=Member(user=User(id="u-admin"), permissions=PERMISSION_ADMINISTRATOR)))
+
+    assert command_policy(root, command) is None
+    assert can_use_voice_command(administrator, [], root, command) is False
 
 
 @pytest.mark.parametrize(

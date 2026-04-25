@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -79,6 +79,11 @@ class GuildSettings:
 
     def summary_destination(self, fallback_channel_id: str) -> str:
         return _clean(self.summary_channel_id) or _clean(self.fallback_summary_channel_id) or _clean(fallback_channel_id)
+
+    def canonical_for_voice_tracking(self) -> "GuildSettings":
+        if self.tracking_mode == GUILD_TRACKING_MODE_ALL and not self.tracked_channel_ids:
+            return self
+        return replace(self, tracking_mode=GUILD_TRACKING_MODE_ALL, tracked_channel_ids=[])
 
     @classmethod
     def from_mongo(cls, data: dict[str, Any] | None) -> "GuildSettings | None":
@@ -388,4 +393,3 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: to_jsonable(item) for key, item in value.items()}
     return value
-

@@ -74,7 +74,7 @@ class Service:
             defaults.tracking_mode,
             defaults.tracked_channel_ids,
             "",
-        )
+        ).canonical_for_voice_tracking()
         self._lock = threading.Lock()
         self._sessions: dict[str, _ActiveSession] = {}
 
@@ -296,14 +296,14 @@ class Service:
         if self.repo is not None:
             settings = self.repo.GetGuildSettings(guild_id)
             if settings is not None:
-                return settings
+                return settings.canonical_for_voice_tracking()
         defaults = domain.new_guild_settings(
             guild_id,
             self.defaults.tracking_mode,
             self.defaults.tracked_channel_ids,
             self.defaults.summary_channel_id,
         )
-        return defaults
+        return defaults.canonical_for_voice_tracking()
 
     async def _publish_closed(self, closed: domain.SessionClosedEvent) -> None:
         await self._publish_json(domain.SUBJECT_SESSION_CLOSED, closed)

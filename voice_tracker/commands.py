@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from importlib import metadata as importlib_metadata
 from typing import Any, Protocol
 import math
 import logging
@@ -35,12 +34,7 @@ logger = logging.getLogger(__name__)
 COMMAND_ACCESS_ADMIN_ONLY = "ADMIN_ONLY"
 COMMAND_ACCESS_ALL_USER = "ALL_USER"
 
-AUDIT_COMMAND_NAME = "audit"
-BOT_SETTING_COMMAND_NAME = "bot-setting"
 SETTINGS_COMMAND_NAME = "settings"
-LEGACY_SETTINGS_COMMAND_NAME = BOT_SETTING_COMMAND_NAME
-TRACK_COMMAND_NAME = "track"
-TRACK_LIST_COMMAND_NAME = "track-list"
 JUMP_COMMAND_NAME = "jump"
 INSPECT_COMMAND_NAME = "inspect"
 AUTOROLE_COMMAND_NAME = "autorole"
@@ -49,11 +43,7 @@ DASHBOARD_COMMAND_NAME = "dashboard"
 USERINFO_COMMAND_NAME = "userinfo"
 
 VOICE_COMMAND_NAMES = {
-    AUDIT_COMMAND_NAME,
     SETTINGS_COMMAND_NAME,
-    BOT_SETTING_COMMAND_NAME,
-    TRACK_COMMAND_NAME,
-    TRACK_LIST_COMMAND_NAME,
     JUMP_COMMAND_NAME,
     INSPECT_COMMAND_NAME,
     AUTOROLE_COMMAND_NAME,
@@ -68,11 +58,6 @@ INSPECT_ACTIVE_CHANNEL_COMMAND = "active.channel"
 MAX_CLOSED_HISTORY_ITEMS = 10
 OPTION_TYPE_ROLE = 8
 OPTION_TYPE_USER = 6
-TRACK_DEPRECATION_NOTICE = (
-    "Deprecated command: per-channel tracking has been removed. "
-    "Voice Tracker now always tracks all voice and stage channels. "
-    "This command is a no-op. Use /settings for operational configuration."
-)
 
 
 @dataclass(slots=True)
@@ -105,17 +90,10 @@ class CommandPolicy:
 
 
 COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
-    (AUDIT_COMMAND_NAME, ""): CommandPolicy(AUDIT_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_audit_command"),
     (SETTINGS_COMMAND_NAME, "show"): CommandPolicy(SETTINGS_COMMAND_NAME, "show", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "mode"): CommandPolicy(SETTINGS_COMMAND_NAME, "mode", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "summary-set"): CommandPolicy(SETTINGS_COMMAND_NAME, "summary-set", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "summary-clear"): CommandPolicy(SETTINGS_COMMAND_NAME, "summary-clear", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (BOT_SETTING_COMMAND_NAME, ""): CommandPolicy(BOT_SETTING_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_bot_setting_command"),
-    (TRACK_COMMAND_NAME, "add"): CommandPolicy(TRACK_COMMAND_NAME, "add", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_command"),
-    (TRACK_COMMAND_NAME, "remove"): CommandPolicy(TRACK_COMMAND_NAME, "remove", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_command"),
-    (TRACK_COMMAND_NAME, "list"): CommandPolicy(TRACK_COMMAND_NAME, "list", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_command"),
-    (TRACK_COMMAND_NAME, "clear"): CommandPolicy(TRACK_COMMAND_NAME, "clear", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_command"),
-    (TRACK_LIST_COMMAND_NAME, "clear"): CommandPolicy(TRACK_LIST_COMMAND_NAME, "clear", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_track_list_command"),
     (JUMP_COMMAND_NAME, ""): CommandPolicy(JUMP_COMMAND_NAME, "", COMMAND_ACCESS_ALL_USER, None, "handle_jump_command"),
     (INSPECT_COMMAND_NAME, ""): CommandPolicy(INSPECT_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
     (INSPECT_COMMAND_NAME, INSPECT_ACTIVE_ALL_COMMAND): CommandPolicy(INSPECT_COMMAND_NAME, INSPECT_ACTIVE_ALL_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_inspect_command"),
@@ -132,7 +110,6 @@ COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
 
 COMMAND_ROUTE_ALIASES: dict[tuple[str, str], tuple[str, str]] = {
     (SETTINGS_COMMAND_NAME, ""): (SETTINGS_COMMAND_NAME, "show"),
-    (AUDIT_COMMAND_NAME, "channel"): (AUDIT_COMMAND_NAME, ""),
     (JUMP_COMMAND_NAME, "channel"): (JUMP_COMMAND_NAME, ""),
     (INSPECT_COMMAND_NAME, "channel"): (INSPECT_COMMAND_NAME, ""),
     (AUTOROLE_COMMAND_NAME, "role"): (AUTOROLE_COMMAND_NAME, ""),
@@ -272,14 +249,8 @@ class Service:
         self._save(ctx, settings)
         return settings
 
-    def set_audit_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
-        return self.set_summary_channel(ctx, guild_id, channel_id)
-
     def clear_summary_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
         return self.set_summary_channel(ctx, guild_id, "")
-
-    def clear_audit_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
-        return self.clear_summary_channel(ctx, guild_id)
 
     def remember_fallback_summary_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
         settings = self.get_guild_settings(ctx, guild_id)
@@ -315,18 +286,13 @@ class Service:
         auto_unmute_ids = list(getattr(settings, "auto_unmute_user_ids", []) or [])
         auto_unmute = f"{len(auto_unmute_ids)} user(s)" if auto_unmute_ids else "none"
         lines = [f"tracking mode: {mode}", f"tracked channels: {tracked}"]
-        lines.append(f"audit channel: {summary_channel}")
+        lines.append(f"summary channel: {summary_channel}")
         lines.append(f"autorole: {autorole}")
         lines.append(f"auto-unmute: {auto_unmute}")
         created_at = format_time(settings.created_at)
         if created_at != "":
             lines.append(f"created: {created_at}")
         return "\n".join(lines)
-
-    def describe_bot_settings(self, ctx: Any, guild_id: str) -> str:
-        settings = self.get_guild_settings(ctx, guild_id)
-        lines = [f"version: {get_bot_version()}", self.describe_settings(settings)]
-        return "\n".join(lines).strip()
 
     def list_active_sessions(self, ctx: Any, guild_id: str) -> list[ActiveSessionView]:
         if self.repo is None:
@@ -536,26 +502,6 @@ class Service:
             raise ValueError("unknown voice command")
         return handler(ctx, interaction, policy.command, options)
 
-    def handle_audit_command(
-        self,
-        ctx: Any,
-        interaction: InteractionCreate,
-        command: str,
-        options: list[ApplicationCommandInteractionDataOption],
-    ) -> str:
-        channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_TEXT)
-        settings = self.set_audit_channel(ctx, interaction.guild_id, channel_id)
-        return f"Deprecated alias: use /settings summary-set.\n{self.describe_settings(settings)}"
-
-    def handle_bot_setting_command(
-        self,
-        ctx: Any,
-        interaction: InteractionCreate,
-        command: str,
-        options: list[ApplicationCommandInteractionDataOption],
-    ) -> str:
-        return f"Deprecated alias: use /settings show.\n{self.describe_bot_settings(ctx, interaction.guild_id)}"
-
     def handle_settings_command(
         self,
         ctx: Any,
@@ -587,18 +533,6 @@ class Service:
             return self.describe_settings(settings)
         raise ValueError("unknown settings command")
 
-    def handle_track_command(
-        self,
-        ctx: Any,
-        interaction: InteractionCreate,
-        command: str,
-        options: list[ApplicationCommandInteractionDataOption],
-    ) -> str:
-        if command not in {"add", "remove", "list", "clear"}:
-            raise ValueError("unknown track command")
-        settings = self.enforce_track_all(ctx, interaction.guild_id)
-        return f"{TRACK_DEPRECATION_NOTICE}\n{self.describe_settings(settings)}"
-
     def enforce_track_all(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
         settings = self.get_guild_settings(ctx, guild_id)
         needs_save = False
@@ -611,18 +545,6 @@ class Service:
         if needs_save:
             self._save(ctx, settings)
         return settings
-
-    def handle_track_list_command(
-        self,
-        ctx: Any,
-        interaction: InteractionCreate,
-        command: str,
-        options: list[ApplicationCommandInteractionDataOption],
-    ) -> str:
-        if command != "clear":
-            raise ValueError("unknown track-list command")
-        settings = self.enforce_track_all(ctx, interaction.guild_id)
-        return f"{TRACK_DEPRECATION_NOTICE}\n{self.describe_settings(settings)}"
 
     def handle_inspect_command(
         self,
@@ -797,11 +719,7 @@ BuildUserInfoPage = build_userinfo_page
 
 def voice_application_commands() -> list[ApplicationCommand]:
     return [
-        audit_application_command(),
         settings_application_command(),
-        bot_setting_application_command(),
-        track_application_command(),
-        track_list_application_command(),
         jump_application_command(),
         inspect_application_command(),
         autorole_application_command(),
@@ -813,57 +731,6 @@ def voice_application_commands() -> list[ApplicationCommand]:
 
 def voice_application_command() -> ApplicationCommand:
     return settings_application_command()
-
-
-def audit_application_command() -> CommandDefinition:
-    return CommandDefinition(
-        name=AUDIT_COMMAND_NAME,
-        description="Configure the audit channel",
-        options=[
-            _text_channel_option("channel", "Audit text channel"),
-        ],
-        default_member_permissions=PERMISSION_ADMINISTRATOR,
-    )
-
-
-def bot_setting_application_command() -> CommandDefinition:
-    return CommandDefinition(
-        name=BOT_SETTING_COMMAND_NAME,
-        description="Show current bot settings",
-        default_member_permissions=PERMISSION_ADMINISTRATOR,
-    )
-
-
-def track_application_command() -> CommandDefinition:
-    return CommandDefinition(
-        name=TRACK_COMMAND_NAME,
-        description="Deprecated no-op (tracking is always all voice/stage channels)",
-        options=[
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name="add",
-                description="Deprecated no-op",
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name="remove",
-                description="Deprecated no-op",
-            ),
-            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="list", description="Deprecated no-op"),
-        ],
-        default_member_permissions=PERMISSION_ADMINISTRATOR,
-    )
-
-
-def track_list_application_command() -> CommandDefinition:
-    return CommandDefinition(
-        name=TRACK_LIST_COMMAND_NAME,
-        description="Deprecated no-op (tracking is always all voice/stage channels)",
-        options=[
-            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="clear", description="Deprecated no-op"),
-        ],
-        default_member_permissions=PERMISSION_ADMINISTRATOR,
-    )
 
 
 def jump_application_command() -> CommandDefinition:
@@ -1331,13 +1198,6 @@ def _truncate_list(values: list[str], limit: int) -> str:
     if len(cleaned) <= limit:
         return ", ".join(cleaned)
     return ", ".join(cleaned[:limit]) + f", +{len(cleaned) - limit} more"
-
-
-def get_bot_version() -> str:
-    try:
-        return importlib_metadata.version("voice-tracker")
-    except importlib_metadata.PackageNotFoundError:
-        return "unknown"
 
 
 def _load_voice_totals(repo: Any, ctx: Any, guild_id: str) -> list[VoiceTotalView]:

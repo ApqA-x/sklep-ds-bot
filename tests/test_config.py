@@ -11,14 +11,14 @@ def test_load_bot_admin_user_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.bot_admin_user_ids == ["123", "456", "789"]
 
 
-def test_load_defaults_tracking_mode_specific_when_channels_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TRACKING_MODE", raising=False)
+def test_load_canonicalizes_tracking_defaults_to_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRACKING_MODE", "specific")
     monkeypatch.setenv("TRACKED_CHANNEL_IDS", "c2, c1, c2")
 
     cfg = load_config()
 
-    assert cfg.tracking_mode == "specific"
-    assert cfg.tracked_channel_ids == ["c2", "c1", "c2"]
+    assert cfg.tracking_mode == "all"
+    assert cfg.tracked_channel_ids == []
 
 
 def test_load_uses_defaults_when_env_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:

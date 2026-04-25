@@ -7,7 +7,6 @@ import pytest
 from voice_tracker import domain
 from voice_tracker.commands import (
     ActiveSessionView,
-    BOT_SETTING_COMMAND_NAME,
     INSPECT_ACTIVE_ALL_COMMAND,
     INSPECT_ACTIVE_CHANNEL_COMMAND,
     INSPECT_COMMAND_NAME,
@@ -16,8 +15,6 @@ from voice_tracker.commands import (
     MAX_CLOSED_HISTORY_ITEMS,
     Service,
     SETTINGS_COMMAND_NAME,
-    TRACK_COMMAND_NAME,
-    TRACK_LIST_COMMAND_NAME,
     can_use_voice_command,
     command_policy,
     format_duration,
@@ -160,11 +157,17 @@ def test_parse_voice_route() -> None:
 
     root, command, opts = parse_voice_route(
         ApplicationCommandInteractionData(
-            name="audit",
-            options=[ApplicationCommandInteractionDataOption(name="channel", type="channel", value="t1")],
+            name="settings",
+            options=[
+                ApplicationCommandInteractionDataOption(
+                    name="summary-set",
+                    type="subcommand",
+                    options=[option("channel", "t1")],
+                )
+            ],
         )
     )
-    assert (root, command, len(opts), opts[0].name, opts[0].value) == ("audit", "", 1, "channel", "t1")
+    assert (root, command, len(opts), opts[0].name, opts[0].value) == ("settings", "summary-set", 1, "channel", "t1")
 
 
 def test_parse_voice_route_accepts_numeric_discord_types() -> None:
@@ -196,13 +199,10 @@ def test_can_use_voice_command_requires_admin_for_admin_only_commands() -> None:
     allowlisted = InteractionCreate(interaction=Interaction(member=Member(user=User(id="u1"))))
 
     admin_only_routes = [
-        ("audit", ""),
         (SETTINGS_COMMAND_NAME, "show"),
-        (BOT_SETTING_COMMAND_NAME, ""),
-        (TRACK_COMMAND_NAME, "add"),
-        (TRACK_COMMAND_NAME, "remove"),
-        (TRACK_COMMAND_NAME, "list"),
-        (TRACK_LIST_COMMAND_NAME, "clear"),
+        (SETTINGS_COMMAND_NAME, "mode"),
+        (SETTINGS_COMMAND_NAME, "summary-set"),
+        (SETTINGS_COMMAND_NAME, "summary-clear"),
         (INSPECT_COMMAND_NAME, ""),
         ("autorole", ""),
     ]
@@ -224,11 +224,7 @@ def test_can_use_voice_command_all_user_routes_do_not_require_admin() -> None:
 def test_voice_application_commands_have_expected_routes() -> None:
     commands = {command.name: command for command in voice_application_commands()}
     assert list(commands) == [
-        "audit",
         "settings",
-        "bot-setting",
-        "track",
-        "track-list",
         "jump",
         "inspect",
         "autorole",
@@ -241,31 +237,8 @@ def test_voice_application_commands_have_expected_routes() -> None:
     mode_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "mode")
     assert len(mode_option.options) == 1
     assert [choice.name for choice in mode_option.options[0].choices] == [domain.GUILD_TRACKING_MODE_ALL]
-    track_routes = [option.name for option in commands[TRACK_COMMAND_NAME].options]
-    assert track_routes == ["add", "remove", "list"]
-    assert [option.options for option in commands[TRACK_COMMAND_NAME].options if option.name in {"add", "remove"}] == [[], []]
-    assert [option.name for option in commands["track-list"].options] == ["clear"]
     assert [option.name for option in commands[INSPECT_COMMAND_NAME].options] == ["channel"]
     assert [option.name for option in commands["unmute"].options] == ["add", "remove", "list"]
-
-
-def test_handle_track_add_and_clear() -> None:
-    repo = FakeRepo()
-    svc = Service(repo)
-    interaction = interaction_with_channels("g1", PERMISSION_MANAGE_GUILD, {"c1": Channel(id="c1", guild_id="g1", type="guild_voice")})
-
-    content = svc.handle_track_command(None, interaction, "add", [option("channel", "c1")])
-    assert "Deprecated command" in content
-    assert "tracking mode: all" in content
-    assert "tracked channels: all voice channels" in content
-
-    repo.settings["g1"] = domain.new_guild_settings("g1", domain.GUILD_TRACKING_MODE_SPECIFIC, ["c1", "c2"], "")
-    content = svc.handle_track_command(None, interaction, "clear", [])
-    assert "Deprecated command" in content
-    assert "tracking mode: all" in content
-    assert repo.settings["g1"].tracking_mode == domain.GUILD_TRACKING_MODE_ALL
-    assert repo.settings["g1"].tracked_channel_ids == []
-
 
 def test_handle_settings_commands() -> None:
     repo = FakeRepo()
@@ -277,10 +250,10 @@ def test_handle_settings_commands() -> None:
     assert "tracking mode: all" in content
 
     content = svc.handle_settings_command(None, interaction, "summary-set", [option("channel", "t1")])
-    assert "audit channel: <#t1>" in content
+    assert "summary channel: <#t1>" in content
 
     content = svc.handle_settings_command(None, interaction, "summary-clear", [])
-    assert "audit channel: not set" in content
+    assert "summary channel: not set" in content
 
 
 def test_fallback_summary_channel_is_described() -> None:
@@ -289,7 +262,7 @@ def test_fallback_summary_channel_is_described() -> None:
     svc.remember_fallback_summary_channel(None, "g1", "t1")
 
     content = svc.handle_settings_command(None, interaction_with_channels("g1", PERMISSION_MANAGE_GUILD), "show", [])
-    assert "audit channel: <#t1> (fallback)" in content
+    assert "summary channel: <#t1> (fallback)" in content
 
 
 def test_voice_command_can_remember_interaction_channel_for_summary_fallback() -> None:
@@ -404,11 +377,14 @@ def test_policy_coverage_for_registered_routes_is_deterministic() -> None:
     for root, command in registered_voice_command_routes():
         assert command_policy(root, command) is not None
 
-    assert command_policy("bot-setting", "") is not None
     assert command_policy("settings", "") is not None
     assert command_policy("inspect", "channel") is not None
     assert command_policy("autorole", "role") is not None
     assert command_policy("userinfo", "user") is not None
+    assert command_policy("audit", "") is None
+    assert command_policy("bot-setting", "") is None
+    assert command_policy("track", "add") is None
+    assert command_policy("track-list", "clear") is None
 
 
 def test_option_snowflake_parsing_accepts_str_and_int_values() -> None:

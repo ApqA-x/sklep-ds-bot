@@ -39,12 +39,15 @@ from voice_tracker.runtime import configure_logging, load_config, register_comma
 
 logger = logging.getLogger(__name__)
 
-TARGET_COMMAND_NAMES = {
+LEGACY_ROOT_COMMAND_NAMES = {
     "audit",
-    "settings",
     "bot-setting",
     "track",
     "track-list",
+}
+
+TARGET_COMMAND_NAMES = {
+    "settings",
     "jump",
     "inspect",
     "autorole",
@@ -53,11 +56,14 @@ TARGET_COMMAND_NAMES = {
     "userinfo",
 }
 
-SUPPORTED_COMMAND_NAMES = VOICE_COMMAND_NAMES | TARGET_COMMAND_NAMES
+SUPPORTED_COMMAND_NAMES = (VOICE_COMMAND_NAMES | TARGET_COMMAND_NAMES) - LEGACY_ROOT_COMMAND_NAMES
+
+
 def _build_client(token: str) -> discord.Client:
     intents = discord.Intents.none()
     intents.guilds = True
     intents.members = True
+    intents.presences = True
     intents.voice_states = True
     return discord.Client(intents=intents)
 
@@ -185,18 +191,6 @@ async def _dispatch_command(
     bot_admin_user_ids: list[str],
 ) -> str | discord.Embed:
     options = _normalize_snowflake_options(options)
-    if root == "audit":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
-        return await _dispatch_audit_command(service, model, options)
-    if root == "bot-setting":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
-        return await _dispatch_bot_setting_command(service, model, command, options)
-    if root == "track-list":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
-        return _dispatch_track_list_command(service, model, command, options)
     if root == "jump":
         return await _dispatch_jump_command(client, interaction, model, options)
     if root == "autorole":
@@ -211,26 +205,11 @@ async def _dispatch_command(
         return await _dispatch_service_method(service, "handle_dashboard_command", model, command, options)
     if root == "userinfo":
         return await _dispatch_userinfo_command(client, service, model, interaction, options)
-    if root == "track":
-        if command in {"add", "remove", "list"}:
-            if not _is_admin_only(model):
-                return "Insufficient permissions."
-            return _dispatch_track_command(service, model, command, options)
-        if command == "clear":
-            return _dispatch_legacy_voice_command(
-                service,
-                model,
-                root,
-                command,
-                options,
-                bot_admin_user_ids,
-                remember_fallback=False,
-            )
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
         if not _is_admin_only(model):
             return "Insufficient permissions."
         return _dispatch_inspect_channel_command(service, model, options)
-    if root in {"settings", "inspect"} or (root == "track" and command == "clear"):
+    if root in {"settings", "inspect"}:
         remember_fallback = root == "settings" and command == "summary-clear"
         return _dispatch_legacy_voice_command(
             service,
@@ -261,21 +240,6 @@ def _dispatch_legacy_voice_command(
     return service.handle_voice_command(None, model, root, command, options)
 
 
-def _dispatch_track_command(
-    service: VoiceService,
-    model: InteractionCreate,
-    command: str,
-    options: list[ApplicationCommandInteractionDataOption],
-) -> str:
-    if command not in {"add", "remove", "list"}:
-        return "Unknown track command."
-    if command == "add":
-        return service.handle_track_command(None, model, "add", options)
-    if command == "remove":
-        return service.handle_track_command(None, model, "remove", options)
-    return service.handle_track_command(None, model, "list", options)
-
-
 def _dispatch_unmute_command(
     service: VoiceService,
     model: InteractionCreate,
@@ -287,51 +251,12 @@ def _dispatch_unmute_command(
     return service.handle_unmute_command(None, model, command, options)
 
 
-def _dispatch_track_list_command(
-    service: VoiceService,
-    model: InteractionCreate,
-    command: str,
-    options: list[ApplicationCommandInteractionDataOption],
-) -> str:
-    if command != "clear":
-        return "Unknown track-list command."
-    return service.handle_track_list_command(None, model, "clear", options)
-
-
 def _dispatch_inspect_channel_command(
     service: VoiceService,
     model: InteractionCreate,
     options: list[ApplicationCommandInteractionDataOption],
 ) -> str:
     return service.handle_inspect_command(None, model, "active.channel", options)
-
-
-async def _dispatch_audit_command(
-    service: VoiceService,
-    model: InteractionCreate,
-    options: list[ApplicationCommandInteractionDataOption],
-) -> str:
-    channel_id = _option_string(options, "channel")
-    if channel_id == "":
-        raise ValueError("channel is required")
-    settings = service.set_summary_channel(None, model.guild_id, channel_id)
-    return service.describe_settings(settings)
-
-
-async def _dispatch_bot_setting_command(
-    service: VoiceService,
-    model: InteractionCreate,
-    command: str,
-    options: list[ApplicationCommandInteractionDataOption],
-) -> str:
-    handler = getattr(service, "handle_bot_setting_command", None)
-    if callable(handler):
-        result = handler(None, model, command, options)
-        if asyncio.iscoroutine(result):
-            result = await result
-        return str(result or "")
-    settings = service.get_guild_settings(None, model.guild_id)
-    return service.describe_settings(settings)
 
 
 async def _dispatch_autorole_command(
@@ -665,13 +590,10 @@ async def _fetch_user_by_id(client: discord.Client, user_id: str) -> discord.Use
     snowflake = _maybe_int(user_id)
     if snowflake is None:
         return None
-    cached = client.get_user(snowflake)
-    if cached is not None:
-        return cached
     try:
         return await client.fetch_user(snowflake)
     except Exception:
-        return None
+        return client.get_user(snowflake)
 
 
 def _userinfo_display_name(member: discord.Member | None, user: discord.User | None, fallback_user_id: str) -> str:

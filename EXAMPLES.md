@@ -30,9 +30,9 @@ TRACKED_CHANNEL_IDS=
 
 ## Usage Notes
 
-- Keep `TRACKING_MODE=all` unless you have a specific migration scenario.
+- Keep `TRACKING_MODE=all`; tracking is all-channel.
 - `TRACKED_CHANNEL_IDS` is a startup default input, not the active command-time control path.
-- Configure summary/output destination with `/settings summary-set` (or `/audit` alias).
+- Configure summary/output destination with `/settings summary-set`.
 
 ## Minimal Local Setup
 
@@ -44,5 +44,6 @@ TRACKED_CHANNEL_IDS=
 ## Operational Notes
 
 - `services.commands` is the only command registration owner.
-- Deprecated `/track*` commands are kept for compatibility and are no-op.
+- Auto-unmute clears server mute/deafen state for users on the configured list.
+- `/userinfo` presence status depends on Presence Intent being enabled.
 - `BOT_ADMIN_USER_IDS` is not the primary admin authorization path.

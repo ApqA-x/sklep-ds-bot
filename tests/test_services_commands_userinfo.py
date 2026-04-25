@@ -49,7 +49,9 @@ class _FakeInteraction:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_userinfo_command_builds_embed_with_profile_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_dispatch_userinfo_command_builds_embed_with_presence_status_and_profile_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     member = _FakeMember()
     user = _FakeUser()
     captured: dict[str, str] = {}
@@ -90,6 +92,41 @@ async def test_dispatch_userinfo_command_builds_embed_with_profile_fields(monkey
     assert "Banner:" not in embed.description
     assert embed.thumbnail.url == "https://cdn.test/avatar.png"
     assert embed.image.url == "https://cdn.test/banner.png"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_userinfo_command_uses_fetched_user_banner_when_cached_member_has_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = _FakeMember()
+    member.display_banner = None
+    user = _FakeUser()
+    user.banner = _Asset("https://cdn.test/fetched-banner.png")
+
+    async def _resolve_member(_guild, _user_id: str):
+        return member
+
+    async def _fetch_user(_client, _user_id: str):
+        return user
+
+    def _load_profile(_ctx, _guild_id: str, _user_id: str):
+        return None
+
+    monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
+    monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
+    service = SimpleNamespace(get_member_profile=_load_profile)
+
+    embed = await commands_service._dispatch_userinfo_command(
+        object(),
+        service,
+        SimpleNamespace(guild_id="g1"),
+        _FakeInteraction(),
+        [ApplicationCommandInteractionDataOption(name="user", value="669151106814967819")],
+    )
+
+    assert embed.description is not None
+    assert "Status: 🟢 Online" in embed.description
+    assert embed.image.url == "https://cdn.test/fetched-banner.png"
 
 
 @pytest.mark.asyncio

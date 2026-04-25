@@ -1,6 +1,12 @@
 # Docs Index
 
-This directory keeps historical design/migration material.
+This directory keeps active review artifacts plus historical design/migration material.
+
+## Active
+
+- `problem-review-plan-2026-04-25.md`
+  - Active review artifact for the four problems listed in the repo-root `Problems` file.
+  - Covers legacy-command removal, auto-unmute deafen handling, stale voice tracking, and `/userinfo` status/banner fixes.
 
 ## Archive
 

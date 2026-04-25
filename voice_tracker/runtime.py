@@ -74,7 +74,7 @@ class Config:
     discord_guild_id: str = ""
     bot_admin_user_ids: list[str] = field(default_factory=list)
     event_signing_secret: str = ""
-    tracking_mode: str = ""
+    tracking_mode: str = "all"
     tracked_channel_ids: list[str] = field(default_factory=list)
 
 
@@ -91,12 +91,9 @@ def load_config(env: Any = None) -> Config:
         event_signing_secret=_clean(source.get("EVENT_SIGNING_SECRET", "")),
     )
     cfg.bot_admin_user_ids = parse_user_ids(source.get("BOT_ADMIN_USER_IDS", ""))
-    cfg.tracking_mode = _getenv(source, "TRACKING_MODE", "")
-    raw_channels = _clean(source.get("TRACKED_CHANNEL_IDS", ""))
-    if raw_channels:
-        cfg.tracked_channel_ids = [part.strip() for part in raw_channels.split(",") if part.strip()]
-    if cfg.tracking_mode == "":
-        cfg.tracking_mode = "specific" if cfg.tracked_channel_ids else "all"
+    # Tracking defaults are canonicalized to all-channel mode at runtime.
+    cfg.tracking_mode = "all"
+    cfg.tracked_channel_ids = []
     if cfg.mongo_uri == "" or cfg.mongo_db == "" or cfg.nats_url == "":
         raise ValueError("missing required configuration")
     return cfg

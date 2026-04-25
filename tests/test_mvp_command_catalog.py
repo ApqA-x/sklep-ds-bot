@@ -15,11 +15,7 @@ from voice_tracker.discord_models import (
 
 
 TARGET_TOP_LEVEL_COMMAND_NAMES = {
-    "audit",
     "settings",
-    "bot-setting",
-    "track",
-    "track-list",
     "jump",
     "inspect",
     "autorole",
@@ -28,14 +24,44 @@ TARGET_TOP_LEVEL_COMMAND_NAMES = {
     "userinfo",
 }
 
-ADMIN_ONLY_TOP_LEVEL_COMMANDS = (
-    ("audit", ""),
+REMOVED_TOP_LEVEL_COMMAND_NAMES = {
+    "audit",
+    "bot-setting",
+    "track",
+    "track-list",
+}
+
+ADMIN_ONLY_TOP_LEVEL_COMMAND_NAMES = {
+    "settings",
+    "inspect",
+    "autorole",
+    "unmute",
+}
+
+ADMIN_ONLY_COMMAND_ROUTES = (
+    ("settings", ""),
     ("settings", "show"),
+    ("settings", "mode"),
+    ("settings", "summary-set"),
+    ("settings", "summary-clear"),
+    ("inspect", ""),
+    ("inspect", "channel"),
+    ("autorole", ""),
+    ("autorole", "role"),
+    ("unmute", "add"),
+    ("unmute", "remove"),
+    ("unmute", "list"),
+)
+
+REMOVED_COMMAND_ROUTES = (
+    ("audit", ""),
+    ("audit", "channel"),
     ("bot-setting", ""),
     ("track", "add"),
+    ("track", "remove"),
+    ("track", "list"),
+    ("track", "clear"),
     ("track-list", "clear"),
-    ("inspect", ""),
-    ("autorole", ""),
 )
 
 
@@ -56,13 +82,16 @@ def test_mvp_command_catalog_matches_target_top_level_names() -> None:
     commands = _command_map()
 
     assert set(commands) == TARGET_TOP_LEVEL_COMMAND_NAMES
+    assert REMOVED_TOP_LEVEL_COMMAND_NAMES.isdisjoint(commands)
     assert "shuffle" not in commands
 
-    for root, _ in ADMIN_ONLY_TOP_LEVEL_COMMANDS:
+    for root in ADMIN_ONLY_TOP_LEVEL_COMMAND_NAMES:
         assert str(commands[root].get("default_member_permissions")) == str(PERMISSION_ADMINISTRATOR)
+    for root in TARGET_TOP_LEVEL_COMMAND_NAMES - ADMIN_ONLY_TOP_LEVEL_COMMAND_NAMES:
+        assert "default_member_permissions" not in commands[root]
 
 
-@pytest.mark.parametrize("root, command", ADMIN_ONLY_TOP_LEVEL_COMMANDS)
+@pytest.mark.parametrize("root, command", ADMIN_ONLY_COMMAND_ROUTES)
 def test_admin_only_runtime_policy_requires_discord_administrator(root: str, command: str) -> None:
     plain = _interaction()
     manage_guild = _interaction(permissions=PERMISSION_MANAGE_GUILD)
@@ -73,3 +102,10 @@ def test_admin_only_runtime_policy_requires_discord_administrator(root: str, com
     assert not can_use_voice_command(manage_guild, [], root, command)
     assert not can_use_voice_command(allowlisted_only, ["u1"], root, command)
     assert can_use_voice_command(administrator, [], root, command)
+
+
+@pytest.mark.parametrize("root, command", REMOVED_COMMAND_ROUTES)
+def test_removed_runtime_routes_are_not_supported(root: str, command: str) -> None:
+    administrator = _interaction(permissions=PERMISSION_ADMINISTRATOR)
+
+    assert not can_use_voice_command(administrator, [], root, command)

@@ -107,6 +107,13 @@ def test_userinfo_command_requires_member_option_and_has_no_message_count_labels
     assert "message_count" not in payload_text
 
 
+def test_userinfo_command_registers_only_canonical_root_route() -> None:
+    routes = command_module.registered_voice_command_routes()
+
+    assert ("userinfo", "") in routes
+    assert ("userinfo", "user") not in routes
+
+
 def test_dashboard_page_builder_limits_rows_and_hides_hidden_channel_details() -> None:
     builder = _require_callable("build_dashboard_page", "dashboard_page_builder", "BuildDashboardPage")
     model = SimpleNamespace(
