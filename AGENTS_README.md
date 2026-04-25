@@ -2,7 +2,7 @@
 
 Maintainer notes for agent-assisted updates in this repository.
 
-Last updated: April 25, 2026.
+Last updated: April 26, 2026.
 
 ## Scope
 
@@ -33,6 +33,7 @@ When behavior changes, update these files in the same PR:
 ## Documentation Hygiene
 
 - Remove obsolete ad-hoc planning docs once work is shipped.
+- Remove resolved memory/worklog artifacts and solved debug PNG files in the same cleanup PR.
 - Keep historical design research in `docs/` if still useful, otherwise archive or delete.
 - Keep user-facing docs concise and accurate to the current code, not planned future behavior.
 

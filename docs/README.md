@@ -4,9 +4,7 @@ This directory keeps active review artifacts plus historical design/migration ma
 
 ## Active
 
-- `problem-review-plan-2026-04-25.md`
-  - Active review artifact for the four problems listed in the repo-root `Problems` file.
-  - Covers legacy-command removal, auto-unmute deafen handling, stale voice tracking, and `/userinfo` status/banner fixes.
+- No active review artifacts at the moment.
 
 ## Archive
 
