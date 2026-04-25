@@ -291,6 +291,65 @@ def test_get_member_profile_and_alias_return_aggregated_voice_totals() -> None:
     assert repo.get_member_profile(None, "g1", "missing") is None
 
 
+def test_list_voice_totals_by_guild_keeps_empty_user_name_when_repository_has_no_name() -> None:
+    repo = Repository(_FakeDb())
+    base = datetime(2026, 4, 5, 18, 0, tzinfo=UTC)
+    _insert_session(
+        repo,
+        session_id="s1",
+        guild_id="g1",
+        channel_id="c1",
+        started_at=base,
+        ended_at=base + timedelta(minutes=10),
+    )
+    _insert_participant(
+        repo,
+        participant_id="p1",
+        session_id="s1",
+        guild_id="g1",
+        channel_id="c1",
+        user_id="u1",
+        user_name="",
+        joined_at=base,
+        left_at=base + timedelta(minutes=2),
+        duration_ms=120_000,
+    )
+
+    rows = repo.list_voice_totals_by_guild(None, "g1")
+
+    assert rows == [{"user_id": "u1", "user_name": "", "total_for": 120_000}]
+
+
+def test_get_member_profile_keeps_empty_user_name_when_repository_has_no_name() -> None:
+    repo = Repository(_FakeDb())
+    base = datetime(2026, 4, 5, 18, 0, tzinfo=UTC)
+    _insert_session(
+        repo,
+        session_id="s1",
+        guild_id="g1",
+        channel_id="c1",
+        started_at=base,
+        ended_at=base + timedelta(minutes=10),
+    )
+    _insert_participant(
+        repo,
+        participant_id="p1",
+        session_id="s1",
+        guild_id="g1",
+        channel_id="c1",
+        user_id="u1",
+        user_name="",
+        joined_at=base,
+        left_at=base + timedelta(minutes=3),
+        duration_ms=180_000,
+    )
+
+    profile = repo.get_member_profile(None, "g1", "u1")
+
+    assert profile == {"user_id": "u1", "user_name": "", "total_for": 180_000, "roles": []}
+    assert repo.get_user_voice_summary(None, "g1", "u1") == profile
+
+
 def test_dashboard_and_userinfo_read_from_repository_aggregates() -> None:
     repo = Repository(_FakeDb())
     base = datetime(2026, 4, 5, 18, 0, tzinfo=UTC)
@@ -339,11 +398,10 @@ def test_dashboard_and_userinfo_read_from_repository_aggregates() -> None:
 
     assert dashboard.splitlines()[:3] == [
         "Voice dashboard",
-        "1. Bob: 2m0s",
-        "2. Alice: 1m0s",
+        "1. Bob: 0:02:00",
+        "2. Alice: 0:01:00",
     ]
-    assert userinfo.splitlines() == ["User: Bob", "Total voice time: 2m0s"]
-
+    assert userinfo.splitlines() == ["User: Bob", "Total voice time: 0:02:00"]
 
 def test_ensure_indexes_adds_repository_read_model_indexes() -> None:
     db = _FakeDb()

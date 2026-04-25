@@ -75,6 +75,22 @@ def go_duration(value: timedelta | None, *, round_seconds: bool = False) -> str:
     return f"{secs}s"
 
 
+def hms_duration(value: timedelta | None, *, round_seconds: bool = True) -> str:
+    if value is None:
+        return "0:00:00"
+    value = positive_delta(value)
+    total = value.total_seconds()
+    if round_seconds:
+        total = int(total + 0.5)
+    else:
+        total = int(total)
+    if total < 0:
+        total = 0
+    hours, rem = divmod(int(total), 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
 def discord_timestamp(value: datetime | None, style: str = "F") -> str:
     value = ensure_utc(value)
     if value is None:
@@ -83,4 +99,3 @@ def discord_timestamp(value: datetime | None, style: str = "F") -> str:
     if style == "relative":
         return f"<t:{unix}:R>"
     return f"<t:{unix}:F> (<t:{unix}:R>)"
-

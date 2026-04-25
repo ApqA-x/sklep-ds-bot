@@ -84,7 +84,7 @@ async def test_dispatch_userinfo_command_builds_embed_with_presence_status_and_p
     assert "User ID: `669151106814967819`" in embed.description
     assert "Username: apqa_ (ApqA)" in embed.description
     assert "Status: 🟢 Online" in embed.description
-    assert "Total voice time: 2h30m0s" in embed.description
+    assert "Total voice time: 2:30:00" in embed.description
     assert "Joined at: <t:" in embed.description
     assert "Registered at: <t:" in embed.description
     assert "Nickname:" not in embed.description
@@ -159,5 +159,5 @@ async def test_dispatch_userinfo_command_marks_missing_banner(monkeypatch: pytes
 
     assert embed.description is not None
     assert "Banner:" not in embed.description
-    assert "Total voice time: 0s" in embed.description
+    assert "Total voice time: 0:00:00" in embed.description
     assert not getattr(embed.image, "url", None)

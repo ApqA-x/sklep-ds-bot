@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from . import domain
-from .timeutil import go_duration
+from .timeutil import hms_duration
 
 
 class Repository(Protocol):
@@ -136,7 +136,7 @@ def FormatSummary(summary: domain.SessionSummary) -> str:
     lines = [
         "**Voice session ended**",
         f"**Channel:** <#{summary.channel_id}>",
-        f"**Duration:** {go_duration(summary.total_duration, round_seconds=True)}",
+        f"**Duration:** {hms_duration(summary.total_duration, round_seconds=True)}",
         f"**Unique users:** {summary.unique_users}",
     ]
     if summary.ended_by_user_id:
@@ -147,7 +147,7 @@ def FormatSummary(summary: domain.SessionSummary) -> str:
         lines.append("- none")
     for participant in summary.participants:
         name = participant.user_name or participant.user_id
-        lines.append(f"- {name} - {go_duration(participant.total_time, round_seconds=True)} ({interval_label(participant.intervals)})")
+        lines.append(f"- {name} - {hms_duration(participant.total_time, round_seconds=True)} ({interval_label(participant.intervals)})")
     return "\n".join(lines).strip()
 
 

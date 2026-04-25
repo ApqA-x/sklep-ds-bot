@@ -399,10 +399,13 @@ class Repository:
                     name_rank[user_id] = candidate_rank
 
         rows = list(totals.values())
-        for row in rows:
-            if str(row["user_name"]).strip() == "":
-                row["user_name"] = str(row["user_id"])
-        rows.sort(key=lambda row: (-int(row["total_for"]), str(row["user_name"]).casefold(), str(row["user_id"])))
+        rows.sort(
+            key=lambda row: (
+                -int(row["total_for"]),
+                str(row["user_name"] or row["user_id"]).casefold(),
+                str(row["user_id"]),
+            )
+        )
         return rows
 
     def get_member_profile(self, _ctx: Any, guild_id: str, user_id: str) -> dict[str, Any] | None:
@@ -444,8 +447,6 @@ class Repository:
                 user_name = candidate_name
                 selected_name_rank = candidate_rank
 
-        if user_name == "":
-            user_name = user_id
         return {"user_id": user_id, "user_name": user_name, "total_for": total_for, "roles": []}
 
     def get_user_voice_summary(self, ctx: Any, guild_id: str, user_id: str) -> dict[str, Any] | None:
