@@ -32,7 +32,9 @@ async def _start_with_retry(cfg, repo: Repository) -> tuple[Bus, Service]:
 
         async def _handle_session_closed(payload: bytes) -> None:
             try:
+                logger.info("session closed event received payload_size=%s", len(payload))
                 await service.HandleSessionClosed(payload)
+                logger.info("session closed event processed payload_size=%s", len(payload))
             except Exception:
                 logger.exception("summary generation failed payload_size=%s", len(payload))
                 raise
@@ -78,7 +80,9 @@ async def main() -> None:
     async def sweep_pending() -> None:
         while True:
             await asyncio.sleep(60)
+            logger.info("writer pending summary sweep starting")
             await service.Start()
+            logger.info("writer pending summary sweep finished")
 
     sweep = asyncio.create_task(sweep_pending())
     try:

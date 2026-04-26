@@ -321,6 +321,21 @@ def _voice_effect_user_id(effect: object) -> str:
     return ""
 
 
+def _voice_effect_sound_id(effect: object) -> str:
+    sound = getattr(effect, "sound", None)
+    if sound is not None:
+        sound_id = str(getattr(sound, "id", "") or "")
+        if sound_id:
+            return sound_id
+    sound_id = str(getattr(effect, "sound_id", "") or getattr(effect, "soundboard_sound_id", "") or "")
+    if sound_id:
+        return sound_id
+    soundboard_sound = getattr(effect, "soundboard_sound", None)
+    if soundboard_sound is not None:
+        return str(getattr(soundboard_sound, "id", "") or "")
+    return ""
+
+
 def _set_managed_connected_at(repo: Repository, guild_id: str, connected_at: datetime | None) -> None:
     settings = repo.get_guild_settings(None, guild_id)
     if connected_at is None:
@@ -453,45 +468,107 @@ class SoundboardEnforcement:
 
     async def on_voice_channel_effect(self, effect: object) -> None:
         guild_id = _guild_id(effect)
+        effect_channel_id = _channel_id(getattr(effect, "channel", None) or getattr(effect, "channel_id", None))
+        effect_user_id = _voice_effect_user_id(effect)
+        effect_sound_id = _voice_effect_sound_id(effect)
+        logger.info(
+            "soundboard effect received guild=%s channel=%s user=%s sound=%s",
+            guild_id or "-",
+            effect_channel_id or "-",
+            effect_user_id or "-",
+            effect_sound_id or "-",
+        )
         if guild_id != self.guild_id:
+            logger.info(
+                "soundboard enforcement skipped reason=guild_mismatch event_guild=%s expected_guild=%s",
+                guild_id or "-",
+                self.guild_id,
+            )
             return
         if not _is_soundboard_effect(effect):
+            logger.info("soundboard enforcement skipped reason=not_soundboard_effect guild=%s", guild_id)
             return
         settings = self.repo.get_guild_settings(None, guild_id)
         managed_channel_id = _managed_voice_channel_id(settings)
-        if managed_channel_id == "" or not _soundboard_enforcement_enabled(settings):
+        enforcement_enabled = _soundboard_enforcement_enabled(settings)
+        if managed_channel_id == "" or not enforcement_enabled:
+            logger.info(
+                "soundboard enforcement skipped reason=disabled_or_unmanaged guild=%s managed_channel=%s enabled=%s",
+                guild_id,
+                managed_channel_id or "-",
+                enforcement_enabled,
+            )
             return
-        effect_channel_id = _channel_id(getattr(effect, "channel", None) or getattr(effect, "channel_id", None))
         if effect_channel_id != managed_channel_id:
+            logger.info(
+                "soundboard enforcement skipped reason=channel_mismatch guild=%s effect_channel=%s managed_channel=%s",
+                guild_id,
+                effect_channel_id or "-",
+                managed_channel_id,
+            )
             return
-        if not await self.voice_controller.is_connected_to_managed_channel(guild_id, managed_channel_id):
+        connected = await self.voice_controller.is_connected_to_managed_channel(guild_id, managed_channel_id)
+        if not connected:
+            logger.info(
+                "soundboard enforcement skipped reason=bot_not_in_managed_channel guild=%s managed_channel=%s",
+                guild_id,
+                managed_channel_id,
+            )
             return
 
-        user_id = _voice_effect_user_id(effect)
+        user_id = effect_user_id
         if user_id == "":
+            logger.info("soundboard enforcement skipped reason=missing_sender guild=%s", guild_id)
             return
         guild = getattr(effect, "guild", None)
         if guild is None:
             guild = _guild_from_client(self.client, guild_id)
         if guild is None:
+            logger.warning("soundboard enforcement skipped reason=guild_unavailable guild=%s user=%s", guild_id, user_id)
             return
         member = await _resolve_member(guild, user_id)
-        if member is None or bool(getattr(member, "bot", False)):
+        if member is None:
+            logger.info("soundboard enforcement skipped reason=member_not_found guild=%s user=%s", guild_id, user_id)
+            return
+        if bool(getattr(member, "bot", False)):
+            logger.info("soundboard enforcement skipped reason=member_is_bot guild=%s user=%s", guild_id, user_id)
             return
         member_channel_id = _channel_id(getattr(getattr(member, "voice", None), "channel", None))
         if member_channel_id != managed_channel_id:
+            logger.info(
+                "soundboard enforcement skipped reason=member_not_in_managed_channel guild=%s user=%s member_channel=%s managed_channel=%s",
+                guild_id,
+                user_id,
+                member_channel_id or "-",
+                managed_channel_id,
+            )
             return
 
         bot_member = await _resolve_bot_member(self.client, guild)
         managed_channel = await _resolve_managed_voice_channel(guild, managed_channel_id)
         if bot_member is None or managed_channel is None:
+            logger.warning(
+                "soundboard enforcement skipped reason=bot_or_channel_unavailable guild=%s user=%s bot=%s channel=%s",
+                guild_id,
+                user_id,
+                bot_member is not None,
+                managed_channel is not None,
+            )
             return
         permissions = managed_channel.permissions_for(bot_member)
         if not bool(getattr(permissions, "move_members", False)):
             logger.warning("soundboard enforcement blocked guild=%s missing move_members", guild_id)
             return
         try:
+            logger.info(
+                "soundboard enforcement action=disconnect guild=%s user=%s channel=%s sound=%s",
+                guild_id,
+                user_id,
+                managed_channel_id,
+                effect_sound_id or "-",
+            )
             await member.move_to(None, reason="Voice Tracker soundboard enforcement")
+            logger.info("soundboard enforcement applied guild=%s user=%s", guild_id, user_id)
         except discord.Forbidden:
             logger.warning("soundboard enforcement forbidden guild=%s user=%s", guild_id, user_id)
         except Exception:
