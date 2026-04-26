@@ -442,3 +442,64 @@ async def test_soundboard_enforcement_disconnects_member_only_when_enabled() -> 
 
     assert len(moved) == 1
     assert moved[0][0] is None
+
+
+async def test_soundboard_enforcement_uses_effect_user_when_user_id_is_missing() -> None:
+    settings = domain.GuildSettings(
+        guild_id="123",
+        managed_voice_channel_id="42",
+        soundboard_enforcement_enabled=True,
+    )
+    repo = _ManagedRepo(settings)
+    guild = _ManagedGuild("123", "42", can_move=True)
+    managed_channel = guild.channel
+
+    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(), voice=SimpleNamespace(channel=managed_channel))
+    moved: list[object] = []
+
+    async def _move_to(channel, reason: str | None = None):
+        moved.append((channel, reason))
+
+    user_member = SimpleNamespace(id="42", bot=False, voice=SimpleNamespace(channel=managed_channel), move_to=_move_to)
+    guild.members["999"] = bot_member
+    guild.members["42"] = user_member
+
+    client = _ManagedClient(guild)
+    controller = gateway.ManagedVoiceController(client=client, repo=repo, guild_id="123")
+    enforcement = gateway.SoundboardEnforcement(client=client, repo=repo, guild_id="123", voice_controller=controller)
+
+    effect = SimpleNamespace(guild=guild, channel=managed_channel, user=SimpleNamespace(id="42"), sound=SimpleNamespace(id="abc"))
+    await enforcement.on_voice_channel_effect(effect)
+
+    assert len(moved) == 1
+    assert moved[0][0] is None
+
+
+async def test_soundboard_enforcement_ignores_effect_without_sender_identity() -> None:
+    settings = domain.GuildSettings(
+        guild_id="123",
+        managed_voice_channel_id="42",
+        soundboard_enforcement_enabled=True,
+    )
+    repo = _ManagedRepo(settings)
+    guild = _ManagedGuild("123", "42", can_move=True)
+    managed_channel = guild.channel
+
+    bot_member = SimpleNamespace(id="999", guild_permissions=SimpleNamespace(), voice=SimpleNamespace(channel=managed_channel))
+    moved: list[object] = []
+
+    async def _move_to(channel, reason: str | None = None):
+        moved.append((channel, reason))
+
+    user_member = SimpleNamespace(id="42", bot=False, voice=SimpleNamespace(channel=managed_channel), move_to=_move_to)
+    guild.members["999"] = bot_member
+    guild.members["42"] = user_member
+
+    client = _ManagedClient(guild)
+    controller = gateway.ManagedVoiceController(client=client, repo=repo, guild_id="123")
+    enforcement = gateway.SoundboardEnforcement(client=client, repo=repo, guild_id="123", voice_controller=controller)
+
+    effect = SimpleNamespace(guild=guild, channel=managed_channel, member=SimpleNamespace(id="42"), sound_id="abc")
+    await enforcement.on_voice_channel_effect(effect)
+
+    assert moved == []

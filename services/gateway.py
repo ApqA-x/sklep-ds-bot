@@ -318,8 +318,7 @@ def _voice_effect_user_id(effect: object) -> str:
         user_id = str(getattr(user, "id", "") or "")
         if user_id:
             return user_id
-    member = getattr(effect, "member", None)
-    return str(getattr(member, "id", "") or "")
+    return ""
 
 
 def _set_managed_connected_at(repo: Repository, guild_id: str, connected_at: datetime | None) -> None:
