@@ -503,3 +503,15 @@ async def test_soundboard_enforcement_ignores_effect_without_sender_identity() -
     await enforcement.on_voice_channel_effect(effect)
 
     assert moved == []
+
+
+def test_voice_effect_sound_id_prefers_nested_sound_object() -> None:
+    effect = SimpleNamespace(sound=SimpleNamespace(id="s-123"), sound_id="s-legacy")
+
+    assert gateway._voice_effect_sound_id(effect) == "s-123"
+
+
+def test_voice_effect_sound_id_falls_back_to_scalar_fields() -> None:
+    effect = SimpleNamespace(sound=None, soundboard_sound_id="s-789")
+
+    assert gateway._voice_effect_sound_id(effect) == "s-789"

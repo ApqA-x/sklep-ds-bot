@@ -38,13 +38,30 @@ async def main() -> None:
     async def handle(payload: bytes) -> None:
         await startup_ready.wait()
         try:
-            await service.HandleVoiceEvent(decode_voice_event(payload))
+            event = decode_voice_event(payload)
+            logger.info(
+                "voice event received guild=%s user=%s prev_channel=%s channel=%s is_bot=%s",
+                event.guild_id or "-",
+                event.user_id or "-",
+                event.previous_channel_id or "-",
+                event.channel_id or "-",
+                event.is_bot,
+            )
+            await service.HandleVoiceEvent(event)
+            logger.info(
+                "voice event processed guild=%s user=%s prev_channel=%s channel=%s",
+                event.guild_id or "-",
+                event.user_id or "-",
+                event.previous_channel_id or "-",
+                event.channel_id or "-",
+            )
         except Exception:
             logger.exception("voice event handling failed payload_size=%s", len(payload))
             raise
 
     await bus.subscribe(None, domain.SUBJECT_VOICE_EVENT, repo, handle)
     await service.Start()
+    logger.info("tracker startup replay complete")
     startup_ready.set()
 
     try:

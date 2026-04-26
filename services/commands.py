@@ -188,6 +188,13 @@ async def main() -> None:
         except Exception:
             logger.exception("command failed %s", context)
             result = "Command failed. Check service logs."
+        else:
+            if isinstance(result, InteractionMessage):
+                logger.info("command completed %s response=interaction_message", context)
+            elif isinstance(result, discord.Embed):
+                logger.info("command completed %s response=embed", context)
+            else:
+                logger.info("command completed %s response=text", context)
         if isinstance(result, InteractionMessage):
             kwargs: dict[str, object] = {"ephemeral": result.ephemeral}
             if result.content is not None:
