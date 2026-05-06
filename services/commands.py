@@ -36,7 +36,7 @@ from voice_tracker.discord_models import (
     User,
 )
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, invite_rollout_enabled, load_config, register_commands_http
+from voice_tracker.runtime import configure_logging, load_config, register_commands_http
 
 
 logger = logging.getLogger(__name__)
@@ -190,8 +190,7 @@ async def main() -> None:
                 command,
                 options,
                 cfg.bot_admin_user_ids,
-                userinfo_invite_reads_enabled=bool(getattr(cfg, "userinfo_invite_reads_enabled", False))
-                and invite_rollout_enabled(cfg, cfg.discord_guild_id),
+                userinfo_invite_reads_enabled=bool(getattr(cfg, "userinfo_invite_reads_enabled", True)),
             )
         except ValueError as exc:
             logger.warning("command rejected %s error=%s", context, exc)
@@ -526,7 +525,7 @@ async def _dispatch_userinfo_command(
         f"Status: {status_label}",
         await _userinfo_roles_line(profile, member, guild),
         f"Total voice time: {total_voice_time}",
-        *(_userinfo_invite_lines(profile) if invite_reads_enabled else []),
+        *_userinfo_invite_lines(profile, invite_reads_enabled=invite_reads_enabled),
         f"Joined at: {joined_at}",
         f"Registered at: {created_at}",
     ]
@@ -716,7 +715,9 @@ async def _userinfo_roles(profile: object | None, member: discord.Member | None,
     return safe_roles
 
 
-def _userinfo_invite_lines(profile: object | None) -> list[str]:
+def _userinfo_invite_lines(profile: object | None, *, invite_reads_enabled: bool = True) -> list[str]:
+    if not invite_reads_enabled:
+        return ["Invite attribution: disabled by configuration"]
     attribution_status = _userinfo_invite_attribution_status(profile)
     if attribution_status == "exact":
         invite_used = _userinfo_profile_text(profile, "invite_url", "inviteUrl") or "unknown"

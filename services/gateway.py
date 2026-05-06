@@ -1327,6 +1327,30 @@ async def main() -> None:
     await nats.connect(cfg.nats_url)
     bus = Bus(nats, cfg.event_signing_secret, "gateway")
     invite_rollout_active = invite_rollout_enabled(cfg, cfg.discord_guild_id)
+    invite_snapshot_enabled = bool(getattr(cfg, "invite_snapshot_sync_enabled", True))
+    invite_live_enabled = bool(getattr(cfg, "invite_live_attribution_enabled", True))
+    invite_reconciliation_enabled = bool(getattr(cfg, "invite_reconciliation_enabled", False))
+
+    if invite_live_enabled and not invite_snapshot_enabled:
+        logger.warning(
+            "invite live attribution requires snapshots; enabling snapshots automatically guild=%s",
+            cfg.discord_guild_id,
+        )
+        invite_snapshot_enabled = True
+    if not invite_rollout_active and (invite_snapshot_enabled or invite_live_enabled or invite_reconciliation_enabled):
+        logger.warning(
+            "invite features disabled by rollout for guild=%s configured_rollout_ids=%s",
+            cfg.discord_guild_id,
+            ",".join(list(getattr(cfg, "invite_rollout_guild_ids", []) or [])) or "<empty>",
+        )
+    logger.info(
+        "invite feature flags guild=%s rollout=%s snapshot=%s live=%s reconciliation=%s",
+        cfg.discord_guild_id,
+        invite_rollout_active,
+        invite_snapshot_enabled,
+        invite_live_enabled,
+        invite_reconciliation_enabled,
+    )
 
     intents = discord.Intents.none()
     intents.guilds = True
@@ -1338,9 +1362,9 @@ async def main() -> None:
         client=client,
         repo=repo,
         guild_id=cfg.discord_guild_id,
-        snapshot_sync_enabled=bool(getattr(cfg, "invite_snapshot_sync_enabled", False)) and invite_rollout_active,
-        live_attribution_enabled=bool(getattr(cfg, "invite_live_attribution_enabled", False)) and invite_rollout_active,
-        reconciliation_enabled=bool(getattr(cfg, "invite_reconciliation_enabled", False)) and invite_rollout_active,
+        snapshot_sync_enabled=invite_snapshot_enabled and invite_rollout_active,
+        live_attribution_enabled=invite_live_enabled and invite_rollout_active,
+        reconciliation_enabled=invite_reconciliation_enabled and invite_rollout_active,
     )
     voice_controller = ManagedVoiceController(client=client, repo=repo, guild_id=cfg.discord_guild_id)
     soundboard_enforcement = SoundboardEnforcement(

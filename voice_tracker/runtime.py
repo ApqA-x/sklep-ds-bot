@@ -77,9 +77,9 @@ class Config:
     event_signing_secret: str = ""
     tracking_mode: str = "all"
     tracked_channel_ids: list[str] = field(default_factory=list)
-    invite_snapshot_sync_enabled: bool = False
-    invite_live_attribution_enabled: bool = False
-    userinfo_invite_reads_enabled: bool = False
+    invite_snapshot_sync_enabled: bool = True
+    invite_live_attribution_enabled: bool = True
+    userinfo_invite_reads_enabled: bool = True
     invite_reconciliation_enabled: bool = False
 
 
@@ -100,9 +100,9 @@ def load_config(env: Any = None) -> Config:
     # Tracking defaults are canonicalized to all-channel mode at runtime.
     cfg.tracking_mode = "all"
     cfg.tracked_channel_ids = []
-    cfg.invite_snapshot_sync_enabled = _getenv_bool(source, "INVITE_SNAPSHOT_SYNC_ENABLED", False)
-    cfg.invite_live_attribution_enabled = _getenv_bool(source, "INVITE_LIVE_ATTRIBUTION_ENABLED", False)
-    cfg.userinfo_invite_reads_enabled = _getenv_bool(source, "USERINFO_INVITE_READS_ENABLED", False)
+    cfg.invite_snapshot_sync_enabled = _getenv_bool(source, "INVITE_SNAPSHOT_SYNC_ENABLED", True)
+    cfg.invite_live_attribution_enabled = _getenv_bool(source, "INVITE_LIVE_ATTRIBUTION_ENABLED", True)
+    cfg.userinfo_invite_reads_enabled = _getenv_bool(source, "USERINFO_INVITE_READS_ENABLED", True)
     cfg.invite_reconciliation_enabled = _getenv_bool(source, "INVITE_RECONCILIATION_ENABLED", False)
     if cfg.mongo_uri == "" or cfg.mongo_db == "" or cfg.nats_url == "":
         raise ValueError("missing required configuration")
