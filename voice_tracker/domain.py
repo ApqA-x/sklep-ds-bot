@@ -90,6 +90,14 @@ def member_join_attribution_id(guild_id: str, user_id: str, joined_at: datetime 
     return f"{guild_id}:{user_id}:{datetime_to_json(joined_at)}"
 
 
+def member_role_state_id(guild_id: str, user_id: str) -> str:
+    guild_id = _clean(guild_id)
+    user_id = _clean(user_id)
+    if not guild_id or not user_id:
+        return ""
+    return f"{guild_id}:{user_id}"
+
+
 @dataclass(slots=True)
 class GuildSettings:
     guild_id: str = ""
@@ -708,6 +716,61 @@ class MemberJoinState:
         }
         if self.updated_at is not None:
             data["updatedAt"] = self.updated_at
+        return data
+
+
+@dataclass(slots=True)
+class MemberRoleState:
+    id: str = ""
+    guild_id: str = ""
+    user_id: str = ""
+    role_ids: list[str] = field(default_factory=list)
+    last_seen_at: datetime | None = None
+    updated_at: datetime | None = None
+    last_restored_at: datetime | None = None
+    pending_restore: bool = False
+
+    def __post_init__(self) -> None:
+        self.guild_id = _clean(self.guild_id)
+        self.user_id = _clean(self.user_id)
+        if not self.id:
+            self.id = member_role_state_id(self.guild_id, self.user_id)
+        self.id = _clean(self.id)
+        self.role_ids = clean_channel_ids(self.role_ids)
+        self.last_seen_at = ensure_utc(self.last_seen_at)
+        self.updated_at = ensure_utc(self.updated_at)
+        self.last_restored_at = ensure_utc(self.last_restored_at)
+        self.pending_restore = bool(self.pending_restore)
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "MemberRoleState | None":
+        if data is None:
+            return None
+        return cls(
+            id=data.get("_id") or data.get("id", ""),
+            guild_id=data.get("guildId", ""),
+            user_id=data.get("userId", ""),
+            role_ids=list(data.get("roleIds") or data.get("roles") or []),
+            last_seen_at=parse_datetime(data.get("lastSeenAt")),
+            updated_at=parse_datetime(data.get("updatedAt")),
+            last_restored_at=parse_datetime(data.get("lastRestoredAt")),
+            pending_restore=bool(data.get("pendingRestore", False)),
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        data = {
+            "_id": self.id,
+            "guildId": self.guild_id,
+            "userId": self.user_id,
+            "roleIds": list(self.role_ids),
+            "pendingRestore": bool(self.pending_restore),
+        }
+        optional = {
+            "lastSeenAt": self.last_seen_at,
+            "updatedAt": self.updated_at,
+            "lastRestoredAt": self.last_restored_at,
+        }
+        data.update({key: value for key, value in optional.items() if value is not None})
         return data
 
 

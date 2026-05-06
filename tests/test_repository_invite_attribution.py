@@ -94,6 +94,7 @@ class _FakeDb:
             "invite_catalog": _Collection(),
             "member_join_attributions": _Collection(),
             "member_join_state": _Collection(),
+            "member_role_state": _Collection(),
         }
 
     def __getitem__(self, name: str) -> _Collection:

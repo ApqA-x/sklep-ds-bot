@@ -75,6 +75,277 @@ async def _noop(*_args, **_kwargs) -> None:
     return None
 
 
+def test_member_role_ids_skips_default_role() -> None:
+    default_role = SimpleNamespace(id="1", is_default=lambda: True)
+    helper_role = SimpleNamespace(id="2", is_default=lambda: False)
+    member = SimpleNamespace(roles=[default_role, helper_role])
+
+    assert gateway._member_role_ids(member) == ["2"]
+
+
+def test_save_member_role_snapshot_persists_normalized_ids() -> None:
+    calls: list[tuple[str, str, list[str]]] = []
+
+    def save_member_role_snapshot(
+        _ctx,
+        guild_id: str,
+        user_id: str,
+        role_ids: list[str],
+        _seen_at,
+        *,
+        pending_restore: bool = True,
+    ):
+        assert pending_restore is True
+        calls.append((guild_id, user_id, list(role_ids)))
+
+    repo = SimpleNamespace(save_member_role_snapshot=save_member_role_snapshot)
+    member = SimpleNamespace(
+        id="42",
+        guild=SimpleNamespace(id="123"),
+        roles=[SimpleNamespace(id="2", is_default=lambda: False), SimpleNamespace(id="2", is_default=lambda: False)],
+    )
+
+    gateway._save_member_role_snapshot(repo, member)
+
+    assert calls == [("123", "42", ["2"])]
+
+
+async def test_restore_member_roles_prunes_missing_roles_and_assigns_safe_roles(monkeypatch) -> None:
+    restored: list[tuple[str, str, list[str]]] = []
+
+    class _Repo:
+        def get_member_role_state(self, _ctx, _guild_id: str, _user_id: str):
+            return SimpleNamespace(role_ids=["missing", "2", "3"])
+
+        def mark_member_roles_restored(self, _ctx, guild_id: str, user_id: str, role_ids: list[str], _restored_at):
+            restored.append((guild_id, user_id, list(role_ids)))
+
+    assigned: list[int] = []
+
+    async def add_roles(role, reason: str):
+        assigned.append(role.id)
+
+    role_two = SimpleNamespace(id=2, is_default=lambda: False, managed=False, permissions=SimpleNamespace(administrator=False), position=1)
+    role_three = SimpleNamespace(id=3, is_default=lambda: False, managed=False, permissions=SimpleNamespace(administrator=False), position=1)
+
+    async def fetch_roles():
+        return [role_two, role_three]
+
+    guild = SimpleNamespace(id="123", roles=[role_three], fetch_roles=fetch_roles)
+    member = SimpleNamespace(id="42", guild=guild, roles=[SimpleNamespace(id="3", is_default=lambda: False)], add_roles=add_roles)
+
+    async def _resolve_bot_member(_client, _guild):
+        return SimpleNamespace(id="999")
+
+    def _is_safe(_role, _bot_member) -> bool:
+        return True
+
+    monkeypatch.setattr(gateway, "_resolve_bot_member", _resolve_bot_member)
+    monkeypatch.setattr(gateway, "_autorole_is_safe", _is_safe)
+
+    await gateway._restore_member_roles(object(), _Repo(), member, source="test")
+
+    assert assigned == [2]
+    assert restored == [("123", "42", ["2", "3"])]
+
+
+async def test_restore_member_roles_keeps_unresolved_ids_when_role_fetch_fails(monkeypatch) -> None:
+    snapshots: list[tuple[list[str], bool]] = []
+
+    class _Repo:
+        def get_member_role_state(self, _ctx, _guild_id: str, _user_id: str):
+            return SimpleNamespace(role_ids=["9"], pending_restore=True)
+
+        def save_member_role_snapshot(self, _ctx, _guild_id: str, _user_id: str, role_ids: list[str], _seen_at, *, pending_restore: bool = True):
+            snapshots.append((list(role_ids), pending_restore))
+
+    async def add_roles(_role, reason: str):
+        raise AssertionError("should not assign when role list cannot be resolved")
+
+    async def fetch_roles():
+        raise RuntimeError("temporary gateway failure")
+
+    guild = SimpleNamespace(id="123", roles=[], fetch_roles=fetch_roles)
+    member = SimpleNamespace(id="42", guild=guild, roles=[], add_roles=add_roles)
+
+    async def _resolve_bot_member(_client, _guild):
+        return SimpleNamespace(id="999")
+
+    monkeypatch.setattr(gateway, "_resolve_bot_member", _resolve_bot_member)
+
+    restored = await gateway._restore_member_roles(object(), _Repo(), member, source="reconciliation")
+
+    assert restored is False
+    assert snapshots == [(["9"], True)]
+
+
+async def test_reconcile_member_roles_marks_absent_members_pending(monkeypatch) -> None:
+    marked_pending: list[str] = []
+
+    class _Repo:
+        def list_member_role_states_by_guild(self, _ctx, _guild_id: str, _limit: int = 0):
+            return [SimpleNamespace(user_id="42", pending_restore=False)]
+
+        def mark_member_roles_pending(self, _ctx, _guild_id: str, user_id: str):
+            marked_pending.append(user_id)
+
+    guild = SimpleNamespace(id=123)
+    client = SimpleNamespace(get_guild=lambda guild_id: guild if int(guild_id) == 123 else None, guilds=[guild])
+
+    async def _resolve_member(_guild, _user_id: str):
+        return None
+
+    monkeypatch.setattr(gateway, "_resolve_member", _resolve_member)
+
+    await gateway._reconcile_member_roles(client, _Repo(), "123")
+
+    assert marked_pending == ["42"]
+
+
+async def test_reconcile_member_roles_skips_sync_when_restore_is_deferred(monkeypatch) -> None:
+    sync_calls: list[str] = []
+
+    class _Repo:
+        def list_member_role_states_by_guild(self, _ctx, _guild_id: str, _limit: int = 0):
+            return [SimpleNamespace(user_id="42", pending_restore=True)]
+
+    member = SimpleNamespace(id="42", bot=False, guild=SimpleNamespace(id="123"), roles=[])
+    guild = SimpleNamespace(id=123)
+    client = SimpleNamespace(get_guild=lambda guild_id: guild if int(guild_id) == 123 else None, guilds=[guild])
+
+    async def _resolve_member(_guild, _user_id: str):
+        return member
+
+    async def _restore_member_roles(_client, _repo, _member, *, source: str):
+        assert source == "reconciliation"
+        return False
+
+    def _sync_member_role_state(_repo, _member):
+        sync_calls.append("sync")
+
+    monkeypatch.setattr(gateway, "_resolve_member", _resolve_member)
+    monkeypatch.setattr(gateway, "_restore_member_roles", _restore_member_roles)
+    monkeypatch.setattr(gateway, "_sync_member_role_state", _sync_member_role_state)
+
+    await gateway._reconcile_member_roles(client, _Repo(), "123")
+
+    assert sync_calls == []
+
+
+async def test_restore_member_roles_skips_when_reconciliation_not_pending(monkeypatch) -> None:
+    touched: list[str] = []
+
+    class _Repo:
+        def get_member_role_state(self, _ctx, _guild_id: str, _user_id: str):
+            return SimpleNamespace(role_ids=["2"], pending_restore=False)
+
+        def mark_member_roles_restored(self, _ctx, _guild_id: str, _user_id: str, _role_ids: list[str], _restored_at):
+            touched.append("restored")
+
+    guild = SimpleNamespace(id="123", roles=[])
+    member = SimpleNamespace(id="42", guild=guild, roles=[])
+
+    result = await gateway._restore_member_roles(object(), _Repo(), member, source="reconciliation")
+
+    assert result is True
+    assert touched == []
+
+
+async def test_restore_member_roles_skips_unsafe_role(monkeypatch) -> None:
+    assigned: list[int] = []
+    restored: list[list[str]] = []
+
+    class _Repo:
+        def get_member_role_state(self, _ctx, _guild_id: str, _user_id: str):
+            return SimpleNamespace(role_ids=["2"], pending_restore=True)
+
+        def mark_member_roles_restored(self, _ctx, _guild_id: str, _user_id: str, role_ids: list[str], _restored_at):
+            restored.append(list(role_ids))
+
+    role_two = SimpleNamespace(id=2, is_default=lambda: False, managed=False, permissions=SimpleNamespace(administrator=False), position=1)
+
+    async def fetch_roles():
+        return [role_two]
+
+    async def add_roles(role, reason: str):
+        assigned.append(role.id)
+
+    member = SimpleNamespace(id="42", guild=SimpleNamespace(id="123", roles=[role_two], fetch_roles=fetch_roles), roles=[], add_roles=add_roles)
+
+    async def _resolve_bot_member(_client, _guild):
+        return SimpleNamespace(id="999")
+
+    monkeypatch.setattr(gateway, "_resolve_bot_member", _resolve_bot_member)
+    monkeypatch.setattr(gateway, "_autorole_is_safe", lambda _role, _bot: False)
+
+    result = await gateway._restore_member_roles(object(), _Repo(), member, source="reconciliation")
+
+    assert result is True
+    assert assigned == []
+    assert restored == [[]]
+
+
+async def test_restore_member_roles_keeps_pending_when_assignment_fails(monkeypatch) -> None:
+    snapshots: list[tuple[list[str], bool]] = []
+
+    class _Repo:
+        def get_member_role_state(self, _ctx, _guild_id: str, _user_id: str):
+            return SimpleNamespace(role_ids=["2"], pending_restore=True)
+
+        def save_member_role_snapshot(self, _ctx, _guild_id: str, _user_id: str, role_ids: list[str], _seen_at, *, pending_restore: bool = True):
+            snapshots.append((list(role_ids), pending_restore))
+
+    role_two = SimpleNamespace(id=2, is_default=lambda: False, managed=False, permissions=SimpleNamespace(administrator=False), position=1)
+
+    async def fetch_roles():
+        return [role_two]
+
+    async def add_roles(_role, reason: str):
+        raise RuntimeError("temporary role assignment failure")
+
+    member = SimpleNamespace(
+        id="42",
+        guild=SimpleNamespace(id="123", roles=[role_two], fetch_roles=fetch_roles),
+        roles=[],
+        add_roles=add_roles,
+    )
+
+    async def _resolve_bot_member(_client, _guild):
+        return SimpleNamespace(id="999")
+
+    monkeypatch.setattr(gateway, "_resolve_bot_member", _resolve_bot_member)
+    monkeypatch.setattr(gateway, "_autorole_is_safe", lambda _role, _bot: True)
+
+    result = await gateway._restore_member_roles(object(), _Repo(), member, source="reconciliation")
+
+    assert result is False
+    assert snapshots == [(["2"], True)]
+
+
+async def test_sync_current_guild_member_roles_skips_pending_restore_members(monkeypatch) -> None:
+    synced: list[str] = []
+
+    class _Repo:
+        def get_member_role_state(self, _ctx, _guild_id: str, user_id: str):
+            if user_id == "42":
+                return SimpleNamespace(pending_restore=True)
+            return SimpleNamespace(pending_restore=False)
+
+    member_pending = SimpleNamespace(id="42", bot=False, guild=SimpleNamespace(id="123"), roles=[])
+    member_regular = SimpleNamespace(id="99", bot=False, guild=SimpleNamespace(id="123"), roles=[])
+    guild = SimpleNamespace(id=123, members=[member_pending, member_regular])
+    client = SimpleNamespace(get_guild=lambda guild_id: guild if int(guild_id) == 123 else None, guilds=[guild])
+
+    def _sync_member_role_state(_repo, member):
+        synced.append(str(member.id))
+
+    monkeypatch.setattr(gateway, "_sync_member_role_state", _sync_member_role_state)
+
+    await gateway._sync_current_guild_member_roles(client, _Repo(), "123")
+
+    assert synced == ["99"]
+
+
 async def _boot_gateway(monkeypatch, fake_repo: FakeRepo) -> object:
     fake_mongo = FakeMongoClient("mongodb://example")
 

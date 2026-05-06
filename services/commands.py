@@ -524,6 +524,7 @@ async def _dispatch_userinfo_command(
         f"User ID: `{user_id}`",
         f"Username: {username}",
         f"Status: {status_label}",
+        await _userinfo_roles_line(profile, member, guild),
         f"Total voice time: {total_voice_time}",
         *(_userinfo_invite_lines(profile) if invite_reads_enabled else []),
         f"Joined at: {joined_at}",
@@ -653,6 +654,66 @@ def _userinfo_total_voice_time(profile: object | None) -> str:
     else:
         total_for = getattr(profile, "total_for", getattr(profile, "totalFor", None))
     return format_duration(total_for or timedelta())
+
+
+async def _userinfo_roles_line(profile: object | None, member: discord.Member | None, guild: discord.Guild) -> str:
+    roles = await _userinfo_roles(profile, member, guild)
+    if len(roles) == 0:
+        return "Roles: none"
+    value = ", ".join(roles[:10])
+    if len(roles) > 10:
+        value = f"{value}, +{len(roles) - 10} more"
+    if member is None:
+        return f"Roles (stored): {value}"
+    return f"Roles: {value}"
+
+
+async def _userinfo_roles(profile: object | None, member: discord.Member | None, guild: discord.Guild) -> list[str]:
+    if member is not None:
+        names: list[str] = []
+        for role in list(getattr(member, "roles", []) or []):
+            is_default = getattr(role, "is_default", None)
+            if callable(is_default) and bool(is_default()):
+                continue
+            cleaned = _sanitize_public_text(str(getattr(role, "name", "") or ""))
+            if cleaned:
+                names.append(cleaned)
+        return names
+    if profile is None:
+        return []
+    if isinstance(profile, dict):
+        raw_roles = profile.get("roles", [])
+    else:
+        raw_roles = getattr(profile, "roles", [])
+    role_ids = [str(raw or "").strip() for raw in list(raw_roles or []) if str(raw or "").strip()]
+    if len(role_ids) == 0:
+        return []
+    role_lookup: dict[str, object] = {}
+    for role in list(getattr(guild, "roles", []) or []):
+        role_id = str(getattr(role, "id", "") or "")
+        if role_id:
+            role_lookup[role_id] = role
+    try:
+        for role in await guild.fetch_roles():
+            role_id = str(getattr(role, "id", "") or "")
+            if role_id:
+                role_lookup[role_id] = role
+    except Exception:
+        pass
+    safe_roles: list[str] = []
+    for role_id in role_ids:
+        role_obj = role_lookup.get(role_id)
+        if role_obj is None:
+            if not role_id.isdigit():
+                role_name = _sanitize_public_text(role_id)
+                if role_name:
+                    safe_roles.append(role_name)
+            continue
+        role_name = _sanitize_public_text(str(getattr(role_obj, "name", "") or ""))
+        if role_name == "":
+            continue
+        safe_roles.append(role_name)
+    return safe_roles
 
 
 def _userinfo_invite_lines(profile: object | None) -> list[str]:
@@ -1023,7 +1084,7 @@ def _userinfo_username(member: discord.Member | None, user: discord.User | None,
 
 def _userinfo_status(member: discord.Member | None) -> str:
     if member is None:
-        return "Unknown"
+        return "⚫ Not in server"
     status_key = str(getattr(member, "status", "unknown"))
     labels = {
         "online": "🟢 Online",

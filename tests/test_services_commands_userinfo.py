@@ -188,3 +188,46 @@ async def test_dispatch_userinfo_command_renders_unknown_invite_attribution(monk
     assert "Invite created by: unknown" in embed.description
     assert "Invite attribution: unknown" in embed.description
     assert not getattr(embed.image, "url", None)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_userinfo_command_shows_stored_roles_for_user_not_in_guild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = _FakeUser()
+    role = SimpleNamespace(id=7, name="Raid Team")
+
+    async def _fetch_roles():
+        return [role]
+
+    interaction = _FakeInteraction()
+    interaction.guild = SimpleNamespace(roles=[role], fetch_roles=_fetch_roles)
+
+    async def _resolve_member(_guild, _user_id: str):
+        return None
+
+    async def _fetch_user(_client, _user_id: str):
+        return user
+
+    def _load_profile(_ctx, _guild_id: str, _user_id: str):
+        return SimpleNamespace(
+            total_for=timedelta(minutes=5),
+            roles=["7", "999999"],
+            attribution_status="unknown",
+        )
+
+    monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
+    monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
+    service = SimpleNamespace(get_member_profile=_load_profile)
+
+    embed = await commands_service._dispatch_userinfo_command(
+        object(),
+        service,
+        SimpleNamespace(guild_id="g1"),
+        interaction,
+        [ApplicationCommandInteractionDataOption(name="user", value="669151106814967819")],
+    )
+
+    assert embed.description is not None
+    assert "Status: ⚫ Not in server" in embed.description
+    assert "Roles (stored): Raid Team" in embed.description

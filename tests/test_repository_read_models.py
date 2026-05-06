@@ -64,6 +64,11 @@ class _Cursor:
         return iter(self.to_list(None))
 
 
+class _UpdateResult:
+    def __init__(self, matched_count: int) -> None:
+        self.matched_count = matched_count
+
+
 class _Collection:
     def __init__(self) -> None:
         self.documents: list[dict[str, Any]] = []
@@ -85,6 +90,22 @@ class _Collection:
                 return dict(doc)
         return None
 
+    def update_one(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False) -> _UpdateResult:
+        for idx, current in enumerate(self.documents):
+            if not _matches(current, query):
+                continue
+            updated = dict(current)
+            updated.update(update.get("$set", {}))
+            self.documents[idx] = updated
+            return _UpdateResult(1)
+        if not upsert:
+            return _UpdateResult(0)
+        created = {"_id": query.get("_id")}
+        created.update(update.get("$setOnInsert", {}))
+        created.update(update.get("$set", {}))
+        self.documents.append(created)
+        return _UpdateResult(0)
+
 
 class _FakeDb:
     def __init__(self) -> None:
@@ -97,6 +118,7 @@ class _FakeDb:
             "invite_catalog": _Collection(),
             "member_join_attributions": _Collection(),
             "member_join_state": _Collection(),
+            "member_role_state": _Collection(),
         }
 
     def __getitem__(self, name: str) -> _Collection:
@@ -413,6 +435,19 @@ def test_dashboard_and_userinfo_read_from_repository_aggregates() -> None:
         "Invite attribution: unknown",
     ]
 
+
+def test_get_member_profile_reads_persisted_roles_without_voice_activity() -> None:
+    repo = Repository(_FakeDb())
+
+    repo.save_member_role_snapshot(None, "g1", "u7", ["role-a", "role-b"])
+
+    profile = repo.get_member_profile(None, "g1", "u7")
+
+    assert profile is not None
+    assert profile["user_id"] == "u7"
+    assert profile["roles"] == ["role-a", "role-b"]
+    assert profile["total_for"] == 0
+
 def test_ensure_indexes_adds_repository_read_model_indexes() -> None:
     db = _FakeDb()
     repo = Repository(db)
@@ -422,3 +457,6 @@ def test_ensure_indexes_adds_repository_read_model_indexes() -> None:
     participant_indexes = [call["keys"] for call in db.collections["voice_session_participants"].index_calls]
     assert [("guildId", 1), ("userId", 1), ("sessionId", 1)] in participant_indexes
     assert [("guildId", 1), ("userId", 1), ("joinedAt", -1)] in participant_indexes
+    member_role_indexes = [call["keys"] for call in db.collections["member_role_state"].index_calls]
+    assert [("guildId", 1), ("userId", 1)] in member_role_indexes
+    assert [("guildId", 1), ("updatedAt", -1)] in member_role_indexes

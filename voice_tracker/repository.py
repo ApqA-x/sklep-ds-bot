@@ -13,6 +13,7 @@ from .domain import (
     InviteCatalogEntry,
     MemberJoinAttribution,
     MemberJoinState,
+    MemberRoleState,
     ParticipantInterval,
     Session,
 )
@@ -70,6 +71,7 @@ class Repository:
         self.invite_catalog = _collection(db, "invite_catalog")
         self.member_join_attributions = _collection(db, "member_join_attributions")
         self.member_join_state = _collection(db, "member_join_state")
+        self.member_role_state = _collection(db, "member_role_state")
 
     def ensure_indexes(self, _ctx: Any = None) -> None:
         self.sessions.create_index(
@@ -107,6 +109,11 @@ class Repository:
 
         self.member_join_state.create_index([("guildId", 1), ("userId", 1)], unique=True)
         self.member_join_state.create_index([("guildId", 1), ("joinedAt", -1)])
+
+        self.member_role_state.create_index([("guildId", 1), ("userId", 1)], unique=True)
+        self.member_role_state.create_index([("guildId", 1), ("updatedAt", -1)])
+        self.member_role_state.create_index([("guildId", 1), ("lastSeenAt", -1)])
+        self.member_role_state.create_index([("guildId", 1), ("pendingRestore", 1), ("updatedAt", -1)])
 
     def claim_message(self, _ctx: Any, subject: str, message_id: str, issuer: str, issued_at: int) -> bool:
         try:
@@ -361,6 +368,116 @@ class Repository:
         )
         return state
 
+    def get_member_role_state(self, _ctx: Any, guild_id: str, user_id: str) -> MemberRoleState | None:
+        guild_id = str(guild_id or "").strip()
+        user_id = str(user_id or "").strip()
+        if guild_id == "" or user_id == "":
+            return None
+        return MemberRoleState.from_mongo(self.member_role_state.find_one({"_id": f"{guild_id}:{user_id}"}))
+
+    def upsert_member_role_state(self, _ctx: Any, state: MemberRoleState | None) -> MemberRoleState | None:
+        if state is None or state.id == "" or state.guild_id == "" or state.user_id == "":
+            return None
+        if state.updated_at is None:
+            state.updated_at = _utc_now()
+        payload = state.to_mongo()
+        self.member_role_state.update_one(
+            {"_id": state.id},
+            {
+                "$set": {
+                    "guildId": payload["guildId"],
+                    "userId": payload["userId"],
+                    "roleIds": payload["roleIds"],
+                    "updatedAt": payload["updatedAt"],
+                    "lastSeenAt": payload.get("lastSeenAt"),
+                    "lastRestoredAt": payload.get("lastRestoredAt"),
+                    "pendingRestore": bool(payload.get("pendingRestore", False)),
+                }
+            },
+            upsert=True,
+        )
+        return state
+
+    def save_member_role_snapshot(
+        self,
+        _ctx: Any,
+        guild_id: str,
+        user_id: str,
+        role_ids: list[str] | tuple[str, ...],
+        seen_at: datetime | None = None,
+        *,
+        pending_restore: bool = True,
+    ) -> MemberRoleState | None:
+        return self.upsert_member_role_state(
+            None,
+            MemberRoleState(
+                guild_id=guild_id,
+                user_id=user_id,
+                role_ids=list(role_ids or []),
+                last_seen_at=seen_at or _utc_now(),
+                updated_at=_utc_now(),
+                pending_restore=pending_restore,
+            ),
+        )
+
+    def mark_member_roles_restored(
+        self,
+        _ctx: Any,
+        guild_id: str,
+        user_id: str,
+        role_ids: list[str] | tuple[str, ...],
+        restored_at: datetime | None = None,
+    ) -> MemberRoleState | None:
+        current = self.get_member_role_state(None, guild_id, user_id)
+        return self.upsert_member_role_state(
+            None,
+            MemberRoleState(
+                guild_id=guild_id,
+                user_id=user_id,
+                role_ids=list(role_ids or []),
+                last_seen_at=getattr(current, "last_seen_at", None),
+                updated_at=_utc_now(),
+                last_restored_at=restored_at or _utc_now(),
+                pending_restore=False,
+            ),
+        )
+
+    def mark_member_roles_pending(self, _ctx: Any, guild_id: str, user_id: str) -> MemberRoleState | None:
+        current = self.get_member_role_state(None, guild_id, user_id)
+        if current is None:
+            return None
+        return self.upsert_member_role_state(
+            None,
+            MemberRoleState(
+                guild_id=guild_id,
+                user_id=user_id,
+                role_ids=list(getattr(current, "role_ids", []) or []),
+                last_seen_at=getattr(current, "last_seen_at", None),
+                updated_at=_utc_now(),
+                last_restored_at=getattr(current, "last_restored_at", None),
+                pending_restore=True,
+            ),
+        )
+
+    def list_member_role_states_by_guild(
+        self,
+        _ctx: Any,
+        guild_id: str,
+        limit: int = 0,
+        *,
+        pending_restore_only: bool = False,
+    ) -> list[MemberRoleState]:
+        guild_id = str(guild_id or "").strip()
+        if guild_id == "":
+            return []
+        query: dict[str, Any] = {"guildId": guild_id}
+        if pending_restore_only:
+            query["pendingRestore"] = True
+        cursor = self.member_role_state.find(query).sort([("updatedAt", -1)])
+        if int(limit or 0) > 0:
+            cursor = cursor.limit(max(1, int(limit)))
+        return [item for item in (MemberRoleState.from_mongo(doc) for doc in _cursor_all(cursor)) if item is not None]
+
     def list_closed_sessions_pending_notification(self, _ctx: Any) -> list[Session]:
         cursor = self.sessions.find(
             {
@@ -486,8 +603,20 @@ class Repository:
             {
                 "_id": session_id,
                 "summaryGeneratedAt": {"$exists": True},
-                "summaryDeliveredAt": {"$exists": False},
-                "summaryDeliveryClaimedAt": {"$exists": False},
+                "$and": [
+                    {
+                        "$or": [
+                            {"summaryDeliveredAt": {"$exists": False}},
+                            {"summaryDeliveredAt": None},
+                        ]
+                    },
+                    {
+                        "$or": [
+                            {"summaryDeliveryClaimedAt": {"$exists": False}},
+                            {"summaryDeliveryClaimedAt": None},
+                        ]
+                    },
+                ],
             },
             {"$set": {"summaryDeliveryClaimedAt": claimed_at, "updatedAt": _utc_now()}},
         )
@@ -607,6 +736,7 @@ class Repository:
             return None
 
         join_state = self.get_member_join_state(None, guild_id, user_id)
+        role_state = self.get_member_role_state(None, guild_id, user_id)
 
         participants = [
             p
@@ -616,7 +746,7 @@ class Repository:
             )
             if p is not None
         ]
-        if len(participants) == 0 and join_state is None:
+        if len(participants) == 0 and join_state is None and role_state is None:
             return None
         total_for = 0
         user_name = ""
@@ -641,7 +771,19 @@ class Repository:
                     user_name = candidate_name
                     selected_name_rank = candidate_rank
 
-        profile = {"user_id": user_id, "user_name": user_name, "total_for": total_for, "roles": []}
+        profile = {
+            "user_id": user_id,
+            "user_name": user_name,
+            "total_for": total_for,
+            "roles": list(getattr(role_state, "role_ids", []) or []),
+        }
+        if role_state is not None:
+            profile.update(
+                {
+                    "roles_last_seen_at": role_state.last_seen_at,
+                    "roles_last_restored_at": role_state.last_restored_at,
+                }
+            )
         if join_state is not None:
             profile.update(
                 {

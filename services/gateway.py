@@ -338,6 +338,228 @@ def _auto_unmute_user_ids_for_guild(repo: Repository, guild_id: str) -> list[str
     return _normalize_ids(getattr(settings, "auto_unmute_user_ids", []) or [])
 
 
+def _member_role_ids(member: discord.Member) -> list[str]:
+    role_ids: list[str] = []
+    for role in list(getattr(member, "roles", []) or []):
+        role_id = str(getattr(role, "id", "") or "").strip()
+        if role_id == "":
+            continue
+        is_default = getattr(role, "is_default", None)
+        if callable(is_default) and bool(is_default()):
+            continue
+        role_ids.append(role_id)
+    return _normalize_ids(role_ids)
+
+
+def _save_member_role_snapshot(repo: Repository, member: discord.Member) -> None:
+    saver = getattr(repo, "save_member_role_snapshot", None)
+    if not callable(saver):
+        return
+    guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
+    user_id = str(getattr(member, "id", "") or "")
+    if guild_id == "" or user_id == "":
+        return
+    saver(None, guild_id, user_id, _member_role_ids(member), _utc_now(), pending_restore=True)
+
+
+def _sync_member_role_state(repo: Repository, member: discord.Member) -> None:
+    saver = getattr(repo, "save_member_role_snapshot", None)
+    if not callable(saver):
+        return
+    guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
+    user_id = str(getattr(member, "id", "") or "")
+    if guild_id == "" or user_id == "" or bool(getattr(member, "bot", False)):
+        return
+    saver(None, guild_id, user_id, _member_role_ids(member), _utc_now(), pending_restore=False)
+
+
+async def _role_lookup_map(guild: discord.Guild) -> tuple[dict[str, discord.Role], bool]:
+    mapping: dict[str, discord.Role] = {}
+    for role in list(getattr(guild, "roles", []) or []):
+        role_id = str(getattr(role, "id", "") or "")
+        if role_id:
+            mapping[role_id] = role
+    try:
+        for role in await guild.fetch_roles():
+            role_id = str(getattr(role, "id", "") or "")
+            if role_id:
+                mapping[role_id] = role
+        return mapping, True
+    except Exception:
+        return mapping, False
+
+
+async def _restore_member_roles(
+    client: discord.Client,
+    repo: Repository,
+    member: discord.Member,
+    *,
+    source: str,
+) -> bool:
+    guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
+    user_id = str(getattr(member, "id", "") or "")
+    if guild_id == "" or user_id == "":
+        return True
+    getter = getattr(repo, "get_member_role_state", None)
+    if not callable(getter):
+        return True
+    state = getter(None, guild_id, user_id)
+    if state is None:
+        return True
+    pending_restore = bool(getattr(state, "pending_restore", False))
+    if source == "reconciliation" and not pending_restore:
+        return True
+    stored_ids = _normalize_ids(getattr(state, "role_ids", []) or getattr(state, "roles", []) or [])
+    if len(stored_ids) == 0:
+        marker = getattr(repo, "mark_member_roles_restored", None)
+        if callable(marker):
+            marker(None, guild_id, user_id, [], _utc_now())
+        return True
+    bot_member = await _resolve_bot_member(client, member.guild)
+    if bot_member is None:
+        logger.warning("role restore skipped guild=%s member=%s source=%s missing bot member", guild_id, user_id, source)
+        return False
+
+    roles_by_id, fetch_ok = await _role_lookup_map(member.guild)
+    current_ids = set(_member_role_ids(member))
+    retained_ids: set[str] = set(current_ids)
+    transient_unresolved = False
+    assignment_failed = False
+
+    for role_id in stored_ids:
+        role = roles_by_id.get(role_id)
+        if role is None:
+            if fetch_ok:
+                logger.info(
+                    "role restore pruned missing role guild=%s member=%s role=%s source=%s",
+                    guild_id,
+                    user_id,
+                    role_id,
+                    source,
+                )
+            else:
+                retained_ids.add(role_id)
+                transient_unresolved = True
+            continue
+        if role_id in current_ids:
+            retained_ids.add(role_id)
+            continue
+        if not _autorole_is_safe(role, bot_member):
+            logger.warning("role restore skipped unsafe role guild=%s member=%s role=%s source=%s", guild_id, user_id, role_id, source)
+            continue
+        try:
+            await member.add_roles(role, reason="Voice Tracker role restore")
+            retained_ids.add(role_id)
+        except Exception:
+            retained_ids.add(role_id)
+            assignment_failed = True
+            logger.exception(
+                "role restore assignment failed guild=%s member=%s role=%s source=%s",
+                guild_id,
+                user_id,
+                role_id,
+                source,
+            )
+
+    marker = getattr(repo, "mark_member_roles_restored", None)
+    saver = getattr(repo, "save_member_role_snapshot", None)
+    if transient_unresolved or assignment_failed:
+        if callable(saver):
+            try:
+                saver(
+                    None,
+                    guild_id,
+                    user_id,
+                    sorted(retained_ids),
+                    getattr(state, "last_seen_at", None) or _utc_now(),
+                    pending_restore=True,
+                )
+            except Exception:
+                logger.exception(
+                    "role restore transient state update failed guild=%s member=%s source=%s",
+                    guild_id,
+                    user_id,
+                    source,
+                )
+        else:
+            logger.warning(
+                "role restore deferred without persistence guild=%s member=%s source=%s",
+                guild_id,
+                user_id,
+                source,
+            )
+        return False
+    if callable(marker):
+        try:
+            marker(None, guild_id, user_id, sorted(retained_ids), _utc_now())
+        except Exception:
+            logger.exception("role restore state update failed guild=%s member=%s source=%s", guild_id, user_id, source)
+            return False
+    return True
+
+
+async def _reconcile_member_roles(client: discord.Client, repo: Repository, guild_id: str, limit: int = 0) -> None:
+    guild = _guild_from_client(client, guild_id)
+    if guild is None:
+        return
+    loader = getattr(repo, "list_member_role_states_by_guild", None)
+    if not callable(loader):
+        return
+    states = loader(None, guild_id, limit)
+    mark_pending = getattr(repo, "mark_member_roles_pending", None)
+    for state in states:
+        user_id = str(getattr(state, "user_id", "") or "")
+        if user_id == "":
+            continue
+        try:
+            member = await _resolve_member(guild, user_id)
+        except Exception:
+            logger.exception("member role reconciliation resolve failed guild=%s member=%s", guild_id, user_id)
+            continue
+        if member is None:
+            if callable(mark_pending) and not bool(getattr(state, "pending_restore", False)):
+                try:
+                    mark_pending(None, guild_id, user_id)
+                except Exception:
+                    logger.exception("member role reconciliation pending mark failed guild=%s member=%s", guild_id, user_id)
+            continue
+        if bool(getattr(member, "bot", False)):
+            continue
+        try:
+            restored = await _restore_member_roles(client, repo, member, source="reconciliation")
+        except Exception:
+            logger.exception("member role reconciliation restore failed guild=%s member=%s", guild_id, user_id)
+            continue
+        if not restored:
+            continue
+        try:
+            _sync_member_role_state(repo, member)
+        except Exception:
+            logger.exception("member role reconciliation sync failed guild=%s member=%s", guild_id, user_id)
+
+
+async def _sync_current_guild_member_roles(client: discord.Client, repo: Repository, guild_id: str) -> None:
+    guild = _guild_from_client(client, guild_id)
+    if guild is None:
+        return
+    state_getter = getattr(repo, "get_member_role_state", None)
+    for member in list(getattr(guild, "members", []) or []):
+        if bool(getattr(member, "bot", False)):
+            continue
+        if callable(state_getter):
+            try:
+                state = state_getter(None, guild_id, str(getattr(member, "id", "") or ""))
+            except Exception:
+                state = None
+            if bool(getattr(state, "pending_restore", False)):
+                continue
+        try:
+            _sync_member_role_state(repo, member)
+        except Exception:
+            member_id = str(getattr(member, "id", "") or "")
+            logger.exception("member role sync failed guild=%s member=%s", guild_id, member_id)
+
+
 def _managed_voice_channel_id(settings: domain.GuildSettings | None) -> str:
     if settings is None:
         return ""
@@ -1132,6 +1354,8 @@ async def main() -> None:
     async def on_ready() -> None:
         await invite_attribution.seed_on_ready()
         await voice_controller.reconcile()
+        await _reconcile_member_roles(client, repo, cfg.discord_guild_id)
+        await _sync_current_guild_member_roles(client, repo, cfg.discord_guild_id)
 
     @client.event
     async def on_member_join(member: discord.Member) -> None:
@@ -1139,10 +1363,21 @@ async def main() -> None:
             return
         if getattr(member, "bot", False):
             return
+        restored = True
         try:
             await invite_attribution.on_member_join(member)
         except Exception:
             logger.exception("invite attribution failed guild=%s member=%s", member.guild.id, member.id)
+        try:
+            restored = await _restore_member_roles(client, repo, member, source="member_join")
+        except Exception:
+            restored = False
+            logger.exception("role restore failed guild=%s member=%s", member.guild.id, member.id)
+        if restored:
+            try:
+                _sync_member_role_state(repo, member)
+            except Exception:
+                logger.exception("role state sync failed guild=%s member=%s", member.guild.id, member.id)
         role_id = _autorole_id_for_guild(repo, str(member.guild.id))
         if role_id == "":
             return
@@ -1161,6 +1396,17 @@ async def main() -> None:
             await member.add_roles(role, reason="Voice Tracker autorole")
         except Exception:
             logger.exception("autorole assignment failed guild=%s member=%s role=%s", member.guild.id, member.id, role_id)
+
+    @client.event
+    async def on_member_remove(member: discord.Member) -> None:
+        if str(getattr(member.guild, "id", "") or "") != cfg.discord_guild_id:
+            return
+        if getattr(member, "bot", False):
+            return
+        try:
+            _save_member_role_snapshot(repo, member)
+        except Exception:
+            logger.exception("role snapshot failed guild=%s member=%s", member.guild.id, member.id)
 
     @client.event
     async def on_invite_create(invite: object) -> None:
@@ -1307,27 +1553,49 @@ async def main() -> None:
     async def sweep_pending() -> None:
         while True:
             await asyncio.sleep(60)
-            await _deliver_pending(client, repo)
+            try:
+                await _deliver_pending(client, repo)
+            except Exception:
+                logger.exception("pending summary sweep failed")
 
     async def reconcile_managed_voice() -> None:
         while True:
             await asyncio.sleep(5)
-            await voice_controller.reconcile()
+            try:
+                await voice_controller.reconcile()
+            except Exception:
+                logger.exception("managed voice reconciliation iteration failed guild=%s", cfg.discord_guild_id)
 
     async def refresh_invite_snapshots() -> None:
         while True:
             await asyncio.sleep(max(5, invite_attribution.snapshot_refresh_seconds))
-            await invite_attribution.refresh_snapshot()
+            try:
+                await invite_attribution.refresh_snapshot()
+            except Exception:
+                logger.exception("invite snapshot refresh failed guild=%s", cfg.discord_guild_id)
 
     async def reconcile_invite_metadata() -> None:
         while True:
             await asyncio.sleep(300)
-            await invite_attribution.reconcile_metadata()
+            try:
+                await invite_attribution.reconcile_metadata()
+            except Exception:
+                logger.exception("invite metadata reconciliation iteration failed guild=%s", cfg.discord_guild_id)
+
+    async def reconcile_member_roles() -> None:
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await _reconcile_member_roles(client, repo, cfg.discord_guild_id)
+                await _sync_current_guild_member_roles(client, repo, cfg.discord_guild_id)
+            except Exception:
+                logger.exception("member role reconciliation iteration failed guild=%s", cfg.discord_guild_id)
 
     sweep = asyncio.create_task(sweep_pending())
     reconcile = asyncio.create_task(reconcile_managed_voice())
     invite_refresh = asyncio.create_task(refresh_invite_snapshots())
     invite_reconcile = asyncio.create_task(reconcile_invite_metadata())
+    role_reconcile = asyncio.create_task(reconcile_member_roles())
     try:
         await client.connect()
     finally:
@@ -1335,6 +1603,7 @@ async def main() -> None:
         reconcile.cancel()
         invite_refresh.cancel()
         invite_reconcile.cancel()
+        role_reconcile.cancel()
         await bus.aclose()
         mongo_client.close()
 
