@@ -36,7 +36,7 @@ from voice_tracker.discord_models import (
     User,
 )
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, load_config, register_commands_http
+from voice_tracker.runtime import configure_logging, invite_rollout_enabled, load_config, register_commands_http
 
 
 logger = logging.getLogger(__name__)
@@ -181,7 +181,18 @@ async def main() -> None:
         context = _command_context(interaction, root, command, options)
         logger.info("command received %s", context)
         try:
-            result = await _dispatch_command(client, service, interaction, model, root, command, options, cfg.bot_admin_user_ids)
+            result = await _dispatch_command(
+                client,
+                service,
+                interaction,
+                model,
+                root,
+                command,
+                options,
+                cfg.bot_admin_user_ids,
+                userinfo_invite_reads_enabled=bool(getattr(cfg, "userinfo_invite_reads_enabled", False))
+                and invite_rollout_enabled(cfg, cfg.discord_guild_id),
+            )
         except ValueError as exc:
             logger.warning("command rejected %s error=%s", context, exc)
             result = str(exc)
@@ -288,6 +299,8 @@ async def _dispatch_command(
     command: str,
     options: list[ApplicationCommandInteractionDataOption],
     bot_admin_user_ids: list[str],
+    *,
+    userinfo_invite_reads_enabled: bool = True,
 ) -> str | discord.Embed | InteractionMessage:
     options = _normalize_snowflake_options(options)
     if root == "jump":
@@ -315,7 +328,14 @@ async def _dispatch_command(
     if root == "dashboard":
         return await _dispatch_dashboard_command(client, service, model, interaction)
     if root == "userinfo":
-        return await _dispatch_userinfo_command(client, service, model, interaction, options)
+        return await _dispatch_userinfo_command(
+            client,
+            service,
+            model,
+            interaction,
+            options,
+            invite_reads_enabled=userinfo_invite_reads_enabled,
+        )
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
         if not _is_admin_only(model):
             return "Insufficient permissions."
@@ -478,6 +498,8 @@ async def _dispatch_userinfo_command(
     model: InteractionCreate,
     interaction: discord.Interaction,
     options: list[ApplicationCommandInteractionDataOption],
+    *,
+    invite_reads_enabled: bool = True,
 ) -> discord.Embed:
     guild = getattr(interaction, "guild", None)
     if guild is None:
@@ -492,7 +514,8 @@ async def _dispatch_userinfo_command(
     display_name = _sanitize_public_text(_userinfo_display_name(member, fetched_user, user_id)) or user_id
     username = _sanitize_public_text(_userinfo_username(member, fetched_user, user_id)) or user_id
     status_label = _userinfo_status(member)
-    total_voice_time = _userinfo_total_voice_time(service, model.guild_id, user_id)
+    profile = _userinfo_profile(service, model.guild_id, user_id)
+    total_voice_time = _userinfo_total_voice_time(profile)
     joined_at = _format_discord_datetime(getattr(member, "joined_at", None))
     created_at = _format_discord_datetime(_userinfo_created_at(member, fetched_user))
     avatar_url = _userinfo_avatar_url(member, fetched_user)
@@ -502,6 +525,7 @@ async def _dispatch_userinfo_command(
         f"Username: {username}",
         f"Status: {status_label}",
         f"Total voice time: {total_voice_time}",
+        *(_userinfo_invite_lines(profile) if invite_reads_enabled else []),
         f"Joined at: {joined_at}",
         f"Registered at: {created_at}",
     ]
@@ -617,11 +641,70 @@ def _normalize_snowflake_options(
     return normalized
 
 
-def _userinfo_total_voice_time(service: VoiceService, guild_id: str, user_id: str) -> str:
-    profile = service.get_member_profile(None, guild_id, user_id)
+def _userinfo_profile(service: VoiceService, guild_id: str, user_id: str) -> object | None:
+    return service.get_member_profile(None, guild_id, user_id)
+
+
+def _userinfo_total_voice_time(profile: object | None) -> str:
     if profile is None:
         return format_duration(timedelta())
-    return format_duration(profile.total_for)
+    if isinstance(profile, dict):
+        total_for = profile.get("total_for", profile.get("totalFor"))
+    else:
+        total_for = getattr(profile, "total_for", getattr(profile, "totalFor", None))
+    return format_duration(total_for or timedelta())
+
+
+def _userinfo_invite_lines(profile: object | None) -> list[str]:
+    attribution_status = _userinfo_invite_attribution_status(profile)
+    if attribution_status == "exact":
+        invite_used = _userinfo_profile_text(profile, "invite_url", "inviteUrl") or "unknown"
+        invite_creator = _userinfo_invite_creator(profile) or "unknown"
+    else:
+        invite_used = attribution_status
+        invite_creator = attribution_status
+    return [
+        f"Invite used: {invite_used}",
+        f"Invite created by: {invite_creator}",
+        f"Invite attribution: {attribution_status}",
+    ]
+
+
+def _userinfo_invite_attribution_status(profile: object | None) -> str:
+    status = _userinfo_profile_text(profile, "attribution_status", "attributionStatus").lower()
+    if status in {"exact", "ambiguous", "unknown"}:
+        return status
+    return "unknown"
+
+
+def _userinfo_invite_creator(profile: object | None) -> str:
+    inviter_name = _userinfo_profile_text(profile, "inviter_name", "inviterName")
+    inviter_user_id = _userinfo_profile_text(profile, "inviter_user_id", "inviterUserId")
+    if inviter_name and inviter_user_id:
+        return f"{inviter_name} ({inviter_user_id})"
+    return inviter_name or inviter_user_id
+
+
+def _userinfo_profile_text(profile: object | None, *names: str) -> str:
+    if profile is None:
+        return ""
+    if isinstance(profile, dict):
+        for name in names:
+            value = profile.get(name)
+            if value is None:
+                continue
+            cleaned = _sanitize_public_text(str(value))
+            if cleaned:
+                return cleaned
+        return ""
+    for name in names:
+        value = getattr(profile, name, None)
+        if value is None:
+            continue
+        cleaned = _sanitize_public_text(str(value))
+        if cleaned:
+            return cleaned
+    return ""
 
 
 def _option_string(options: list[ApplicationCommandInteractionDataOption], name: str) -> str:

@@ -93,6 +93,10 @@ class _FakeDb:
             "processed_messages": _Collection(),
             "voice_sessions": _Collection(),
             "voice_session_participants": _Collection(),
+            "guild_invite_snapshots": _Collection(),
+            "invite_catalog": _Collection(),
+            "member_join_attributions": _Collection(),
+            "member_join_state": _Collection(),
         }
 
     def __getitem__(self, name: str) -> _Collection:
@@ -401,7 +405,13 @@ def test_dashboard_and_userinfo_read_from_repository_aggregates() -> None:
         "1. Bob: 0:02:00",
         "2. Alice: 0:01:00",
     ]
-    assert userinfo.splitlines() == ["User: Bob", "Total voice time: 0:02:00"]
+    assert userinfo.splitlines() == [
+        "User: Bob",
+        "Total voice time: 0:02:00",
+        "Invite used: unknown",
+        "Invite created by: unknown",
+        "Invite attribution: unknown",
+    ]
 
 def test_ensure_indexes_adds_repository_read_model_indexes() -> None:
     db = _FakeDb()

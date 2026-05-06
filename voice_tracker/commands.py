@@ -180,6 +180,11 @@ class MemberProfileView:
     user_name: str
     total_for: timedelta
     roles: list[str] = field(default_factory=list)
+    invite_code: str = ""
+    invite_url: str = ""
+    inviter_user_id: str = ""
+    inviter_name: str = ""
+    attribution_status: str = ""
 
 
 @dataclass(slots=True)
@@ -734,10 +739,16 @@ class Service:
             raise ValueError("user is required")
         profile = _load_member_profile(self.repo, ctx, interaction.guild_id, user_id)
         if profile is None:
-            return f"User: {user_id}\nTotal voice time: {format_duration(timedelta())}"
+            lines = [
+                f"User: {user_id}",
+                f"Total voice time: {format_duration(timedelta())}",
+                *_member_profile_invite_lines(None),
+            ]
+            return "\n".join(lines)
         lines = [f"User: {profile.user_name or profile.user_id}", f"Total voice time: {format_duration(profile.total_for)}"]
         if len(profile.roles) > 0:
             lines.append(f"Roles: {_truncate_list(profile.roles, 10)}")
+        lines.extend(_member_profile_invite_lines(profile))
         return "\n".join(lines)
 
     def handle_status_command(
@@ -1406,6 +1417,38 @@ def _timedelta_from_value(value: Any) -> timedelta:
     return timedelta()
 
 
+def _member_profile_invite_lines(profile: MemberProfileView | None) -> list[str]:
+    attribution_status = _member_profile_attribution_status(profile)
+    if attribution_status == "exact":
+        invite_used = _sanitize_public_text(profile.invite_url) or "unknown"
+        invite_creator = _member_profile_invite_creator(profile) or "unknown"
+    else:
+        invite_used = attribution_status
+        invite_creator = attribution_status
+    return [
+        f"Invite used: {invite_used}",
+        f"Invite created by: {invite_creator}",
+        f"Invite attribution: {attribution_status}",
+    ]
+
+
+def _member_profile_attribution_status(profile: MemberProfileView | None) -> str:
+    status = str(getattr(profile, "attribution_status", "") or "").strip().lower()
+    if status in {"exact", "ambiguous", "unknown"}:
+        return status
+    return "unknown"
+
+
+def _member_profile_invite_creator(profile: MemberProfileView | None) -> str:
+    if profile is None:
+        return ""
+    inviter_name = _sanitize_public_text(profile.inviter_name)
+    inviter_user_id = _sanitize_public_text(profile.inviter_user_id)
+    if inviter_name and inviter_user_id:
+        return f"{inviter_name} ({inviter_user_id})"
+    return inviter_name or inviter_user_id
+
+
 def _load_member_profile(repo: Any, ctx: Any, guild_id: str, user_id: str) -> MemberProfileView | None:
     if repo is None:
         return None
@@ -1431,25 +1474,44 @@ def _load_member_profile(repo: Any, ctx: Any, guild_id: str, user_id: str) -> Me
 
 
 def _member_profile_from_row(row: Any, default_user_id: str) -> MemberProfileView | None:
-    if isinstance(row, dict):
-        user_id = str(row.get("user_id") or row.get("userId") or default_user_id).strip()
-        if user_id != default_user_id:
-            return None
-        return MemberProfileView(
-            user_id=user_id,
-            user_name=str(row.get("user_name") or row.get("userName") or "").strip(),
-            total_for=_timedelta_from_value(row.get("total_for") or row.get("totalFor") or row.get("total_time") or row.get("totalTime") or 0),
-            roles=[str(role).strip() for role in row.get("roles") or row.get("role_names") or row.get("roleNames") or [] if str(role).strip()],
-        )
-    user_id = str(getattr(row, "user_id", getattr(row, "userId", default_user_id))).strip()
+    user_id = _member_profile_string(row, "user_id", "userId") or default_user_id
     if user_id != default_user_id:
         return None
     return MemberProfileView(
         user_id=user_id,
-        user_name=str(getattr(row, "user_name", getattr(row, "userName", ""))).strip(),
-        total_for=_timedelta_from_value(getattr(row, "total_for", getattr(row, "totalFor", getattr(row, "total_time", getattr(row, "totalTime", 0))))),
-        roles=[str(role).strip() for role in getattr(row, "roles", getattr(row, "role_names", getattr(row, "roleNames", []))) if str(role).strip()],
+        user_name=_member_profile_string(row, "user_name", "userName"),
+        total_for=_timedelta_from_value(
+            _member_profile_value(row, "total_for", "totalFor", "total_time", "totalTime") or 0
+        ),
+        roles=[
+            str(role).strip()
+            for role in (_member_profile_value(row, "roles", "role_names", "roleNames") or [])
+            if str(role).strip()
+        ],
+        invite_code=_member_profile_string(row, "invite_code", "inviteCode"),
+        invite_url=_member_profile_string(row, "invite_url", "inviteUrl"),
+        inviter_user_id=_member_profile_string(row, "inviter_user_id", "inviterUserId"),
+        inviter_name=_member_profile_string(row, "inviter_name", "inviterName"),
+        attribution_status=_member_profile_string(row, "attribution_status", "attributionStatus").lower(),
     )
+
+
+def _member_profile_value(row: Any, *names: str) -> Any:
+    if isinstance(row, dict):
+        for name in names:
+            value = row.get(name)
+            if value is not None:
+                return value
+        return None
+    for name in names:
+        value = getattr(row, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _member_profile_string(row: Any, *names: str) -> str:
+    return str(_member_profile_value(row, *names) or "").strip()
 
 
 VoiceApplicationCommand = voice_application_command

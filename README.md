@@ -67,6 +67,8 @@ Important variables:
 - `EVENT_SIGNING_SECRET`
 - `TRACKING_MODE` (`all`)
 - `TRACKED_CHANNEL_IDS` (startup default only)
+- `INVITE_SNAPSHOT_SYNC_ENABLED`, `INVITE_LIVE_ATTRIBUTION_ENABLED`, `USERINFO_INVITE_READS_ENABLED`, `INVITE_RECONCILIATION_ENABLED`
+- `INVITE_ROLLOUT_GUILD_IDS` for guarded invite-attribution rollout
 
 `BOT_ADMIN_USER_IDS` remains for compatibility but is not the primary admin policy path.
 

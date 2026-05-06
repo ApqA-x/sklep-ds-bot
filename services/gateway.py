@@ -5,6 +5,7 @@ import logging
 import warnings
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 with warnings.catch_warnings():
     warnings.filterwarnings(
@@ -20,11 +21,39 @@ from voice_tracker.bus import Bus
 from voice_tracker import domain
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
+from voice_tracker.runtime import configure_logging, invite_rollout_enabled, load_config, require_event_signing_secret
 
 
 SUMMARY_EMBED_COLOR = 0x5865F2
 logger = logging.getLogger(__name__)
+INVITE_ATTRIBUTION_SOURCE_LIVE_DIFF = "live_diff"
+INVITE_CATALOG_SOURCE_GATEWAY_EVENT = "live_event"
+INVITE_CATALOG_SOURCE_RECONCILIATION = "audit_log"
+INVITE_CATALOG_SOURCE_SNAPSHOT = "snapshot"
+INVITE_TYPE_REGULAR = "regular"
+INVITE_TYPE_VANITY = "vanity"
+ATTRIBUTION_STATUS_EXACT = "exact"
+ATTRIBUTION_STATUS_AMBIGUOUS = "ambiguous"
+ATTRIBUTION_STATUS_UNKNOWN = "unknown"
+UNKNOWN_REASON_CONCURRENT_CANDIDATES = "concurrent_candidates"
+UNKNOWN_REASON_DUPLICATE_JOIN_EVENT = "duplicate_join_event"
+UNKNOWN_REASON_GATEWAY_DOWNTIME = "gateway_downtime"
+UNKNOWN_REASON_MISSING_PERMISSIONS = "missing_permissions"
+UNKNOWN_REASON_NO_USAGE_DELTA = "no_usage_delta"
+UNKNOWN_REASON_SEED_UNAVAILABLE = "seed_unavailable"
+UNKNOWN_REASON_SNAPSHOT_FETCH_FAILED = "snapshot_fetch_failed"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _channel_id(channel: object | None) -> str:
@@ -50,6 +79,104 @@ def _guild_id(source: object | None) -> str:
         if guild_id:
             return guild_id
     return str(getattr(source, "guild_id", "") or "")
+
+
+def _invite_code(invite: object | None) -> str:
+    return str(getattr(invite, "code", "") or "").strip()
+
+
+def _invite_uses(invite: object | None) -> int:
+    uses = getattr(invite, "uses", 0)
+    try:
+        value = int(uses or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
+
+
+def _invite_url(invite: object | None, code: str) -> str:
+    url = str(getattr(invite, "url", "") or "").strip()
+    if url != "":
+        return url
+    if code == "":
+        return ""
+    return f"https://discord.gg/{code}"
+
+
+def _invite_inviter_user_id(invite: object | None) -> str:
+    direct = str(getattr(invite, "inviter_user_id", "") or getattr(invite, "inviterUserId", "") or "").strip()
+    if direct != "":
+        return direct
+    inviter = getattr(invite, "inviter", None)
+    return str(getattr(inviter, "id", "") or "").strip()
+
+
+def _invite_inviter_name(invite: object | None) -> str:
+    direct = str(getattr(invite, "inviter_name", "") or getattr(invite, "inviterName", "") or "").strip()
+    if direct != "":
+        return direct
+    inviter = getattr(invite, "inviter", None)
+    if inviter is None:
+        return ""
+    for attr in ("display_name", "global_name", "name"):
+        value = str(getattr(inviter, attr, "") or "").strip()
+        if value != "":
+            return value
+    return ""
+
+
+def _invite_target_channel_id(invite: object | None) -> str:
+    return _channel_id(
+        getattr(invite, "channel", None)
+        or getattr(invite, "channel_id", None)
+        or getattr(invite, "channelId", None)
+    )
+
+
+def _domain_object(type_name: str, **kwargs: object) -> object:
+    cls = getattr(domain, type_name, None)
+    if callable(cls):
+        return cls(**kwargs)
+    return SimpleNamespace(**kwargs)
+
+
+def _snapshot_captured_at(snapshot: object | None) -> datetime | None:
+    return _ensure_utc(getattr(snapshot, "captured_at", None) or getattr(snapshot, "capturedAt", None))
+
+
+def _snapshot_invites(snapshot: object | None) -> list[object]:
+    invites = getattr(snapshot, "invites", None)
+    if isinstance(invites, list):
+        return list(invites)
+    return []
+
+
+def _snapshot_by_code(snapshot: object | None) -> dict[str, object]:
+    items: dict[str, object] = {}
+    for invite in _snapshot_invites(snapshot):
+        code = _invite_code(invite)
+        if code == "":
+            continue
+        items[code] = invite
+    return items
+
+
+def _join_occurred_at(member: discord.Member) -> datetime:
+    joined_at = _ensure_utc(getattr(member, "joined_at", None))
+    return joined_at or _utc_now()
+
+
+def _audit_target_code(entry: object | None) -> str:
+    target = getattr(entry, "target", None)
+    code = _invite_code(target)
+    if code != "":
+        return code
+    for attr in ("after", "before", "extra"):
+        nested = getattr(entry, attr, None)
+        code = _invite_code(nested)
+        if code != "":
+            return code
+    return ""
 
 
 async def _resolve_channel(client: discord.Client, channel_id: str):
@@ -353,6 +480,393 @@ def _set_managed_connected_at(repo: Repository, guild_id: str, connected_at: dat
 
 
 @dataclass(slots=True)
+class InviteAttributionController:
+    client: discord.Client
+    repo: Repository
+    guild_id: str
+    snapshot_refresh_seconds: int = 60
+    reconciliation_max_age_days: int = 45
+    snapshot_sync_enabled: bool = True
+    live_attribution_enabled: bool = True
+    reconciliation_enabled: bool = False
+    _join_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _ready: dict[str, bool] = field(default_factory=dict)
+
+    async def seed_on_ready(self) -> None:
+        if not self.snapshot_sync_enabled:
+            self._ready[self.guild_id] = False
+            return
+        guild = _guild_from_client(self.client, self.guild_id)
+        if guild is None:
+            self._ready[self.guild_id] = False
+            return
+        self._ready[self.guild_id] = await self._seed_guild(guild)
+
+    async def refresh_snapshot(self) -> None:
+        if not self.snapshot_sync_enabled:
+            return
+        guild = _guild_from_client(self.client, self.guild_id)
+        if guild is None:
+            return
+        await self._seed_guild(guild)
+
+    async def on_invite_create(self, invite: object) -> None:
+        if not self.snapshot_sync_enabled:
+            return
+        guild_id = _guild_id(invite)
+        if guild_id != self.guild_id:
+            return
+        captured_at = _utc_now()
+        entry = self._catalog_entry_from_invite(
+            guild_id,
+            invite,
+            invite_type=INVITE_TYPE_REGULAR,
+            observed_at=captured_at,
+            source=INVITE_CATALOG_SOURCE_GATEWAY_EVENT,
+        )
+        self._upsert_catalog_entry(entry)
+        await self.refresh_snapshot()
+
+    async def on_invite_delete(self, invite: object) -> None:
+        if not self.snapshot_sync_enabled:
+            return
+        guild_id = _guild_id(invite)
+        if guild_id != self.guild_id:
+            return
+        code = _invite_code(invite)
+        if code != "":
+            marker = getattr(self.repo, "mark_invite_catalog_deleted", None) or getattr(self.repo, "mark_invite_deleted", None)
+            if callable(marker):
+                marker(None, guild_id, code, _utc_now(), INVITE_CATALOG_SOURCE_GATEWAY_EVENT)
+        await self.refresh_snapshot()
+
+    async def on_member_join(self, member: discord.Member) -> None:
+        if not self.live_attribution_enabled:
+            return
+        guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
+        if guild_id != self.guild_id or getattr(member, "bot", False):
+            return
+        lock = self._join_locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            await self._attribute_join_locked(member)
+
+    async def reconcile_metadata(self) -> None:
+        if not self.reconciliation_enabled:
+            return
+        guild = _guild_from_client(self.client, self.guild_id)
+        if guild is None:
+            return
+        cutoff = _utc_now() - timedelta(days=max(1, self.reconciliation_max_age_days))
+        audit_logs = getattr(guild, "audit_logs", None)
+        if not callable(audit_logs):
+            return
+        actions = [
+            getattr(discord.AuditLogAction, "invite_create", None),
+            getattr(discord.AuditLogAction, "invite_update", None),
+            getattr(discord.AuditLogAction, "invite_delete", None),
+        ]
+        for action in actions:
+            if action is None:
+                continue
+            try:
+                iterator = audit_logs(limit=100, action=action)
+            except Exception:
+                logger.exception("invite reconciliation failed guild=%s action=%s", self.guild_id, action)
+                continue
+            try:
+                async for entry in iterator:
+                    created_at = _ensure_utc(getattr(entry, "created_at", None))
+                    if created_at is None or created_at < cutoff:
+                        continue
+                    code = _audit_target_code(entry)
+                    if code == "":
+                        continue
+                    if action == getattr(discord.AuditLogAction, "invite_delete", object()):
+                        marker = getattr(self.repo, "mark_invite_catalog_deleted", None) or getattr(self.repo, "mark_invite_deleted", None)
+                        if callable(marker):
+                            marker(None, self.guild_id, code, created_at, INVITE_CATALOG_SOURCE_RECONCILIATION)
+                        continue
+                    inviter = getattr(entry, "user", None)
+                    entry_obj = _domain_object(
+                        "InviteCatalogEntry",
+                        guild_id=self.guild_id,
+                        code=code,
+                        url=_invite_url(getattr(entry, "target", None), code),
+                        channel_id=_invite_target_channel_id(getattr(entry, "target", None)),
+                        invite_type=INVITE_TYPE_REGULAR,
+                        created_by_user_id=str(getattr(inviter, "id", "") or "").strip(),
+                        created_by_name=_invite_inviter_name(SimpleNamespace(inviter=inviter)),
+                        created_at=created_at,
+                        last_seen_at=created_at,
+                        source=INVITE_CATALOG_SOURCE_RECONCILIATION,
+                    )
+                    self._upsert_catalog_entry(entry_obj)
+            except Exception:
+                logger.exception("invite reconciliation iteration failed guild=%s action=%s", self.guild_id, action)
+
+    async def _seed_guild(self, guild: discord.Guild) -> bool:
+        snapshot = await self._fetch_current_snapshot(guild)
+        if snapshot is None:
+            self._ready[self.guild_id] = False
+            return False
+        self._upsert_snapshot(snapshot)
+        self._sync_catalog_from_snapshot(snapshot)
+        self._ready[self.guild_id] = True
+        return True
+
+    async def _attribute_join_locked(self, member: discord.Member) -> None:
+        guild = getattr(member, "guild", None)
+        if guild is None:
+            return
+        guild_id = str(guild.id)
+        joined_at = _join_occurred_at(member)
+        previous_snapshot = self._get_snapshot(guild_id)
+        if not self._ready.get(guild_id, False) or previous_snapshot is None:
+            await self._persist_unknown(member, joined_at, UNKNOWN_REASON_SEED_UNAVAILABLE, previous_snapshot)
+            return
+
+        current_snapshot = await self._fetch_current_snapshot(guild)
+        if current_snapshot is None:
+            await self._persist_unknown(member, joined_at, UNKNOWN_REASON_SNAPSHOT_FETCH_FAILED, previous_snapshot)
+            return
+
+        candidates = self._diff_candidates(previous_snapshot, current_snapshot)
+        attribution = self._build_attribution(member, joined_at, current_snapshot, candidates)
+        created = self._write_attribution(attribution)
+        if created:
+            self._project_current_state(attribution)
+        self._sync_catalog_from_snapshot(current_snapshot)
+        self._upsert_snapshot(current_snapshot)
+
+    async def _persist_unknown(
+        self,
+        member: discord.Member,
+        joined_at: datetime,
+        reason: str,
+        snapshot: object | None,
+    ) -> None:
+        attribution = self._unknown_attribution(member, joined_at, reason, snapshot)
+        created = self._write_attribution(attribution)
+        if created:
+            self._project_current_state(attribution)
+
+    async def _fetch_current_snapshot(self, guild: discord.Guild) -> object | None:
+        captured_at = _utc_now()
+        invites_fetch = getattr(guild, "invites", None)
+        if not callable(invites_fetch):
+            return None
+        try:
+            invites = list(await invites_fetch())
+        except discord.Forbidden:
+            logger.warning("invite snapshot fetch forbidden guild=%s", guild.id)
+            return None
+        except Exception:
+            logger.exception("invite snapshot fetch failed guild=%s", guild.id)
+            return None
+
+        snapshot_invites = [
+            self._snapshot_entry_from_invite(
+                guild_id=str(guild.id),
+                invite=invite,
+                invite_type=INVITE_TYPE_REGULAR,
+            )
+            for invite in invites
+            if _invite_code(invite) != ""
+        ]
+
+        vanity_fetch = getattr(guild, "vanity_invite", None)
+        if callable(vanity_fetch):
+            try:
+                vanity_invite = await vanity_fetch()
+            except Exception:
+                vanity_invite = None
+            vanity_code = _invite_code(vanity_invite)
+            if vanity_code != "":
+                snapshot_invites.append(
+                    self._snapshot_entry_from_invite(
+                        guild_id=str(guild.id),
+                        invite=vanity_invite,
+                        invite_type=INVITE_TYPE_VANITY,
+                    )
+                )
+
+        return _domain_object(
+            "GuildInviteSnapshot",
+            guild_id=str(guild.id),
+            captured_at=captured_at,
+            invites=snapshot_invites,
+        )
+
+    def _snapshot_entry_from_invite(self, guild_id: str, invite: object, invite_type: str) -> object:
+        code = _invite_code(invite)
+        return _domain_object(
+            "InviteSnapshotEntry",
+            code=code,
+            uses=_invite_uses(invite),
+            url=_invite_url(invite, code),
+            channel_id=_invite_target_channel_id(invite),
+            inviter_user_id=_invite_inviter_user_id(invite),
+            inviter_name=_invite_inviter_name(invite),
+            invite_type=invite_type,
+        )
+
+    def _catalog_entry_from_invite(self, guild_id: str, invite: object, *, invite_type: str, observed_at: datetime, source: str) -> object:
+        code = _invite_code(invite)
+        inviter_user_id = _invite_inviter_user_id(invite)
+        inviter_name = _invite_inviter_name(invite)
+        return _domain_object(
+            "InviteCatalogEntry",
+            guild_id=guild_id,
+            code=code,
+            url=_invite_url(invite, code),
+            channel_id=_invite_target_channel_id(invite),
+            invite_type=invite_type,
+            created_by_user_id=inviter_user_id,
+            created_by_name=inviter_name,
+            last_seen_at=observed_at,
+            source=source,
+        )
+
+    def _unknown_attribution(self, member: discord.Member, joined_at: datetime, reason: str, snapshot: object | None) -> object:
+        guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
+        user_id = str(getattr(member, "id", "") or "")
+        return _domain_object(
+            "MemberJoinAttribution",
+            id=f"{guild_id}:{user_id}:{joined_at.isoformat()}",
+            guild_id=guild_id,
+            user_id=user_id,
+            joined_at=joined_at,
+            invite_code="",
+            invite_url="",
+            invite_type="",
+            inviter_user_id="",
+            inviter_name="",
+            attribution_status=ATTRIBUTION_STATUS_UNKNOWN,
+            candidate_codes=[],
+            source=INVITE_ATTRIBUTION_SOURCE_LIVE_DIFF,
+            snapshot_captured_at=_snapshot_captured_at(snapshot),
+            internal_reason=reason,
+            created_at=_utc_now(),
+        )
+
+    def _diff_candidates(self, previous_snapshot: object, current_snapshot: object) -> list[object]:
+        previous = _snapshot_by_code(previous_snapshot)
+        current = _snapshot_by_code(current_snapshot)
+        candidates: list[object] = []
+        for code, invite in current.items():
+            previous_uses = _invite_uses(previous.get(code))
+            current_uses = _invite_uses(invite)
+            if current_uses > previous_uses:
+                candidates.append(invite)
+        return sorted(candidates, key=lambda item: _invite_code(item))
+
+    def _build_attribution(
+        self,
+        member: discord.Member,
+        joined_at: datetime,
+        snapshot: object,
+        candidates: list[object],
+    ) -> object:
+        guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
+        user_id = str(getattr(member, "id", "") or "")
+        candidate_codes = [_invite_code(candidate) for candidate in candidates if _invite_code(candidate) != ""]
+        if len(candidate_codes) == 1:
+            invite = candidates[0]
+            return _domain_object(
+                "MemberJoinAttribution",
+                id=f"{guild_id}:{user_id}:{joined_at.isoformat()}",
+                guild_id=guild_id,
+                user_id=user_id,
+                joined_at=joined_at,
+                invite_code=_invite_code(invite),
+                invite_url=_invite_url(invite, _invite_code(invite)),
+                invite_type=str(getattr(invite, "invite_type", "") or getattr(invite, "inviteType", "") or ""),
+                inviter_user_id=_invite_inviter_user_id(invite),
+                inviter_name=_invite_inviter_name(invite),
+                attribution_status=ATTRIBUTION_STATUS_EXACT,
+                candidate_codes=candidate_codes,
+                source=INVITE_ATTRIBUTION_SOURCE_LIVE_DIFF,
+                snapshot_captured_at=_snapshot_captured_at(snapshot),
+                internal_reason="",
+                created_at=_utc_now(),
+            )
+        if len(candidate_codes) > 1:
+            return _domain_object(
+                "MemberJoinAttribution",
+                id=f"{guild_id}:{user_id}:{joined_at.isoformat()}",
+                guild_id=guild_id,
+                user_id=user_id,
+                joined_at=joined_at,
+                invite_code="",
+                invite_url="",
+                invite_type="",
+                inviter_user_id="",
+                inviter_name="",
+                attribution_status=ATTRIBUTION_STATUS_AMBIGUOUS,
+                candidate_codes=candidate_codes,
+                source=INVITE_ATTRIBUTION_SOURCE_LIVE_DIFF,
+                snapshot_captured_at=_snapshot_captured_at(snapshot),
+                internal_reason=UNKNOWN_REASON_CONCURRENT_CANDIDATES,
+                created_at=_utc_now(),
+            )
+        return self._unknown_attribution(member, joined_at, UNKNOWN_REASON_NO_USAGE_DELTA, snapshot)
+
+    def _get_snapshot(self, guild_id: str) -> object | None:
+        getter = getattr(self.repo, "get_guild_invite_snapshot", None)
+        if not callable(getter):
+            return None
+        return getter(None, guild_id)
+
+    def _upsert_snapshot(self, snapshot: object) -> None:
+        writer = getattr(self.repo, "upsert_guild_invite_snapshot", None)
+        if callable(writer):
+            writer(None, snapshot)
+
+    def _upsert_catalog_entry(self, entry: object) -> None:
+        writer = getattr(self.repo, "upsert_invite_catalog_entry", None)
+        if callable(writer):
+            writer(None, entry)
+
+    def _sync_catalog_from_snapshot(self, snapshot: object) -> None:
+        syncer = getattr(self.repo, "sync_invite_catalog_from_snapshot", None)
+        if callable(syncer):
+            syncer(None, snapshot, INVITE_CATALOG_SOURCE_SNAPSHOT)
+            return
+        guild_id = str(getattr(snapshot, "guild_id", "") or getattr(snapshot, "guildId", "") or "")
+        observed_at = _snapshot_captured_at(snapshot) or _utc_now()
+        for invite in _snapshot_invites(snapshot):
+            entry = self._catalog_entry_from_invite(
+                guild_id,
+                invite,
+                invite_type=str(getattr(invite, "invite_type", "") or getattr(invite, "inviteType", "") or INVITE_TYPE_REGULAR),
+                observed_at=observed_at,
+                source=INVITE_CATALOG_SOURCE_SNAPSHOT,
+            )
+            self._upsert_catalog_entry(entry)
+
+    def _write_attribution(self, attribution: object) -> bool:
+        writer = getattr(self.repo, "append_member_join_attribution", None) or getattr(
+            self.repo, "create_member_join_attribution", None
+        )
+        if not callable(writer):
+            return False
+        try:
+            return bool(writer(None, attribution))
+        except Exception:
+            logger.exception(
+                "member join attribution write failed guild=%s user=%s",
+                getattr(attribution, "guild_id", ""),
+                getattr(attribution, "user_id", ""),
+            )
+            return False
+
+    def _project_current_state(self, attribution: object) -> None:
+        projector = getattr(self.repo, "project_member_join_state", None)
+        if callable(projector):
+            projector(None, attribution)
+
+
+@dataclass(slots=True)
 class ManagedVoiceController:
     client: discord.Client
     repo: Repository
@@ -585,10 +1099,12 @@ async def main() -> None:
 
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
+    repo.ensure_indexes(None)
 
     nats = NATS()
     await nats.connect(cfg.nats_url)
     bus = Bus(nats, cfg.event_signing_secret, "gateway")
+    invite_rollout_active = invite_rollout_enabled(cfg, cfg.discord_guild_id)
 
     intents = discord.Intents.none()
     intents.guilds = True
@@ -596,6 +1112,14 @@ async def main() -> None:
     intents.members = True
     client = discord.Client(intents=intents)
     GatewayService(client, bus).install()
+    invite_attribution = InviteAttributionController(
+        client=client,
+        repo=repo,
+        guild_id=cfg.discord_guild_id,
+        snapshot_sync_enabled=bool(getattr(cfg, "invite_snapshot_sync_enabled", False)) and invite_rollout_active,
+        live_attribution_enabled=bool(getattr(cfg, "invite_live_attribution_enabled", False)) and invite_rollout_active,
+        reconciliation_enabled=bool(getattr(cfg, "invite_reconciliation_enabled", False)) and invite_rollout_active,
+    )
     voice_controller = ManagedVoiceController(client=client, repo=repo, guild_id=cfg.discord_guild_id)
     soundboard_enforcement = SoundboardEnforcement(
         client=client,
@@ -606,6 +1130,7 @@ async def main() -> None:
 
     @client.event
     async def on_ready() -> None:
+        await invite_attribution.seed_on_ready()
         await voice_controller.reconcile()
 
     @client.event
@@ -614,6 +1139,10 @@ async def main() -> None:
             return
         if getattr(member, "bot", False):
             return
+        try:
+            await invite_attribution.on_member_join(member)
+        except Exception:
+            logger.exception("invite attribution failed guild=%s member=%s", member.guild.id, member.id)
         role_id = _autorole_id_for_guild(repo, str(member.guild.id))
         if role_id == "":
             return
@@ -632,6 +1161,20 @@ async def main() -> None:
             await member.add_roles(role, reason="Voice Tracker autorole")
         except Exception:
             logger.exception("autorole assignment failed guild=%s member=%s role=%s", member.guild.id, member.id, role_id)
+
+    @client.event
+    async def on_invite_create(invite: object) -> None:
+        try:
+            await invite_attribution.on_invite_create(invite)
+        except Exception:
+            logger.exception("invite create refresh failed guild=%s code=%s", _guild_id(invite), _invite_code(invite))
+
+    @client.event
+    async def on_invite_delete(invite: object) -> None:
+        try:
+            await invite_attribution.on_invite_delete(invite)
+        except Exception:
+            logger.exception("invite delete refresh failed guild=%s code=%s", _guild_id(invite), _invite_code(invite))
 
     async def _on_voice_state_update_unmute(
         member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
@@ -771,13 +1314,27 @@ async def main() -> None:
             await asyncio.sleep(5)
             await voice_controller.reconcile()
 
+    async def refresh_invite_snapshots() -> None:
+        while True:
+            await asyncio.sleep(max(5, invite_attribution.snapshot_refresh_seconds))
+            await invite_attribution.refresh_snapshot()
+
+    async def reconcile_invite_metadata() -> None:
+        while True:
+            await asyncio.sleep(300)
+            await invite_attribution.reconcile_metadata()
+
     sweep = asyncio.create_task(sweep_pending())
     reconcile = asyncio.create_task(reconcile_managed_voice())
+    invite_refresh = asyncio.create_task(refresh_invite_snapshots())
+    invite_reconcile = asyncio.create_task(reconcile_invite_metadata())
     try:
         await client.connect()
     finally:
         sweep.cancel()
         reconcile.cancel()
+        invite_refresh.cancel()
+        invite_reconcile.cancel()
         await bus.aclose()
         mongo_client.close()
 

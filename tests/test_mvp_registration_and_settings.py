@@ -41,6 +41,10 @@ class _FakeDb:
             "processed_messages": _FakeCollection(),
             "voice_sessions": _FakeCollection(),
             "voice_session_participants": _FakeCollection(),
+            "guild_invite_snapshots": _FakeCollection(),
+            "invite_catalog": _FakeCollection(),
+            "member_join_attributions": _FakeCollection(),
+            "member_join_state": _FakeCollection(),
         }
 
     def __getitem__(self, name: str) -> _FakeCollection:

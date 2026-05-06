@@ -17,6 +17,18 @@ GUILD_TRACKING_MODE_ALL = "all"
 GUILD_TRACKING_MODE_NONE = "none"
 GUILD_TRACKING_MODE_SPECIFIC = "specific"
 
+INVITE_TYPE_REGULAR = "regular"
+INVITE_TYPE_VANITY = "vanity"
+
+INVITE_ATTRIBUTION_STATUS_EXACT = "exact"
+INVITE_ATTRIBUTION_STATUS_AMBIGUOUS = "ambiguous"
+INVITE_ATTRIBUTION_STATUS_UNKNOWN = "unknown"
+
+INVITE_SOURCE_SNAPSHOT = "snapshot"
+INVITE_SOURCE_LIVE_EVENT = "live_event"
+INVITE_SOURCE_AUDIT_LOG = "audit_log"
+INVITE_SOURCE_LIVE_DIFF = "live_diff"
+
 
 def _clean(value: str | None) -> str:
     return (value or "").strip()
@@ -39,6 +51,43 @@ def normalize_tracking_mode(mode: str | None) -> str:
     if value in {GUILD_TRACKING_MODE_ALL, GUILD_TRACKING_MODE_NONE, GUILD_TRACKING_MODE_SPECIFIC}:
         return value
     return GUILD_TRACKING_MODE_ALL
+
+
+def _clean_codes(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in values or []:
+        code = _clean(raw)
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out
+
+
+def invite_catalog_id(guild_id: str, code: str) -> str:
+    guild_id = _clean(guild_id)
+    code = _clean(code)
+    if not guild_id or not code:
+        return ""
+    return f"{guild_id}:{code}"
+
+
+def member_join_state_id(guild_id: str, user_id: str) -> str:
+    guild_id = _clean(guild_id)
+    user_id = _clean(user_id)
+    if not guild_id or not user_id:
+        return ""
+    return f"{guild_id}:{user_id}"
+
+
+def member_join_attribution_id(guild_id: str, user_id: str, joined_at: datetime | None) -> str:
+    guild_id = _clean(guild_id)
+    user_id = _clean(user_id)
+    joined_at = ensure_utc(joined_at)
+    if not guild_id or not user_id or joined_at is None:
+        return ""
+    return f"{guild_id}:{user_id}:{datetime_to_json(joined_at)}"
 
 
 @dataclass(slots=True)
@@ -335,6 +384,330 @@ class ParticipantInterval:
         }
         if self.left_at is not None:
             data["leftAt"] = self.left_at
+        return data
+
+
+@dataclass(slots=True)
+class InviteSnapshotEntry:
+    code: str = ""
+    uses: int = 0
+    url: str = ""
+    channel_id: str = ""
+    inviter_user_id: str = ""
+    inviter_name: str = ""
+    invite_type: str = INVITE_TYPE_REGULAR
+
+    def __post_init__(self) -> None:
+        self.code = _clean(self.code)
+        self.uses = max(0, int(self.uses or 0))
+        self.url = _clean(self.url)
+        self.channel_id = _clean(self.channel_id)
+        self.inviter_user_id = _clean(self.inviter_user_id)
+        self.inviter_name = _clean(self.inviter_name)
+        invite_type = _clean(self.invite_type).lower()
+        self.invite_type = invite_type if invite_type in {INVITE_TYPE_REGULAR, INVITE_TYPE_VANITY} else INVITE_TYPE_REGULAR
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "InviteSnapshotEntry | None":
+        if data is None:
+            return None
+        return cls(
+            code=data.get("code", ""),
+            uses=int(data.get("uses", 0) or 0),
+            url=data.get("url", ""),
+            channel_id=data.get("channelId", ""),
+            inviter_user_id=data.get("inviterUserId", ""),
+            inviter_name=data.get("inviterName", ""),
+            invite_type=data.get("inviteType", INVITE_TYPE_REGULAR),
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "uses": self.uses,
+            "url": self.url,
+            "channelId": self.channel_id,
+            "inviterUserId": self.inviter_user_id,
+            "inviterName": self.inviter_name,
+            "inviteType": self.invite_type,
+        }
+
+
+@dataclass(slots=True)
+class GuildInviteSnapshot:
+    guild_id: str = ""
+    captured_at: datetime | None = None
+    invites: list[InviteSnapshotEntry] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.guild_id = _clean(self.guild_id)
+        self.captured_at = ensure_utc(self.captured_at)
+        normalized: list[InviteSnapshotEntry] = []
+        for invite in self.invites:
+            if isinstance(invite, InviteSnapshotEntry):
+                item = invite
+            else:
+                item = InviteSnapshotEntry.from_mongo(invite)
+            if item is not None and item.code:
+                normalized.append(item)
+        self.invites = normalized
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "GuildInviteSnapshot | None":
+        if data is None:
+            return None
+        return cls(
+            guild_id=data.get("_id") or data.get("guildId", ""),
+            captured_at=parse_datetime(data.get("capturedAt")),
+            invites=[item for item in (InviteSnapshotEntry.from_mongo(raw) for raw in data.get("invites") or []) if item is not None],
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        return {
+            "_id": self.guild_id,
+            "guildId": self.guild_id,
+            "capturedAt": self.captured_at,
+            "invites": [invite.to_mongo() for invite in self.invites],
+        }
+
+
+@dataclass(slots=True)
+class InviteCatalogEntry:
+    id: str = ""
+    guild_id: str = ""
+    code: str = ""
+    url: str = ""
+    channel_id: str = ""
+    invite_type: str = INVITE_TYPE_REGULAR
+    created_by_user_id: str = ""
+    created_by_name: str = ""
+    created_at: datetime | None = None
+    deleted_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    source: str = ""
+
+    def __post_init__(self) -> None:
+        self.guild_id = _clean(self.guild_id)
+        self.code = _clean(self.code)
+        if not self.id:
+            self.id = invite_catalog_id(self.guild_id, self.code)
+        self.id = _clean(self.id)
+        self.url = _clean(self.url)
+        self.channel_id = _clean(self.channel_id)
+        invite_type = _clean(self.invite_type).lower()
+        self.invite_type = invite_type if invite_type in {INVITE_TYPE_REGULAR, INVITE_TYPE_VANITY} else INVITE_TYPE_REGULAR
+        self.created_by_user_id = _clean(self.created_by_user_id)
+        self.created_by_name = _clean(self.created_by_name)
+        self.created_at = ensure_utc(self.created_at)
+        self.deleted_at = ensure_utc(self.deleted_at)
+        self.last_seen_at = ensure_utc(self.last_seen_at)
+        self.source = _clean(self.source)
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "InviteCatalogEntry | None":
+        if data is None:
+            return None
+        return cls(
+            id=data.get("_id") or data.get("id", ""),
+            guild_id=data.get("guildId", ""),
+            code=data.get("code", ""),
+            url=data.get("url", ""),
+            channel_id=data.get("channelId", ""),
+            invite_type=data.get("inviteType", INVITE_TYPE_REGULAR),
+            created_by_user_id=data.get("createdByUserId", ""),
+            created_by_name=data.get("createdByName", ""),
+            created_at=parse_datetime(data.get("createdAt")),
+            deleted_at=parse_datetime(data.get("deletedAt")),
+            last_seen_at=parse_datetime(data.get("lastSeenAt")),
+            source=data.get("source", ""),
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        data = {
+            "_id": self.id,
+            "guildId": self.guild_id,
+            "code": self.code,
+            "url": self.url,
+            "channelId": self.channel_id,
+            "inviteType": self.invite_type,
+            "createdByUserId": self.created_by_user_id,
+            "createdByName": self.created_by_name,
+            "source": self.source,
+        }
+        optional = {
+            "createdAt": self.created_at,
+            "deletedAt": self.deleted_at,
+            "lastSeenAt": self.last_seen_at,
+        }
+        data.update({key: value for key, value in optional.items() if value is not None})
+        return data
+
+
+@dataclass(slots=True)
+class MemberJoinAttribution:
+    id: str = ""
+    guild_id: str = ""
+    user_id: str = ""
+    joined_at: datetime | None = None
+    invite_code: str = ""
+    invite_url: str = ""
+    invite_type: str = INVITE_TYPE_REGULAR
+    inviter_user_id: str = ""
+    inviter_name: str = ""
+    attribution_status: str = INVITE_ATTRIBUTION_STATUS_UNKNOWN
+    candidate_codes: list[str] = field(default_factory=list)
+    source: str = INVITE_SOURCE_LIVE_DIFF
+    snapshot_captured_at: datetime | None = None
+    created_at: datetime | None = None
+    internal_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.guild_id = _clean(self.guild_id)
+        self.user_id = _clean(self.user_id)
+        self.joined_at = ensure_utc(self.joined_at)
+        if not self.id:
+            self.id = member_join_attribution_id(self.guild_id, self.user_id, self.joined_at)
+        self.id = _clean(self.id)
+        self.invite_code = _clean(self.invite_code)
+        self.invite_url = _clean(self.invite_url)
+        invite_type = _clean(self.invite_type).lower()
+        self.invite_type = invite_type if invite_type in {INVITE_TYPE_REGULAR, INVITE_TYPE_VANITY} else INVITE_TYPE_REGULAR
+        self.inviter_user_id = _clean(self.inviter_user_id)
+        self.inviter_name = _clean(self.inviter_name)
+        status = _clean(self.attribution_status).lower()
+        if status not in {
+            INVITE_ATTRIBUTION_STATUS_EXACT,
+            INVITE_ATTRIBUTION_STATUS_AMBIGUOUS,
+            INVITE_ATTRIBUTION_STATUS_UNKNOWN,
+        }:
+            status = INVITE_ATTRIBUTION_STATUS_UNKNOWN
+        self.attribution_status = status
+        self.candidate_codes = _clean_codes(self.candidate_codes)
+        self.source = _clean(self.source) or INVITE_SOURCE_LIVE_DIFF
+        self.snapshot_captured_at = ensure_utc(self.snapshot_captured_at)
+        self.created_at = ensure_utc(self.created_at)
+        self.internal_reason = _clean(self.internal_reason)
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "MemberJoinAttribution | None":
+        if data is None:
+            return None
+        return cls(
+            id=data.get("_id") or data.get("id", ""),
+            guild_id=data.get("guildId", ""),
+            user_id=data.get("userId", ""),
+            joined_at=parse_datetime(data.get("joinedAt")),
+            invite_code=data.get("inviteCode", ""),
+            invite_url=data.get("inviteUrl", ""),
+            invite_type=data.get("inviteType", INVITE_TYPE_REGULAR),
+            inviter_user_id=data.get("inviterUserId", ""),
+            inviter_name=data.get("inviterName", ""),
+            attribution_status=data.get("attributionStatus", INVITE_ATTRIBUTION_STATUS_UNKNOWN),
+            candidate_codes=list(data.get("candidateCodes") or []),
+            source=data.get("source", INVITE_SOURCE_LIVE_DIFF),
+            snapshot_captured_at=parse_datetime(data.get("snapshotCapturedAt")),
+            created_at=parse_datetime(data.get("createdAt")),
+            internal_reason=data.get("internalReason", ""),
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        data = {
+            "_id": self.id,
+            "guildId": self.guild_id,
+            "userId": self.user_id,
+            "joinedAt": self.joined_at,
+            "inviteCode": self.invite_code,
+            "inviteUrl": self.invite_url,
+            "inviteType": self.invite_type,
+            "inviterUserId": self.inviter_user_id,
+            "inviterName": self.inviter_name,
+            "attributionStatus": self.attribution_status,
+            "candidateCodes": list(self.candidate_codes),
+            "source": self.source,
+        }
+        optional = {
+            "snapshotCapturedAt": self.snapshot_captured_at,
+            "createdAt": self.created_at,
+            "internalReason": self.internal_reason or None,
+        }
+        data.update({key: value for key, value in optional.items() if value is not None})
+        return data
+
+
+@dataclass(slots=True)
+class MemberJoinState:
+    id: str = ""
+    guild_id: str = ""
+    user_id: str = ""
+    latest_join_attribution_id: str = ""
+    joined_at: datetime | None = None
+    invite_code: str = ""
+    invite_url: str = ""
+    invite_type: str = INVITE_TYPE_REGULAR
+    inviter_user_id: str = ""
+    inviter_name: str = ""
+    attribution_status: str = INVITE_ATTRIBUTION_STATUS_UNKNOWN
+    updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        self.guild_id = _clean(self.guild_id)
+        self.user_id = _clean(self.user_id)
+        if not self.id:
+            self.id = member_join_state_id(self.guild_id, self.user_id)
+        self.id = _clean(self.id)
+        self.latest_join_attribution_id = _clean(self.latest_join_attribution_id)
+        self.joined_at = ensure_utc(self.joined_at)
+        self.invite_code = _clean(self.invite_code)
+        self.invite_url = _clean(self.invite_url)
+        invite_type = _clean(self.invite_type).lower()
+        self.invite_type = invite_type if invite_type in {INVITE_TYPE_REGULAR, INVITE_TYPE_VANITY} else INVITE_TYPE_REGULAR
+        self.inviter_user_id = _clean(self.inviter_user_id)
+        self.inviter_name = _clean(self.inviter_name)
+        status = _clean(self.attribution_status).lower()
+        if status not in {
+            INVITE_ATTRIBUTION_STATUS_EXACT,
+            INVITE_ATTRIBUTION_STATUS_AMBIGUOUS,
+            INVITE_ATTRIBUTION_STATUS_UNKNOWN,
+        }:
+            status = INVITE_ATTRIBUTION_STATUS_UNKNOWN
+        self.attribution_status = status
+        self.updated_at = ensure_utc(self.updated_at)
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "MemberJoinState | None":
+        if data is None:
+            return None
+        return cls(
+            id=data.get("_id") or data.get("id", ""),
+            guild_id=data.get("guildId", ""),
+            user_id=data.get("userId", ""),
+            latest_join_attribution_id=data.get("latestJoinAttributionId", ""),
+            joined_at=parse_datetime(data.get("joinedAt")),
+            invite_code=data.get("inviteCode", ""),
+            invite_url=data.get("inviteUrl", ""),
+            invite_type=data.get("inviteType", INVITE_TYPE_REGULAR),
+            inviter_user_id=data.get("inviterUserId", ""),
+            inviter_name=data.get("inviterName", ""),
+            attribution_status=data.get("attributionStatus", INVITE_ATTRIBUTION_STATUS_UNKNOWN),
+            updated_at=parse_datetime(data.get("updatedAt")),
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        data = {
+            "_id": self.id,
+            "guildId": self.guild_id,
+            "userId": self.user_id,
+            "latestJoinAttributionId": self.latest_join_attribution_id,
+            "joinedAt": self.joined_at,
+            "inviteCode": self.invite_code,
+            "inviteUrl": self.invite_url,
+            "inviteType": self.invite_type,
+            "inviterUserId": self.inviter_user_id,
+            "inviterName": self.inviter_name,
+            "attributionStatus": self.attribution_status,
+        }
+        if self.updated_at is not None:
+            data["updatedAt"] = self.updated_at
         return data
 
 

@@ -10,6 +10,9 @@ class FakeRepo:
     def __init__(self, auto_unmute_ids: dict[str, list[str]]) -> None:
         self.auto_unmute_ids = auto_unmute_ids
 
+    def ensure_indexes(self, _ctx) -> None:
+        return None
+
     def get_auto_unmute_user_ids(self, _ctx, guild_id: str) -> list[str]:
         return list(self.auto_unmute_ids.get(str(guild_id), []))
 
@@ -382,6 +385,95 @@ class _ManagedClient:
         return None
 
 
+class _InviteRepo:
+    def __init__(self, snapshot=None) -> None:
+        self.snapshot = snapshot
+        self.catalog_entries: list[object] = []
+        self.deleted_codes: list[tuple[str, str, object, str]] = []
+        self.attributions: list[object] = []
+        self.state_by_member: dict[str, object] = {}
+
+    def get_guild_invite_snapshot(self, _ctx, guild_id: str):
+        if self.snapshot is None:
+            return None
+        return self.snapshot if str(getattr(self.snapshot, "guild_id", "")) == str(guild_id) else None
+
+    def upsert_guild_invite_snapshot(self, _ctx, snapshot: object) -> None:
+        self.snapshot = snapshot
+
+    def upsert_invite_catalog_entry(self, _ctx, entry: object) -> None:
+        self.catalog_entries.append(entry)
+
+    def mark_invite_deleted(self, _ctx, guild_id: str, code: str, deleted_at, source: str) -> None:
+        self.deleted_codes.append((guild_id, code, deleted_at, source))
+
+    def mark_invite_catalog_deleted(self, _ctx, guild_id: str, code: str, deleted_at, source: str) -> None:
+        self.mark_invite_deleted(_ctx, guild_id, code, deleted_at, source)
+
+    def create_member_join_attribution(self, _ctx, attribution: object) -> bool:
+        attribution_id = str(getattr(attribution, "id", "") or "")
+        if any(str(getattr(item, "id", "") or "") == attribution_id for item in self.attributions):
+            return False
+        self.attributions.append(attribution)
+        return True
+
+    def append_member_join_attribution(self, _ctx, attribution: object) -> bool:
+        return self.create_member_join_attribution(_ctx, attribution)
+
+    def project_member_join_state(self, _ctx, attribution: object) -> None:
+        key = f"{getattr(attribution, 'guild_id', '')}:{getattr(attribution, 'user_id', '')}"
+        self.state_by_member[key] = attribution
+
+
+class _InviteGuild:
+    def __init__(self, guild_id: str, invites: list[object], *, vanity_invite: object | None = None) -> None:
+        self.id = int(guild_id)
+        self._invites = invites
+        self._vanity_invite = vanity_invite
+
+    async def invites(self) -> list[object]:
+        return list(self._invites)
+
+    async def vanity_invite(self):
+        return self._vanity_invite
+
+    def set_invites(self, invites: list[object]) -> None:
+        self._invites = list(invites)
+
+
+class _InviteClient:
+    def __init__(self, guild: _InviteGuild) -> None:
+        self.guild = guild
+        self.guilds = [guild]
+
+    def get_guild(self, guild_id: int):
+        if guild_id == self.guild.id:
+            return self.guild
+        return None
+
+
+def _make_invite(
+    guild: _InviteGuild,
+    *,
+    code: str,
+    uses: int,
+    inviter_id: str = "7",
+    inviter_name: str = "Owner",
+    invite_type: str = gateway.INVITE_TYPE_REGULAR,
+):
+    inviter = SimpleNamespace(id=inviter_id, name=inviter_name, global_name=inviter_name)
+    channel = SimpleNamespace(id=55, guild=guild)
+    return SimpleNamespace(
+        code=code,
+        uses=uses,
+        url=f"https://discord.gg/{code}",
+        inviter=inviter,
+        channel=channel,
+        guild=guild,
+        invite_type=invite_type,
+    )
+
+
 async def test_managed_voice_controller_connects_to_configured_channel() -> None:
     settings = domain.GuildSettings(guild_id="123", managed_voice_channel_id="42")
     repo = _ManagedRepo(settings)
@@ -515,3 +607,137 @@ def test_voice_effect_sound_id_falls_back_to_scalar_fields() -> None:
     effect = SimpleNamespace(sound=None, soundboard_sound_id="s-789")
 
     assert gateway._voice_effect_sound_id(effect) == "s-789"
+
+
+async def test_invite_attribution_seed_on_ready_persists_snapshot_and_catalog() -> None:
+    guild = _InviteGuild("123", invites=[])
+    invite = _make_invite(guild, code="abc", uses=1)
+    guild.set_invites([invite])
+    repo = _InviteRepo()
+    client = _InviteClient(guild)
+    controller = gateway.InviteAttributionController(client=client, repo=repo, guild_id="123")
+
+    await controller.seed_on_ready()
+
+    assert repo.snapshot is not None
+    stored_codes = [getattr(item, "code", "") for item in getattr(repo.snapshot, "invites", [])]
+    assert stored_codes == ["abc"]
+    assert [getattr(item, "code", "") for item in repo.catalog_entries] == ["abc"]
+
+
+async def test_invite_attribution_records_exact_match_and_projects_state() -> None:
+    guild = _InviteGuild("123", invites=[])
+    previous = _make_invite(guild, code="abc", uses=1)
+    current = _make_invite(guild, code="abc", uses=2)
+    repo = _InviteRepo(snapshot=domain.GuildInviteSnapshot(guild_id="123", captured_at=gateway._utc_now(), invites=[{
+        "code": "abc",
+        "uses": 1,
+        "url": "https://discord.gg/abc",
+        "channelId": "55",
+        "inviterUserId": "7",
+        "inviterName": "Owner",
+        "inviteType": gateway.INVITE_TYPE_REGULAR,
+    }]))
+    client = _InviteClient(guild)
+    controller = gateway.InviteAttributionController(client=client, repo=repo, guild_id="123")
+    controller._ready["123"] = True
+    guild.set_invites([current])
+    member = SimpleNamespace(id="42", bot=False, guild=guild, joined_at=gateway._utc_now())
+
+    await controller.on_member_join(member)
+
+    assert len(repo.attributions) == 1
+    attribution = repo.attributions[0]
+    assert getattr(attribution, "attribution_status", "") == gateway.ATTRIBUTION_STATUS_EXACT
+    assert getattr(attribution, "invite_code", "") == "abc"
+    assert getattr(attribution, "invite_url", "") == "https://discord.gg/abc"
+    projected = repo.state_by_member["123:42"]
+    assert getattr(projected, "invite_code", "") == "abc"
+
+
+async def test_invite_attribution_records_ambiguous_status_when_multiple_codes_increase() -> None:
+    guild = _InviteGuild("123", invites=[])
+    current_a = _make_invite(guild, code="abc", uses=2)
+    current_b = _make_invite(guild, code="xyz", uses=6)
+    repo = _InviteRepo(snapshot=domain.GuildInviteSnapshot(guild_id="123", captured_at=gateway._utc_now(), invites=[
+        {
+            "code": "abc",
+            "uses": 1,
+            "url": "https://discord.gg/abc",
+            "channelId": "55",
+            "inviterUserId": "7",
+            "inviterName": "Owner",
+            "inviteType": gateway.INVITE_TYPE_REGULAR,
+        },
+        {
+            "code": "xyz",
+            "uses": 5,
+            "url": "https://discord.gg/xyz",
+            "channelId": "55",
+            "inviterUserId": "7",
+            "inviterName": "Owner",
+            "inviteType": gateway.INVITE_TYPE_REGULAR,
+        },
+    ]))
+    client = _InviteClient(guild)
+    controller = gateway.InviteAttributionController(client=client, repo=repo, guild_id="123")
+    controller._ready["123"] = True
+    guild.set_invites([current_a, current_b])
+    member = SimpleNamespace(id="42", bot=False, guild=guild, joined_at=gateway._utc_now())
+
+    await controller.on_member_join(member)
+
+    attribution = repo.attributions[0]
+    assert getattr(attribution, "attribution_status", "") == gateway.ATTRIBUTION_STATUS_AMBIGUOUS
+    assert getattr(attribution, "invite_code", "") == ""
+    assert getattr(attribution, "candidate_codes", []) == ["abc", "xyz"]
+
+
+async def test_invite_attribution_records_unknown_when_seed_is_unavailable() -> None:
+    guild = _InviteGuild("123", invites=[])
+    repo = _InviteRepo(snapshot=None)
+    client = _InviteClient(guild)
+    controller = gateway.InviteAttributionController(client=client, repo=repo, guild_id="123")
+    member = SimpleNamespace(id="42", bot=False, guild=guild, joined_at=gateway._utc_now())
+
+    await controller.on_member_join(member)
+
+    attribution = repo.attributions[0]
+    assert getattr(attribution, "attribution_status", "") == gateway.ATTRIBUTION_STATUS_UNKNOWN
+    assert getattr(attribution, "internal_reason", "") == gateway.UNKNOWN_REASON_SEED_UNAVAILABLE
+    projected = repo.state_by_member["123:42"]
+    assert getattr(projected, "invite_code", "") == ""
+
+
+async def test_invite_reconciliation_repairs_catalog_only() -> None:
+    guild = _InviteGuild("123", invites=[])
+    repo = _InviteRepo()
+    client = _InviteClient(guild)
+    controller = gateway.InviteAttributionController(client=client, repo=repo, guild_id="123", reconciliation_enabled=True)
+    now = gateway._utc_now()
+    create_entry = SimpleNamespace(
+        created_at=now,
+        target=SimpleNamespace(code="abc", url="https://discord.gg/abc", channel=SimpleNamespace(id=55)),
+        user=SimpleNamespace(id="7", name="Owner", global_name="Owner"),
+    )
+    delete_entry = SimpleNamespace(
+        created_at=now,
+        target=SimpleNamespace(code="def", url="https://discord.gg/def", channel=SimpleNamespace(id=55)),
+        user=SimpleNamespace(id="8", name="Other", global_name="Other"),
+    )
+
+    def _audit_logs(*, limit: int, action):
+        async def _iterator():
+            if action == getattr(gateway.discord.AuditLogAction, "invite_create", object()):
+                yield create_entry
+            if action == getattr(gateway.discord.AuditLogAction, "invite_delete", object()):
+                yield delete_entry
+        return _iterator()
+
+    guild.audit_logs = _audit_logs
+
+    await controller.reconcile_metadata()
+
+    assert [getattr(item, "code", "") for item in repo.catalog_entries] == ["abc"]
+    assert repo.deleted_codes and repo.deleted_codes[0][1] == "def"
+    assert repo.state_by_member == {}

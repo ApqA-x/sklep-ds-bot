@@ -5,9 +5,14 @@ from typing import Any
 from uuid import uuid4
 
 from .domain import (
+    INVITE_SOURCE_LIVE_DIFF,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_CLOSED,
     GuildSettings,
+    GuildInviteSnapshot,
+    InviteCatalogEntry,
+    MemberJoinAttribution,
+    MemberJoinState,
     ParticipantInterval,
     Session,
 )
@@ -61,6 +66,10 @@ class Repository:
         self.messages = _collection(db, "processed_messages")
         self.sessions = _collection(db, "voice_sessions")
         self.participants = _collection(db, "voice_session_participants")
+        self.guild_invite_snapshots = _collection(db, "guild_invite_snapshots")
+        self.invite_catalog = _collection(db, "invite_catalog")
+        self.member_join_attributions = _collection(db, "member_join_attributions")
+        self.member_join_state = _collection(db, "member_join_state")
 
     def ensure_indexes(self, _ctx: Any = None) -> None:
         self.sessions.create_index(
@@ -84,6 +93,20 @@ class Repository:
 
         self.messages.create_index([("subject", 1), ("messageId", 1)], unique=True)
         self.messages.create_index([("createdAt", 1)], expireAfterSeconds=7200)
+
+        self.guild_invite_snapshots.create_index([("guildId", 1)], unique=True)
+        self.guild_invite_snapshots.create_index([("capturedAt", -1)])
+
+        self.invite_catalog.create_index([("guildId", 1), ("code", 1)], unique=True)
+        self.invite_catalog.create_index([("guildId", 1), ("lastSeenAt", -1)])
+        self.invite_catalog.create_index([("guildId", 1), ("deletedAt", 1)])
+
+        self.member_join_attributions.create_index([("guildId", 1), ("userId", 1), ("joinedAt", -1)])
+        self.member_join_attributions.create_index([("guildId", 1), ("joinedAt", -1)])
+        self.member_join_attributions.create_index([("guildId", 1), ("attributionStatus", 1), ("joinedAt", -1)])
+
+        self.member_join_state.create_index([("guildId", 1), ("userId", 1)], unique=True)
+        self.member_join_state.create_index([("guildId", 1), ("joinedAt", -1)])
 
     def claim_message(self, _ctx: Any, subject: str, message_id: str, issuer: str, issued_at: int) -> bool:
         try:
@@ -171,6 +194,172 @@ class Repository:
         settings.auto_unmute_user_ids = [uid for uid in settings.auto_unmute_user_ids if uid != user_id]
         self.upsert_guild_settings(ctx, settings)
         return list(settings.auto_unmute_user_ids)
+
+    def get_guild_invite_snapshot(self, _ctx: Any, guild_id: str) -> GuildInviteSnapshot | None:
+        guild_id = str(guild_id or "").strip()
+        if guild_id == "":
+            return None
+        return GuildInviteSnapshot.from_mongo(self.guild_invite_snapshots.find_one({"_id": guild_id}))
+
+    def upsert_guild_invite_snapshot(self, _ctx: Any, snapshot: GuildInviteSnapshot | None) -> None:
+        if snapshot is None or snapshot.guild_id == "":
+            return
+        if snapshot.captured_at is None:
+            snapshot.captured_at = _utc_now()
+        payload = snapshot.to_mongo()
+        self.guild_invite_snapshots.update_one(
+            {"_id": snapshot.guild_id},
+            {
+                "$set": {
+                    "guildId": payload["guildId"],
+                    "capturedAt": payload["capturedAt"],
+                    "invites": payload["invites"],
+                }
+            },
+            upsert=True,
+        )
+
+    def get_invite_catalog_entry(self, _ctx: Any, guild_id: str, code: str) -> InviteCatalogEntry | None:
+        guild_id = str(guild_id or "").strip()
+        code = str(code or "").strip()
+        if guild_id == "" or code == "":
+            return None
+        return InviteCatalogEntry.from_mongo(self.invite_catalog.find_one({"_id": f"{guild_id}:{code}"}))
+
+    def upsert_invite_catalog_entry(self, _ctx: Any, entry: InviteCatalogEntry | None) -> InviteCatalogEntry | None:
+        if entry is None or entry.id == "" or entry.guild_id == "" or entry.code == "":
+            return None
+        merged = self._merge_invite_catalog_entry(
+            InviteCatalogEntry.from_mongo(self.invite_catalog.find_one({"_id": entry.id})),
+            entry,
+        )
+        payload = merged.to_mongo()
+        self.invite_catalog.update_one(
+            {"_id": merged.id},
+            {"$set": {key: value for key, value in payload.items() if key != "_id"}},
+            upsert=True,
+        )
+        return merged
+
+    def sync_invite_catalog_from_snapshot(
+        self,
+        ctx: Any,
+        snapshot: GuildInviteSnapshot | None,
+        source: str = "snapshot",
+    ) -> list[InviteCatalogEntry]:
+        if snapshot is None or snapshot.guild_id == "":
+            return []
+        last_seen_at = snapshot.captured_at or _utc_now()
+        rows: list[InviteCatalogEntry] = []
+        for invite in snapshot.invites:
+            merged = self.upsert_invite_catalog_entry(
+                ctx,
+                InviteCatalogEntry(
+                    guild_id=snapshot.guild_id,
+                    code=invite.code,
+                    url=invite.url,
+                    channel_id=invite.channel_id,
+                    invite_type=invite.invite_type,
+                    created_by_user_id=invite.inviter_user_id,
+                    created_by_name=invite.inviter_name,
+                    last_seen_at=last_seen_at,
+                    source=source,
+                ),
+            )
+            if merged is not None:
+                rows.append(merged)
+        return rows
+
+    def mark_invite_catalog_deleted(
+        self,
+        _ctx: Any,
+        guild_id: str,
+        code: str,
+        deleted_at: datetime | None,
+        source: str = "",
+    ) -> InviteCatalogEntry | None:
+        current = self.get_invite_catalog_entry(None, guild_id, code)
+        if current is None:
+            current = InviteCatalogEntry(guild_id=guild_id, code=code)
+        if current.id == "":
+            return None
+        current.deleted_at = deleted_at or _utc_now()
+        if source.strip():
+            current.source = source
+        payload = current.to_mongo()
+        self.invite_catalog.update_one(
+            {"_id": current.id},
+            {"$set": {key: value for key, value in payload.items() if key != "_id"}},
+            upsert=True,
+        )
+        return current
+
+    def append_member_join_attribution(self, _ctx: Any, attribution: MemberJoinAttribution | None) -> bool:
+        if attribution is None or attribution.id == "" or attribution.guild_id == "" or attribution.user_id == "":
+            return False
+        if attribution.joined_at is None:
+            return False
+        if attribution.created_at is None:
+            attribution.created_at = _utc_now()
+        try:
+            self.member_join_attributions.insert_one(attribution.to_mongo())
+        except Exception as err:
+            if _is_duplicate_key_error(err):
+                return False
+            raise
+        return True
+
+    def get_member_join_state(self, _ctx: Any, guild_id: str, user_id: str) -> MemberJoinState | None:
+        guild_id = str(guild_id or "").strip()
+        user_id = str(user_id or "").strip()
+        if guild_id == "" or user_id == "":
+            return None
+        return MemberJoinState.from_mongo(self.member_join_state.find_one({"_id": f"{guild_id}:{user_id}"}))
+
+    def project_member_join_state(self, _ctx: Any, attribution: MemberJoinAttribution | None) -> MemberJoinState | None:
+        if attribution is None or attribution.id == "" or attribution.guild_id == "" or attribution.user_id == "":
+            return None
+        if attribution.source != INVITE_SOURCE_LIVE_DIFF or attribution.joined_at is None:
+            return None
+        current = self.get_member_join_state(None, attribution.guild_id, attribution.user_id)
+        if current is not None:
+            current_joined_at = _time_or_min(current.joined_at)
+            candidate_joined_at = _time_or_min(attribution.joined_at)
+            if current_joined_at > candidate_joined_at:
+                return current
+            if (
+                current_joined_at == candidate_joined_at
+                and current.latest_join_attribution_id == attribution.id
+                and current.invite_code == attribution.invite_code
+                and current.invite_url == attribution.invite_url
+                and current.invite_type == attribution.invite_type
+                and current.inviter_user_id == attribution.inviter_user_id
+                and current.inviter_name == attribution.inviter_name
+                and current.attribution_status == attribution.attribution_status
+            ):
+                return current
+            if current_joined_at == candidate_joined_at and current.latest_join_attribution_id not in {"", attribution.id}:
+                return current
+        state = MemberJoinState(
+            guild_id=attribution.guild_id,
+            user_id=attribution.user_id,
+            latest_join_attribution_id=attribution.id,
+            joined_at=attribution.joined_at,
+            invite_code=attribution.invite_code,
+            invite_url=attribution.invite_url,
+            invite_type=attribution.invite_type,
+            inviter_user_id=attribution.inviter_user_id,
+            inviter_name=attribution.inviter_name,
+            attribution_status=attribution.attribution_status,
+            updated_at=_utc_now(),
+        )
+        payload = state.to_mongo()
+        self.member_join_state.update_one(
+            {"_id": state.id},
+            {"$set": {key: value for key, value in payload.items() if key != "_id"}},
+            upsert=True,
+        )
+        return state
 
     def list_closed_sessions_pending_notification(self, _ctx: Any) -> list[Session]:
         cursor = self.sessions.find(
@@ -417,6 +606,8 @@ class Repository:
         if guild_id == "" or user_id == "":
             return None
 
+        join_state = self.get_member_join_state(None, guild_id, user_id)
+
         participants = [
             p
             for p in (
@@ -425,32 +616,46 @@ class Repository:
             )
             if p is not None
         ]
-        if len(participants) == 0:
+        if len(participants) == 0 and join_state is None:
             return None
-        participants.sort(key=lambda item: (_time_or_min(item.joined_at), str(item.id or "")))
-
-        sessions = self._load_sessions_by_ids(guild_id, {str(p.session_id or "").strip() for p in participants})
-        now = _utc_now()
         total_for = 0
         user_name = ""
         selected_name_rank = (0, datetime.min.replace(tzinfo=UTC), "")
-        for participant in participants:
-            total_for += self._participant_duration_ms(
-                participant, sessions.get(str(participant.session_id or "").strip()), now
-            )
-            candidate_name = str(participant.user_name or "").strip()
-            if candidate_name == "":
-                continue
-            candidate_rank = (
-                1 if participant.joined_at is not None else 0,
-                _time_or_min(participant.joined_at),
-                str(participant.id or ""),
-            )
-            if candidate_rank >= selected_name_rank:
-                user_name = candidate_name
-                selected_name_rank = candidate_rank
+        if len(participants) > 0:
+            participants.sort(key=lambda item: (_time_or_min(item.joined_at), str(item.id or "")))
+            sessions = self._load_sessions_by_ids(guild_id, {str(p.session_id or "").strip() for p in participants})
+            now = _utc_now()
+            for participant in participants:
+                total_for += self._participant_duration_ms(
+                    participant, sessions.get(str(participant.session_id or "").strip()), now
+                )
+                candidate_name = str(participant.user_name or "").strip()
+                if candidate_name == "":
+                    continue
+                candidate_rank = (
+                    1 if participant.joined_at is not None else 0,
+                    _time_or_min(participant.joined_at),
+                    str(participant.id or ""),
+                )
+                if candidate_rank >= selected_name_rank:
+                    user_name = candidate_name
+                    selected_name_rank = candidate_rank
 
-        return {"user_id": user_id, "user_name": user_name, "total_for": total_for, "roles": []}
+        profile = {"user_id": user_id, "user_name": user_name, "total_for": total_for, "roles": []}
+        if join_state is not None:
+            profile.update(
+                {
+                    "latest_join_attribution_id": join_state.latest_join_attribution_id,
+                    "joined_at": join_state.joined_at,
+                    "invite_code": join_state.invite_code,
+                    "invite_url": join_state.invite_url,
+                    "invite_type": join_state.invite_type,
+                    "inviter_user_id": join_state.inviter_user_id,
+                    "inviter_name": join_state.inviter_name,
+                    "attribution_status": join_state.attribution_status,
+                }
+            )
+        return profile
 
     def get_user_voice_summary(self, ctx: Any, guild_id: str, user_id: str) -> dict[str, Any] | None:
         return self.get_member_profile(ctx, guild_id, user_id)
@@ -476,6 +681,62 @@ class Repository:
         if end is None and session is not None and session.ended_at is not None:
             end = session.ended_at
         return _millis_between(participant.joined_at, end)
+
+    def _merge_invite_catalog_entry(
+        self,
+        current: InviteCatalogEntry | None,
+        incoming: InviteCatalogEntry,
+    ) -> InviteCatalogEntry:
+        if current is None:
+            return incoming
+
+        created_at = current.created_at
+        if incoming.created_at is not None and (created_at is None or incoming.created_at < created_at):
+            created_at = incoming.created_at
+
+        deleted_at = current.deleted_at
+        if incoming.deleted_at is None and incoming.last_seen_at is not None:
+            deleted_at = None
+        elif incoming.deleted_at is not None and (deleted_at is None or incoming.deleted_at < deleted_at):
+            deleted_at = incoming.deleted_at
+
+        last_seen_at = current.last_seen_at
+        if incoming.last_seen_at is not None and (last_seen_at is None or incoming.last_seen_at > last_seen_at):
+            last_seen_at = incoming.last_seen_at
+
+        creator_rank_current = self._invite_creator_rank(current.source)
+        creator_rank_incoming = self._invite_creator_rank(incoming.source)
+        created_by_user_id = current.created_by_user_id
+        created_by_name = current.created_by_name
+        if incoming.created_by_user_id or incoming.created_by_name:
+            if not created_by_user_id and not created_by_name:
+                created_by_user_id = incoming.created_by_user_id
+                created_by_name = incoming.created_by_name
+            elif creator_rank_incoming >= creator_rank_current:
+                created_by_user_id = incoming.created_by_user_id or created_by_user_id
+                created_by_name = incoming.created_by_name or created_by_name
+
+        return InviteCatalogEntry(
+            id=current.id or incoming.id,
+            guild_id=current.guild_id or incoming.guild_id,
+            code=current.code or incoming.code,
+            url=incoming.url or current.url,
+            channel_id=incoming.channel_id or current.channel_id,
+            invite_type=incoming.invite_type or current.invite_type,
+            created_by_user_id=created_by_user_id,
+            created_by_name=created_by_name,
+            created_at=created_at,
+            deleted_at=deleted_at,
+            last_seen_at=last_seen_at,
+            source=incoming.source or current.source,
+        )
+
+    def _invite_creator_rank(self, source: str) -> int:
+        return {
+            "live_event": 3,
+            "audit_log": 2,
+            "snapshot": 1,
+        }.get(str(source or "").strip(), 0)
 
     def GetGuildSettings(self, guild_id: str) -> GuildSettings | None:
         return self.get_guild_settings(None, guild_id)

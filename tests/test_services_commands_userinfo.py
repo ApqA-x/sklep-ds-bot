@@ -49,7 +49,7 @@ class _FakeInteraction:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_userinfo_command_builds_embed_with_presence_status_and_profile_fields(
+async def test_dispatch_userinfo_command_renders_exact_invite_attribution_from_persisted_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     member = _FakeMember()
@@ -64,7 +64,13 @@ async def test_dispatch_userinfo_command_builds_embed_with_presence_status_and_p
         return user
 
     def _load_profile(_ctx, _guild_id: str, _user_id: str):
-        return SimpleNamespace(total_for=timedelta(hours=2, minutes=30))
+        return SimpleNamespace(
+            total_for=timedelta(hours=2, minutes=30),
+            invite_url="https://discord.gg/abc123",
+            inviter_name="@everyone <@123> SomeUser",
+            inviter_user_id="123456789012345678",
+            attribution_status="exact",
+        )
 
     monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
     monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
@@ -85,6 +91,9 @@ async def test_dispatch_userinfo_command_builds_embed_with_presence_status_and_p
     assert "Username: apqa_ (ApqA)" in embed.description
     assert "Status: 🟢 Online" in embed.description
     assert "Total voice time: 2:30:00" in embed.description
+    assert "Invite used: https://discord.gg/abc123" in embed.description
+    assert "Invite created by: SomeUser (123456789012345678)" in embed.description
+    assert "Invite attribution: exact" in embed.description
     assert "Joined at: <t:" in embed.description
     assert "Registered at: <t:" in embed.description
     assert "Nickname:" not in embed.description
@@ -95,7 +104,7 @@ async def test_dispatch_userinfo_command_builds_embed_with_presence_status_and_p
 
 
 @pytest.mark.asyncio
-async def test_dispatch_userinfo_command_uses_fetched_user_banner_when_cached_member_has_none(
+async def test_dispatch_userinfo_command_renders_ambiguous_invite_attribution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     member = _FakeMember()
@@ -110,7 +119,13 @@ async def test_dispatch_userinfo_command_uses_fetched_user_banner_when_cached_me
         return user
 
     def _load_profile(_ctx, _guild_id: str, _user_id: str):
-        return None
+        return SimpleNamespace(
+            total_for=timedelta(),
+            invite_url="https://discord.gg/should-not-render",
+            inviter_name="Should Not Render",
+            inviter_user_id="999",
+            attribution_status="ambiguous",
+        )
 
     monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
     monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
@@ -126,11 +141,14 @@ async def test_dispatch_userinfo_command_uses_fetched_user_banner_when_cached_me
 
     assert embed.description is not None
     assert "Status: 🟢 Online" in embed.description
+    assert "Invite used: ambiguous" in embed.description
+    assert "Invite created by: ambiguous" in embed.description
+    assert "Invite attribution: ambiguous" in embed.description
     assert embed.image.url == "https://cdn.test/fetched-banner.png"
 
 
 @pytest.mark.asyncio
-async def test_dispatch_userinfo_command_marks_missing_banner(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_dispatch_userinfo_command_renders_unknown_invite_attribution(monkeypatch: pytest.MonkeyPatch) -> None:
     member = _FakeMember()
     member.display_banner = None
     user = _FakeUser()
@@ -143,7 +161,13 @@ async def test_dispatch_userinfo_command_marks_missing_banner(monkeypatch: pytes
         return user
 
     def _load_profile(_ctx, _guild_id: str, _user_id: str):
-        return None
+        return SimpleNamespace(
+            total_for=timedelta(),
+            invite_url="https://discord.gg/should-not-render",
+            inviter_name="Should Not Render",
+            inviter_user_id="111",
+            attribution_status="unknown",
+        )
 
     monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
     monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
@@ -160,4 +184,7 @@ async def test_dispatch_userinfo_command_marks_missing_banner(monkeypatch: pytes
     assert embed.description is not None
     assert "Banner:" not in embed.description
     assert "Total voice time: 0:00:00" in embed.description
+    assert "Invite used: unknown" in embed.description
+    assert "Invite created by: unknown" in embed.description
+    assert "Invite attribution: unknown" in embed.description
     assert not getattr(embed.image, "url", None)

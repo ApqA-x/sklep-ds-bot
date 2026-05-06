@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from voice_tracker import commands as commands_module
 from voice_tracker import domain
 from voice_tracker.commands import (
     ActiveSessionView,
@@ -229,6 +230,59 @@ def test_can_use_voice_command_all_user_routes_do_not_require_admin() -> None:
     assert can_use_voice_command(plain, [], "jump", "") is True
     assert can_use_voice_command(plain, [], "dashboard", "") is True
     assert can_use_voice_command(plain, [], "userinfo", "") is True
+
+
+def test_member_profile_from_row_reads_invite_attribution_fields() -> None:
+    profile = commands_module._member_profile_from_row(
+        {
+            "userId": "u1",
+            "userName": "Example User",
+            "totalFor": 90_000,
+            "roles": ["role-a"],
+            "inviteUrl": "https://discord.gg/abc123",
+            "inviterUserId": "555",
+            "inviterName": "Invite Builder",
+            "attributionStatus": "exact",
+        },
+        "u1",
+    )
+
+    assert profile is not None
+    assert profile.user_id == "u1"
+    assert profile.user_name == "Example User"
+    assert profile.total_for == timedelta(seconds=90)
+    assert profile.roles == ["role-a"]
+    assert profile.invite_url == "https://discord.gg/abc123"
+    assert profile.inviter_user_id == "555"
+    assert profile.inviter_name == "Invite Builder"
+    assert profile.attribution_status == "exact"
+
+
+def test_handle_userinfo_command_renders_persisted_invite_attribution() -> None:
+    class UserInfoRepo(FakeRepo):
+        def get_member_profile(self, _ctx, guild_id: str, user_id: str):
+            assert guild_id == "g1"
+            assert user_id == "u1"
+            return {
+                "userId": "u1",
+                "userName": "Example User",
+                "totalFor": 60_000,
+                "inviteUrl": "https://discord.gg/abc123",
+                "inviterUserId": "555",
+                "inviterName": "@everyone <@123> Invite Builder",
+                "attributionStatus": "exact",
+            }
+
+    service = Service(UserInfoRepo())
+    interaction = InteractionCreate(interaction=Interaction(guild_id="g1", member=Member(user=User(id="u1"))))
+
+    result = service.handle_userinfo_command(None, interaction, "", [])
+
+    assert "User: Example User" in result
+    assert "Total voice time: 0:01:00" in result
+    assert "Invite used: https://discord.gg/abc123" in result
+    assert "Invite created by: Invite Builder (555)" in result
+    assert "Invite attribution: exact" in result
 
 
 def test_voice_application_commands_have_expected_routes() -> None:
