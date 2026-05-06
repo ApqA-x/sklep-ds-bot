@@ -2,7 +2,7 @@
 
 Practical local run examples for Voice Tracker.
 
-Last updated: April 25, 2026.
+Last updated: May 7, 2026.
 
 ## Docker Compose
 
@@ -24,15 +24,14 @@ DISCORD_GUILD_ID=your-guild-id
 # Legacy compatibility allowlist only.
 BOT_ADMIN_USER_IDS=
 EVENT_SIGNING_SECRET=replace-with-a-long-random-secret
-TRACKING_MODE=all
-TRACKED_CHANNEL_IDS=
 ```
 
 ## Usage Notes
 
-- Keep `TRACKING_MODE=all`; tracking is all-channel.
-- `TRACKED_CHANNEL_IDS` is a startup default input, not the active command-time control path.
+- Tracking is all-channel.
 - Configure summary/output destination with `/settings summary-set`.
+- Configure invite behavior with `/settings invite-snapshot`, `/settings invite-live`, `/settings invite-userinfo`, and `/settings invite-reconcile`.
+- Configure activity output with `/settings activity-channel-set` and activity event toggles.
 
 ## Minimal Local Setup
 
@@ -44,6 +43,7 @@ TRACKED_CHANNEL_IDS=
 ## Operational Notes
 
 - `services.commands` is the only command registration owner.
+- `services.activity` posts member/invite lifecycle embeds to the configured activity channel.
 - Auto-unmute clears server mute/deafen state for users on the configured list.
 - `/userinfo` presence status depends on Presence Intent being enabled.
 - `BOT_ADMIN_USER_IDS` is not the primary admin authorization path.

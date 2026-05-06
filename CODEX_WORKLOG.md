@@ -1,6 +1,6 @@
 # Codex Worklog
 
-Updated: 2026-04-26, Europe/Berlin.
+Updated: 2026-05-07, Europe/Berlin.
 
 Current task: keep maintainer memory concise and aligned with shipped behavior.
 
@@ -13,6 +13,8 @@ Current task: keep maintainer memory concise and aligned with shipped behavior.
 - Gateway owns voice connection lifecycle and reconnect behavior.
 - Soundboard enforcement runs only when the rule is enabled and the bot is connected to the managed channel.
 - Production voice dependency hotfix is shipped in `v0.10.1` (`davey` + `PyNaCl` present in runtime images).
+- Invite behavior toggles are command-driven through `/settings` and persisted in `guild_settings`.
+- Gateway emits `activity.events`, and `services.activity` posts configurable member/invite lifecycle embeds.
 
 ## Memory Hygiene Policy
 

@@ -21,7 +21,7 @@ from voice_tracker.bus import Bus
 from voice_tracker import domain
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, invite_rollout_enabled, load_config, require_event_signing_secret
+from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
 
 
 SUMMARY_EMBED_COLOR = 0x5865F2
@@ -177,6 +177,43 @@ def _audit_target_code(entry: object | None) -> str:
         if code != "":
             return code
     return ""
+
+
+def _member_display_name(member: object | None) -> str:
+    for attr in ("display_name", "global_name", "name"):
+        value = str(getattr(member, attr, "") or "").strip()
+        if value != "":
+            return value
+    return ""
+
+
+def _activity_event(
+    *,
+    event_type: str,
+    guild_id: str,
+    occurred_at: datetime | None = None,
+    member_user_id: str = "",
+    member_name: str = "",
+    actor_user_id: str = "",
+    actor_name: str = "",
+    invite_code: str = "",
+    invite_url: str = "",
+    attribution_status: str = "",
+    metadata: dict[str, object] | None = None,
+) -> domain.ActivityEvent:
+    return domain.ActivityEvent(
+        event_type=event_type,
+        guild_id=guild_id,
+        occurred_at=occurred_at or _utc_now(),
+        member_user_id=member_user_id,
+        member_name=member_name,
+        actor_user_id=actor_user_id,
+        actor_name=actor_name,
+        invite_code=invite_code,
+        invite_url=invite_url,
+        attribution_status=attribution_status,
+        metadata=dict(metadata or {}),
+    )
 
 
 async def _resolve_channel(client: discord.Client, channel_id: str):
@@ -708,14 +745,16 @@ class InviteAttributionController:
     guild_id: str
     snapshot_refresh_seconds: int = 60
     reconciliation_max_age_days: int = 45
-    snapshot_sync_enabled: bool = True
-    live_attribution_enabled: bool = True
-    reconciliation_enabled: bool = False
+    snapshot_sync_default: bool = True
+    live_attribution_default: bool = True
+    reconciliation_default: bool = False
+    on_attribution: Any | None = None
     _join_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     _ready: dict[str, bool] = field(default_factory=dict)
 
     async def seed_on_ready(self) -> None:
-        if not self.snapshot_sync_enabled:
+        snapshot_sync_enabled, _, _ = self._effective_feature_flags()
+        if not snapshot_sync_enabled:
             self._ready[self.guild_id] = False
             return
         guild = _guild_from_client(self.client, self.guild_id)
@@ -725,7 +764,8 @@ class InviteAttributionController:
         self._ready[self.guild_id] = await self._seed_guild(guild)
 
     async def refresh_snapshot(self) -> None:
-        if not self.snapshot_sync_enabled:
+        snapshot_sync_enabled, _, _ = self._effective_feature_flags()
+        if not snapshot_sync_enabled:
             return
         guild = _guild_from_client(self.client, self.guild_id)
         if guild is None:
@@ -733,7 +773,8 @@ class InviteAttributionController:
         await self._seed_guild(guild)
 
     async def on_invite_create(self, invite: object) -> None:
-        if not self.snapshot_sync_enabled:
+        snapshot_sync_enabled, _, _ = self._effective_feature_flags()
+        if not snapshot_sync_enabled:
             return
         guild_id = _guild_id(invite)
         if guild_id != self.guild_id:
@@ -750,7 +791,8 @@ class InviteAttributionController:
         await self.refresh_snapshot()
 
     async def on_invite_delete(self, invite: object) -> None:
-        if not self.snapshot_sync_enabled:
+        snapshot_sync_enabled, _, _ = self._effective_feature_flags()
+        if not snapshot_sync_enabled:
             return
         guild_id = _guild_id(invite)
         if guild_id != self.guild_id:
@@ -763,7 +805,8 @@ class InviteAttributionController:
         await self.refresh_snapshot()
 
     async def on_member_join(self, member: discord.Member) -> None:
-        if not self.live_attribution_enabled:
+        _, live_attribution_enabled, _ = self._effective_feature_flags()
+        if not live_attribution_enabled:
             return
         guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
         if guild_id != self.guild_id or getattr(member, "bot", False):
@@ -773,7 +816,8 @@ class InviteAttributionController:
             await self._attribute_join_locked(member)
 
     async def reconcile_metadata(self) -> None:
-        if not self.reconciliation_enabled:
+        _, _, reconciliation_enabled = self._effective_feature_flags()
+        if not reconciliation_enabled:
             return
         guild = _guild_from_client(self.client, self.guild_id)
         if guild is None:
@@ -857,6 +901,7 @@ class InviteAttributionController:
         created = self._write_attribution(attribution)
         if created:
             self._project_current_state(attribution)
+            await self._publish_attribution(attribution)
         self._sync_catalog_from_snapshot(current_snapshot)
         self._upsert_snapshot(current_snapshot)
 
@@ -871,6 +916,7 @@ class InviteAttributionController:
         created = self._write_attribution(attribution)
         if created:
             self._project_current_state(attribution)
+            await self._publish_attribution(attribution)
 
     async def _fetch_current_snapshot(self, guild: discord.Guild) -> object | None:
         captured_at = _utc_now()
@@ -1086,6 +1132,23 @@ class InviteAttributionController:
         projector = getattr(self.repo, "project_member_join_state", None)
         if callable(projector):
             projector(None, attribution)
+
+    async def _publish_attribution(self, attribution: object) -> None:
+        callback = self.on_attribution
+        if callback is None:
+            return
+        result = callback(attribution)
+        if asyncio.iscoroutine(result):
+            await result
+
+    def _effective_feature_flags(self) -> tuple[bool, bool, bool]:
+        settings = self.repo.get_guild_settings(None, self.guild_id)
+        snapshot_enabled = bool(getattr(settings, "invite_snapshot_sync_enabled", self.snapshot_sync_default))
+        live_enabled = bool(getattr(settings, "invite_live_attribution_enabled", self.live_attribution_default))
+        reconcile_enabled = bool(getattr(settings, "invite_reconciliation_enabled", self.reconciliation_default))
+        if live_enabled and not snapshot_enabled:
+            snapshot_enabled = True
+        return snapshot_enabled, live_enabled, reconcile_enabled
 
 
 @dataclass(slots=True)
@@ -1326,30 +1389,14 @@ async def main() -> None:
     nats = NATS()
     await nats.connect(cfg.nats_url)
     bus = Bus(nats, cfg.event_signing_secret, "gateway")
-    invite_rollout_active = invite_rollout_enabled(cfg, cfg.discord_guild_id)
-    invite_snapshot_enabled = bool(getattr(cfg, "invite_snapshot_sync_enabled", True))
-    invite_live_enabled = bool(getattr(cfg, "invite_live_attribution_enabled", True))
-    invite_reconciliation_enabled = bool(getattr(cfg, "invite_reconciliation_enabled", False))
-
-    if invite_live_enabled and not invite_snapshot_enabled:
-        logger.warning(
-            "invite live attribution requires snapshots; enabling snapshots automatically guild=%s",
-            cfg.discord_guild_id,
-        )
-        invite_snapshot_enabled = True
-    if not invite_rollout_active and (invite_snapshot_enabled or invite_live_enabled or invite_reconciliation_enabled):
-        logger.warning(
-            "invite features disabled by rollout for guild=%s configured_rollout_ids=%s",
-            cfg.discord_guild_id,
-            ",".join(list(getattr(cfg, "invite_rollout_guild_ids", []) or [])) or "<empty>",
-        )
+    settings = repo.get_guild_settings(None, cfg.discord_guild_id) or domain.GuildSettings(guild_id=cfg.discord_guild_id)
     logger.info(
-        "invite feature flags guild=%s rollout=%s snapshot=%s live=%s reconciliation=%s",
+        "invite feature defaults guild=%s snapshot=%s live=%s reconciliation=%s userinfo=%s",
         cfg.discord_guild_id,
-        invite_rollout_active,
-        invite_snapshot_enabled,
-        invite_live_enabled,
-        invite_reconciliation_enabled,
+        bool(getattr(settings, "invite_snapshot_sync_enabled", True)),
+        bool(getattr(settings, "invite_live_attribution_enabled", True)),
+        bool(getattr(settings, "invite_reconciliation_enabled", False)),
+        bool(getattr(settings, "invite_userinfo_enabled", True)),
     )
 
     intents = discord.Intents.none()
@@ -1362,9 +1409,9 @@ async def main() -> None:
         client=client,
         repo=repo,
         guild_id=cfg.discord_guild_id,
-        snapshot_sync_enabled=invite_snapshot_enabled and invite_rollout_active,
-        live_attribution_enabled=invite_live_enabled and invite_rollout_active,
-        reconciliation_enabled=invite_reconciliation_enabled and invite_rollout_active,
+        snapshot_sync_default=bool(getattr(settings, "invite_snapshot_sync_enabled", True)),
+        live_attribution_default=bool(getattr(settings, "invite_live_attribution_enabled", True)),
+        reconciliation_default=bool(getattr(settings, "invite_reconciliation_enabled", False)),
     )
     voice_controller = ManagedVoiceController(client=client, repo=repo, guild_id=cfg.discord_guild_id)
     soundboard_enforcement = SoundboardEnforcement(
@@ -1373,6 +1420,28 @@ async def main() -> None:
         guild_id=cfg.discord_guild_id,
         voice_controller=voice_controller,
     )
+
+    async def publish_activity_event(event: domain.ActivityEvent) -> None:
+        if event.guild_id != cfg.discord_guild_id:
+            return
+        await bus.publish_json(None, domain.SUBJECT_ACTIVITY_EVENT, event.to_dict())
+
+    async def publish_invite_used_activity(attribution: object) -> None:
+        event = _activity_event(
+            event_type=domain.ACTIVITY_EVENT_INVITE_USED,
+            guild_id=str(getattr(attribution, "guild_id", "") or ""),
+            occurred_at=_ensure_utc(getattr(attribution, "joined_at", None)) or _utc_now(),
+            member_user_id=str(getattr(attribution, "user_id", "") or ""),
+            invite_code=str(getattr(attribution, "invite_code", "") or ""),
+            invite_url=str(getattr(attribution, "invite_url", "") or ""),
+            attribution_status=str(getattr(attribution, "attribution_status", "") or ""),
+            actor_user_id=str(getattr(attribution, "inviter_user_id", "") or ""),
+            actor_name=str(getattr(attribution, "inviter_name", "") or ""),
+            metadata={"source": str(getattr(attribution, "source", "") or "")},
+        )
+        await publish_activity_event(event)
+
+    invite_attribution.on_attribution = publish_invite_used_activity
 
     @client.event
     async def on_ready() -> None:
@@ -1387,6 +1456,18 @@ async def main() -> None:
             return
         if getattr(member, "bot", False):
             return
+        try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=domain.ACTIVITY_EVENT_MEMBER_JOIN,
+                    guild_id=str(member.guild.id),
+                    occurred_at=_join_occurred_at(member),
+                    member_user_id=str(member.id),
+                    member_name=_member_display_name(member),
+                )
+            )
+        except Exception:
+            logger.exception("member join activity publish failed guild=%s member=%s", member.guild.id, member.id)
         restored = True
         try:
             await invite_attribution.on_member_join(member)
@@ -1428,6 +1509,18 @@ async def main() -> None:
         if getattr(member, "bot", False):
             return
         try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=domain.ACTIVITY_EVENT_MEMBER_LEAVE,
+                    guild_id=str(member.guild.id),
+                    occurred_at=_utc_now(),
+                    member_user_id=str(member.id),
+                    member_name=_member_display_name(member),
+                )
+            )
+        except Exception:
+            logger.exception("member leave activity publish failed guild=%s member=%s", member.guild.id, member.id)
+        try:
             _save_member_role_snapshot(repo, member)
         except Exception:
             logger.exception("role snapshot failed guild=%s member=%s", member.guild.id, member.id)
@@ -1435,12 +1528,40 @@ async def main() -> None:
     @client.event
     async def on_invite_create(invite: object) -> None:
         try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=domain.ACTIVITY_EVENT_INVITE_CREATE,
+                    guild_id=_guild_id(invite),
+                    occurred_at=_utc_now(),
+                    actor_user_id=_invite_inviter_user_id(invite),
+                    actor_name=_invite_inviter_name(invite),
+                    invite_code=_invite_code(invite),
+                    invite_url=_invite_url(invite, _invite_code(invite)),
+                )
+            )
+        except Exception:
+            logger.exception("invite create activity publish failed guild=%s code=%s", _guild_id(invite), _invite_code(invite))
+        try:
             await invite_attribution.on_invite_create(invite)
         except Exception:
             logger.exception("invite create refresh failed guild=%s code=%s", _guild_id(invite), _invite_code(invite))
 
     @client.event
     async def on_invite_delete(invite: object) -> None:
+        try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=domain.ACTIVITY_EVENT_INVITE_DELETE,
+                    guild_id=_guild_id(invite),
+                    occurred_at=_utc_now(),
+                    actor_user_id=_invite_inviter_user_id(invite),
+                    actor_name=_invite_inviter_name(invite),
+                    invite_code=_invite_code(invite),
+                    invite_url=_invite_url(invite, _invite_code(invite)),
+                )
+            )
+        except Exception:
+            logger.exception("invite delete activity publish failed guild=%s code=%s", _guild_id(invite), _invite_code(invite))
         try:
             await invite_attribution.on_invite_delete(invite)
         except Exception:

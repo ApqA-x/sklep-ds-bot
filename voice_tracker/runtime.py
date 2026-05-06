@@ -73,14 +73,9 @@ class Config:
     discord_application_id: str = ""
     discord_guild_id: str = ""
     bot_admin_user_ids: list[str] = field(default_factory=list)
-    invite_rollout_guild_ids: list[str] = field(default_factory=list)
     event_signing_secret: str = ""
     tracking_mode: str = "all"
     tracked_channel_ids: list[str] = field(default_factory=list)
-    invite_snapshot_sync_enabled: bool = True
-    invite_live_attribution_enabled: bool = True
-    userinfo_invite_reads_enabled: bool = True
-    invite_reconciliation_enabled: bool = False
 
 
 def load_config(env: Any = None) -> Config:
@@ -96,14 +91,9 @@ def load_config(env: Any = None) -> Config:
         event_signing_secret=_clean(source.get("EVENT_SIGNING_SECRET", "")),
     )
     cfg.bot_admin_user_ids = parse_user_ids(source.get("BOT_ADMIN_USER_IDS", ""))
-    cfg.invite_rollout_guild_ids = parse_user_ids(source.get("INVITE_ROLLOUT_GUILD_IDS", ""))
     # Tracking defaults are canonicalized to all-channel mode at runtime.
     cfg.tracking_mode = "all"
     cfg.tracked_channel_ids = []
-    cfg.invite_snapshot_sync_enabled = _getenv_bool(source, "INVITE_SNAPSHOT_SYNC_ENABLED", True)
-    cfg.invite_live_attribution_enabled = _getenv_bool(source, "INVITE_LIVE_ATTRIBUTION_ENABLED", True)
-    cfg.userinfo_invite_reads_enabled = _getenv_bool(source, "USERINFO_INVITE_READS_ENABLED", True)
-    cfg.invite_reconciliation_enabled = _getenv_bool(source, "INVITE_RECONCILIATION_ENABLED", False)
     if cfg.mongo_uri == "" or cfg.mongo_db == "" or cfg.nats_url == "":
         raise ValueError("missing required configuration")
     return cfg
@@ -119,16 +109,6 @@ def _getenv_bool(source: Any, key: str, fallback: bool) -> bool:
     if raw == "":
         return fallback
     return raw.lower() in {"1", "true", "yes", "on"}
-
-
-def invite_rollout_enabled(cfg: Config, guild_id: str) -> bool:
-    guild_id = _clean(guild_id)
-    if guild_id == "":
-        return False
-    rollout_guild_ids = list(getattr(cfg, "invite_rollout_guild_ids", []) or [])
-    if len(rollout_guild_ids) == 0:
-        return True
-    return guild_id in rollout_guild_ids
 
 
 def require_event_signing_secret(secret: str) -> str:

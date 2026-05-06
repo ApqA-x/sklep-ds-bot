@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from uuid import uuid4
 
 from .domain import (
+    SUBJECT_ACTIVITY_EVENT,
     SUBJECT_SESSION_CLOSED,
     SUBJECT_SUMMARY_READY,
     SUBJECT_VOICE_EVENT,
@@ -251,6 +252,8 @@ def decode_envelope(secret: bytes | str, expected_subject: str, data: bytes | by
 
 def issuer_for_subject(subject: str) -> str:
     if subject == SUBJECT_VOICE_EVENT:
+        return "gateway"
+    if subject == SUBJECT_ACTIVITY_EVENT:
         return "gateway"
     if subject == SUBJECT_SESSION_CLOSED:
         return "tracker"

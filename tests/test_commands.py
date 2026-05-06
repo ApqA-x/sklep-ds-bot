@@ -58,9 +58,17 @@ class FakeRepo:
             settings.created_at,
             settings.updated_at,
             fallback_summary_channel_id=settings.fallback_summary_channel_id,
+            auto_role_id=settings.auto_role_id,
+            auto_unmute_user_ids=list(settings.auto_unmute_user_ids),
             soundboard_enforcement_enabled=settings.soundboard_enforcement_enabled,
             managed_voice_channel_id=settings.managed_voice_channel_id,
             managed_voice_connected_at=settings.managed_voice_connected_at,
+            invite_snapshot_sync_enabled=settings.invite_snapshot_sync_enabled,
+            invite_live_attribution_enabled=settings.invite_live_attribution_enabled,
+            invite_userinfo_enabled=settings.invite_userinfo_enabled,
+            invite_reconciliation_enabled=settings.invite_reconciliation_enabled,
+            activity_channel_id=settings.activity_channel_id,
+            activity_event_types=list(settings.activity_event_types),
         )
 
     def upsert_guild_settings(self, _ctx, settings: domain.GuildSettings) -> None:
@@ -72,9 +80,17 @@ class FakeRepo:
             settings.created_at,
             settings.updated_at,
             fallback_summary_channel_id=settings.fallback_summary_channel_id,
+            auto_role_id=settings.auto_role_id,
+            auto_unmute_user_ids=list(settings.auto_unmute_user_ids),
             soundboard_enforcement_enabled=settings.soundboard_enforcement_enabled,
             managed_voice_channel_id=settings.managed_voice_channel_id,
             managed_voice_connected_at=settings.managed_voice_connected_at,
+            invite_snapshot_sync_enabled=settings.invite_snapshot_sync_enabled,
+            invite_live_attribution_enabled=settings.invite_live_attribution_enabled,
+            invite_userinfo_enabled=settings.invite_userinfo_enabled,
+            invite_reconciliation_enabled=settings.invite_reconciliation_enabled,
+            activity_channel_id=settings.activity_channel_id,
+            activity_event_types=list(settings.activity_event_types),
         )
 
     def list_active_sessions_by_guild(self, _ctx, guild_id: str):
@@ -211,6 +227,17 @@ def test_can_use_voice_command_requires_admin_for_admin_only_commands() -> None:
         (SETTINGS_COMMAND_NAME, "soundboard"),
         (SETTINGS_COMMAND_NAME, "summary-set"),
         (SETTINGS_COMMAND_NAME, "summary-clear"),
+        (SETTINGS_COMMAND_NAME, "invite-snapshot"),
+        (SETTINGS_COMMAND_NAME, "invite-live"),
+        (SETTINGS_COMMAND_NAME, "invite-userinfo"),
+        (SETTINGS_COMMAND_NAME, "invite-reconcile"),
+        (SETTINGS_COMMAND_NAME, "activity-channel-set"),
+        (SETTINGS_COMMAND_NAME, "activity-channel-clear"),
+        (SETTINGS_COMMAND_NAME, "activity-member-join"),
+        (SETTINGS_COMMAND_NAME, "activity-member-leave"),
+        (SETTINGS_COMMAND_NAME, "activity-invite-create"),
+        (SETTINGS_COMMAND_NAME, "activity-invite-delete"),
+        (SETTINGS_COMMAND_NAME, "activity-invite-used"),
         ("connect", ""),
         ("disconnect", ""),
         ("status", ""),
@@ -300,7 +327,24 @@ def test_voice_application_commands_have_expected_routes() -> None:
         "status",
     ]
 
-    assert [option.name for option in commands[SETTINGS_COMMAND_NAME].options] == ["show", "mode", "soundboard", "summary-set", "summary-clear"]
+    assert [option.name for option in commands[SETTINGS_COMMAND_NAME].options] == [
+        "show",
+        "mode",
+        "soundboard",
+        "summary-set",
+        "summary-clear",
+        "invite-snapshot",
+        "invite-live",
+        "invite-userinfo",
+        "invite-reconcile",
+        "activity-channel-set",
+        "activity-channel-clear",
+        "activity-member-join",
+        "activity-member-leave",
+        "activity-invite-create",
+        "activity-invite-delete",
+        "activity-invite-used",
+    ]
     mode_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "mode")
     assert len(mode_option.options) == 1
     assert [choice.name for choice in mode_option.options[0].choices] == [domain.GUILD_TRACKING_MODE_ALL]
@@ -333,6 +377,21 @@ def test_handle_settings_commands() -> None:
 
     content = svc.handle_settings_command(None, interaction, "summary-clear", [])
     assert "summary channel: not set" in content
+
+    content = svc.handle_settings_command(None, interaction, "invite-userinfo", [option("state", "off")])
+    assert "invite userinfo: off" in content
+
+    content = svc.handle_settings_command(None, interaction, "invite-live", [option("state", "on")])
+    assert "invite live attribution: on" in content
+
+    content = svc.handle_settings_command(None, interaction, "activity-channel-set", [option("channel", "t1")])
+    assert "activity channel: <#t1>" in content
+
+    content = svc.handle_settings_command(None, interaction, "activity-member-join", [option("state", "off")])
+    assert "member_join" not in content
+
+    content = svc.handle_settings_command(None, interaction, "activity-member-join", [option("state", "on")])
+    assert "member_join" in content
 
 
 def test_fallback_summary_channel_is_described() -> None:

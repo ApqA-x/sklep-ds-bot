@@ -190,7 +190,6 @@ async def main() -> None:
                 command,
                 options,
                 cfg.bot_admin_user_ids,
-                userinfo_invite_reads_enabled=bool(getattr(cfg, "userinfo_invite_reads_enabled", True)),
             )
         except ValueError as exc:
             logger.warning("command rejected %s error=%s", context, exc)
@@ -298,8 +297,6 @@ async def _dispatch_command(
     command: str,
     options: list[ApplicationCommandInteractionDataOption],
     bot_admin_user_ids: list[str],
-    *,
-    userinfo_invite_reads_enabled: bool = True,
 ) -> str | discord.Embed | InteractionMessage:
     options = _normalize_snowflake_options(options)
     if root == "jump":
@@ -333,7 +330,6 @@ async def _dispatch_command(
             model,
             interaction,
             options,
-            invite_reads_enabled=userinfo_invite_reads_enabled,
         )
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
         if not _is_admin_only(model):
@@ -497,8 +493,6 @@ async def _dispatch_userinfo_command(
     model: InteractionCreate,
     interaction: discord.Interaction,
     options: list[ApplicationCommandInteractionDataOption],
-    *,
-    invite_reads_enabled: bool = True,
 ) -> discord.Embed:
     guild = getattr(interaction, "guild", None)
     if guild is None:
@@ -514,6 +508,8 @@ async def _dispatch_userinfo_command(
     username = _sanitize_public_text(_userinfo_username(member, fetched_user, user_id)) or user_id
     status_label = _userinfo_status(member)
     profile = _userinfo_profile(service, model.guild_id, user_id)
+    settings = service.get_guild_settings(None, model.guild_id)
+    invite_reads_enabled = bool(getattr(settings, "invite_userinfo_enabled", True))
     total_voice_time = _userinfo_total_voice_time(profile)
     joined_at = _format_discord_datetime(getattr(member, "joined_at", None))
     created_at = _format_discord_datetime(_userinfo_created_at(member, fetched_user))

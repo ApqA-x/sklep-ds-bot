@@ -74,7 +74,10 @@ async def test_dispatch_userinfo_command_renders_exact_invite_attribution_from_p
 
     monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
     monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
-    service = SimpleNamespace(get_member_profile=_load_profile)
+    service = SimpleNamespace(
+        get_member_profile=_load_profile,
+        get_guild_settings=lambda _ctx, _guild_id: SimpleNamespace(invite_userinfo_enabled=True),
+    )
 
     embed = await commands_service._dispatch_userinfo_command(
         object(),
@@ -129,7 +132,10 @@ async def test_dispatch_userinfo_command_renders_ambiguous_invite_attribution(
 
     monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
     monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
-    service = SimpleNamespace(get_member_profile=_load_profile)
+    service = SimpleNamespace(
+        get_member_profile=_load_profile,
+        get_guild_settings=lambda _ctx, _guild_id: SimpleNamespace(invite_userinfo_enabled=True),
+    )
 
     embed = await commands_service._dispatch_userinfo_command(
         object(),
@@ -171,7 +177,10 @@ async def test_dispatch_userinfo_command_renders_unknown_invite_attribution(monk
 
     monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
     monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
-    service = SimpleNamespace(get_member_profile=_load_profile)
+    service = SimpleNamespace(
+        get_member_profile=_load_profile,
+        get_guild_settings=lambda _ctx, _guild_id: SimpleNamespace(invite_userinfo_enabled=True),
+    )
 
     embed = await commands_service._dispatch_userinfo_command(
         object(),
@@ -218,7 +227,10 @@ async def test_dispatch_userinfo_command_shows_stored_roles_for_user_not_in_guil
 
     monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
     monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
-    service = SimpleNamespace(get_member_profile=_load_profile)
+    service = SimpleNamespace(
+        get_member_profile=_load_profile,
+        get_guild_settings=lambda _ctx, _guild_id: SimpleNamespace(invite_userinfo_enabled=True),
+    )
 
     embed = await commands_service._dispatch_userinfo_command(
         object(),
@@ -231,3 +243,38 @@ async def test_dispatch_userinfo_command_shows_stored_roles_for_user_not_in_guil
     assert embed.description is not None
     assert "Status: ⚫ Not in server" in embed.description
     assert "Roles (stored): Raid Team" in embed.description
+
+
+@pytest.mark.asyncio
+async def test_dispatch_userinfo_command_hides_invite_lines_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = _FakeMember()
+    user = _FakeUser()
+
+    async def _resolve_member(_guild, _user_id: str):
+        return member
+
+    async def _fetch_user(_client, _user_id: str):
+        return user
+
+    def _load_profile(_ctx, _guild_id: str, _user_id: str):
+        return SimpleNamespace(total_for=timedelta(minutes=1), attribution_status="exact", invite_url="https://discord.gg/abc")
+
+    monkeypatch.setattr(commands_service, "_resolve_member_by_id", _resolve_member)
+    monkeypatch.setattr(commands_service, "_fetch_user_by_id", _fetch_user)
+    service = SimpleNamespace(
+        get_member_profile=_load_profile,
+        get_guild_settings=lambda _ctx, _guild_id: SimpleNamespace(invite_userinfo_enabled=False),
+    )
+
+    embed = await commands_service._dispatch_userinfo_command(
+        object(),
+        service,
+        SimpleNamespace(guild_id="g1"),
+        _FakeInteraction(),
+        [ApplicationCommandInteractionDataOption(name="user", value="669151106814967819")],
+    )
+
+    assert embed.description is not None
+    assert "Invite attribution: disabled by configuration" in embed.description

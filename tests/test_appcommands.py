@@ -94,7 +94,24 @@ def test_mvp_command_payloads_have_expected_shapes_and_permissions() -> None:
     for name in all_user_commands:
         assert "default_member_permissions" not in commands[name]
 
-    assert _option_names(commands["settings"]["options"]) == ["show", "mode", "soundboard", "summary-set", "summary-clear"]
+    assert _option_names(commands["settings"]["options"]) == [
+        "show",
+        "mode",
+        "soundboard",
+        "summary-set",
+        "summary-clear",
+        "invite-snapshot",
+        "invite-live",
+        "invite-userinfo",
+        "invite-reconcile",
+        "activity-channel-set",
+        "activity-channel-clear",
+        "activity-member-join",
+        "activity-member-leave",
+        "activity-invite-create",
+        "activity-invite-delete",
+        "activity-invite-used",
+    ]
     mode_option = _nested_option_by_name(commands["settings"]["options"], "mode", "mode")
     assert _choice_names(mode_option) == ["all"]
     soundboard_option = _nested_option_by_name(commands["settings"]["options"], "soundboard", "state")

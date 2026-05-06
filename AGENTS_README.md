@@ -2,7 +2,7 @@
 
 Maintainer notes for agent-assisted updates in this repository.
 
-Last updated: April 26, 2026.
+Last updated: May 7, 2026.
 
 ## Scope
 
@@ -24,10 +24,12 @@ When behavior changes, update these files in the same PR:
 - Confirm access model (`ADMIN_ONLY` vs `ALL_USER`) still matches runtime checks.
 - If commands are removed, remove them from maintainer and user-facing docs instead of describing them as retained aliases.
 - Keep voice connection ownership (`/connect`, `/disconnect`) separate from enforcement toggles (`/settings soundboard on|off`).
+- Keep invite and activity runtime behavior command-driven via `/settings` rather than env toggles.
 
 ## Reliability/Operations Checklist
 
 - If startup/retry behavior changes in services, document it in `README.md`.
+- If event subjects or cross-service wiring changes, update `README.md` event flow and `COMMANDS.md` operator controls.
 - If CI policy or lanes change, update the `README.md` CI section.
 
 ## Documentation Hygiene

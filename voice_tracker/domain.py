@@ -9,6 +9,7 @@ from .timeutil import datetime_to_json, ensure_utc, parse_datetime, positive_del
 SUBJECT_VOICE_EVENT = "voice.events"
 SUBJECT_SESSION_CLOSED = "session.closed"
 SUBJECT_SUMMARY_READY = "session.summary"
+SUBJECT_ACTIVITY_EVENT = "activity.events"
 
 SESSION_STATUS_ACTIVE = "active"
 SESSION_STATUS_CLOSED = "closed"
@@ -28,6 +29,20 @@ INVITE_SOURCE_SNAPSHOT = "snapshot"
 INVITE_SOURCE_LIVE_EVENT = "live_event"
 INVITE_SOURCE_AUDIT_LOG = "audit_log"
 INVITE_SOURCE_LIVE_DIFF = "live_diff"
+
+ACTIVITY_EVENT_MEMBER_JOIN = "member_join"
+ACTIVITY_EVENT_MEMBER_LEAVE = "member_leave"
+ACTIVITY_EVENT_INVITE_CREATE = "invite_create"
+ACTIVITY_EVENT_INVITE_DELETE = "invite_delete"
+ACTIVITY_EVENT_INVITE_USED = "invite_used"
+
+ACTIVITY_EVENT_TYPES = {
+    ACTIVITY_EVENT_MEMBER_JOIN,
+    ACTIVITY_EVENT_MEMBER_LEAVE,
+    ACTIVITY_EVENT_INVITE_CREATE,
+    ACTIVITY_EVENT_INVITE_DELETE,
+    ACTIVITY_EVENT_INVITE_USED,
+}
 
 
 def _clean(value: str | None) -> str:
@@ -63,6 +78,11 @@ def _clean_codes(values: list[str] | tuple[str, ...] | None) -> list[str]:
         seen.add(code)
         out.append(code)
     return out
+
+
+def clean_activity_event_types(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    cleaned = [value.lower() for value in _clean_codes(values)]
+    return sorted(value for value in cleaned if value in ACTIVITY_EVENT_TYPES)
 
 
 def invite_catalog_id(guild_id: str, code: str) -> str:
@@ -112,6 +132,12 @@ class GuildSettings:
     soundboard_enforcement_enabled: bool = False
     managed_voice_channel_id: str = ""
     managed_voice_connected_at: datetime | None = None
+    invite_snapshot_sync_enabled: bool = True
+    invite_live_attribution_enabled: bool = True
+    invite_userinfo_enabled: bool = True
+    invite_reconciliation_enabled: bool = False
+    activity_channel_id: str = ""
+    activity_event_types: list[str] = field(default_factory=lambda: sorted(ACTIVITY_EVENT_TYPES))
 
     def __post_init__(self) -> None:
         self.guild_id = _clean(self.guild_id)
@@ -124,6 +150,14 @@ class GuildSettings:
         self.soundboard_enforcement_enabled = bool(self.soundboard_enforcement_enabled)
         self.managed_voice_channel_id = _clean(self.managed_voice_channel_id)
         self.managed_voice_connected_at = ensure_utc(self.managed_voice_connected_at)
+        self.invite_snapshot_sync_enabled = bool(self.invite_snapshot_sync_enabled)
+        self.invite_live_attribution_enabled = bool(self.invite_live_attribution_enabled)
+        self.invite_userinfo_enabled = bool(self.invite_userinfo_enabled)
+        self.invite_reconciliation_enabled = bool(self.invite_reconciliation_enabled)
+        self.activity_channel_id = _clean(self.activity_channel_id)
+        self.activity_event_types = clean_activity_event_types(self.activity_event_types)
+        if len(self.activity_event_types) == 0:
+            self.activity_event_types = sorted(ACTIVITY_EVENT_TYPES)
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
 
@@ -163,6 +197,12 @@ class GuildSettings:
             soundboard_enforcement_enabled=bool(data.get("soundboardEnforcementEnabled", False)),
             managed_voice_channel_id=data.get("managedVoiceChannelId", ""),
             managed_voice_connected_at=parse_datetime(data.get("managedVoiceConnectedAt")),
+            invite_snapshot_sync_enabled=bool(data.get("inviteSnapshotSyncEnabled", True)),
+            invite_live_attribution_enabled=bool(data.get("inviteLiveAttributionEnabled", True)),
+            invite_userinfo_enabled=bool(data.get("inviteUserinfoEnabled", True)),
+            invite_reconciliation_enabled=bool(data.get("inviteReconciliationEnabled", False)),
+            activity_channel_id=data.get("activityChannelId", ""),
+            activity_event_types=list(data.get("activityEventTypes") or sorted(ACTIVITY_EVENT_TYPES)),
             created_at=parse_datetime(data.get("createdAt")),
             updated_at=parse_datetime(data.get("updatedAt")),
         )
@@ -179,6 +219,12 @@ def new_guild_settings(
     soundboard_enforcement_enabled: bool = False,
     managed_voice_channel_id: str = "",
     managed_voice_connected_at: datetime | None = None,
+    invite_snapshot_sync_enabled: bool = True,
+    invite_live_attribution_enabled: bool = True,
+    invite_userinfo_enabled: bool = True,
+    invite_reconciliation_enabled: bool = False,
+    activity_channel_id: str = "",
+    activity_event_types: list[str] | None = None,
 ) -> GuildSettings:
     return GuildSettings(
         guild_id,
@@ -191,7 +237,73 @@ def new_guild_settings(
         soundboard_enforcement_enabled=soundboard_enforcement_enabled,
         managed_voice_channel_id=managed_voice_channel_id,
         managed_voice_connected_at=managed_voice_connected_at,
+        invite_snapshot_sync_enabled=invite_snapshot_sync_enabled,
+        invite_live_attribution_enabled=invite_live_attribution_enabled,
+        invite_userinfo_enabled=invite_userinfo_enabled,
+        invite_reconciliation_enabled=invite_reconciliation_enabled,
+        activity_channel_id=activity_channel_id,
+        activity_event_types=activity_event_types or sorted(ACTIVITY_EVENT_TYPES),
     )
+
+
+@dataclass(slots=True)
+class ActivityEvent:
+    event_type: str = ""
+    guild_id: str = ""
+    occurred_at: datetime | None = None
+    member_user_id: str = ""
+    member_name: str = ""
+    actor_user_id: str = ""
+    actor_name: str = ""
+    invite_code: str = ""
+    invite_url: str = ""
+    attribution_status: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.event_type = _clean(self.event_type).lower()
+        self.guild_id = _clean(self.guild_id)
+        self.occurred_at = ensure_utc(self.occurred_at)
+        self.member_user_id = _clean(self.member_user_id)
+        self.member_name = _clean(self.member_name)
+        self.actor_user_id = _clean(self.actor_user_id)
+        self.actor_name = _clean(self.actor_name)
+        self.invite_code = _clean(self.invite_code)
+        self.invite_url = _clean(self.invite_url)
+        self.attribution_status = _clean(self.attribution_status).lower()
+        raw = self.metadata if isinstance(self.metadata, dict) else {}
+        self.metadata = {str(key): value for key, value in raw.items()}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ActivityEvent":
+        return cls(
+            event_type=data.get("eventType", ""),
+            guild_id=data.get("guildId", ""),
+            occurred_at=parse_datetime(data.get("occurredAt")),
+            member_user_id=data.get("memberUserId", ""),
+            member_name=data.get("memberName", ""),
+            actor_user_id=data.get("actorUserId", ""),
+            actor_name=data.get("actorName", ""),
+            invite_code=data.get("inviteCode", ""),
+            invite_url=data.get("inviteUrl", ""),
+            attribution_status=data.get("attributionStatus", ""),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "eventType": self.event_type,
+            "guildId": self.guild_id,
+            "occurredAt": datetime_to_json(self.occurred_at),
+            "memberUserId": self.member_user_id,
+            "memberName": self.member_name,
+            "actorUserId": self.actor_user_id,
+            "actorName": self.actor_name,
+            "inviteCode": self.invite_code,
+            "inviteUrl": self.invite_url,
+            "attributionStatus": self.attribution_status,
+            "metadata": dict(self.metadata),
+        }
 
 
 @dataclass(slots=True)

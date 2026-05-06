@@ -2,11 +2,16 @@
 
 Discord voice-session tracker built as Python microservices with MongoDB and NATS.
 
-Last updated: April 25, 2026.
+Last updated: May 7, 2026.
 
 ## What Changed
 
 Recent production stabilization changes include:
+
+- Migrated invite behavior toggles from env-first controls to guild settings managed by Discord commands.
+- Added a new `services.activity` service that consumes `activity.events` and posts member/invite lifecycle embeds.
+- Added settings controls for invite snapshot/live/userinfo/reconciliation and activity channel/event-type toggles.
+- Gateway now publishes activity events for member join/leave, invite create/delete, and invite attribution outcomes.
 
 - Removed legacy root commands `/audit`, `/bot-setting`, `/track`, and `/track-list` from the public command surface.
 - Tracking is all-channel.
@@ -28,6 +33,7 @@ Recent production stabilization changes include:
 - `services.tracker`: owns session/participant lifecycle and emits `session.closed`.
 - `services.writer`: consumes `session.closed`, builds summary text, emits `session.summary`.
 - `services.commands`: owns slash command registration and command execution.
+- `services.activity`: consumes `activity.events` and posts configurable activity embeds.
 
 Shared package code is in `voice_tracker/`.
 
@@ -39,6 +45,8 @@ Shared package code is in `voice_tracker/`.
 4. Tracker emits `session.closed` when a voice channel session ends.
 5. Writer generates summary payload and emits `session.summary`.
 6. Gateway receives `session.summary` and posts it to the configured output channel.
+7. Gateway emits `activity.events` for member/invite lifecycle events.
+8. Activity service receives `activity.events` and posts embeds to the configured activity channel.
 
 ## Command Docs
 
@@ -65,12 +73,10 @@ Important variables:
 - `MONGO_URI`, `MONGO_DB`
 - `NATS_URL`
 - `EVENT_SIGNING_SECRET`
-- `TRACKING_MODE` (`all`)
-- `TRACKED_CHANNEL_IDS` (startup default only)
-- `INVITE_SNAPSHOT_SYNC_ENABLED`, `INVITE_LIVE_ATTRIBUTION_ENABLED`, `USERINFO_INVITE_READS_ENABLED`, `INVITE_RECONCILIATION_ENABLED`
-- `INVITE_ROLLOUT_GUILD_IDS` for guarded invite-attribution rollout
 
 `BOT_ADMIN_USER_IDS` remains for compatibility but is not the primary admin policy path.
+
+Invite and activity behavior is configured at runtime through `/settings` and persisted in `guild_settings`.
 
 ## Local Development
 
@@ -100,6 +106,8 @@ The local `stack.yaml` in this repo is not the active production deployment cont
 - fast lanes: Python 3.11 and 3.12
 - forward canary: Python 3.14 (non-blocking)
 - deprecation-strict lane: `pytest -W error::DeprecationWarning` (non-blocking)
+
+`Release` workflow publishes service images for `gateway`, `tracker`, `writer`, `commands`, and `activity`.
 
 ## Documentation Map
 

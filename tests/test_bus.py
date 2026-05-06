@@ -91,3 +91,7 @@ def test_subscribe_drops_duplicates_without_deduper() -> None:
     asyncio.run(callback(type("Msg", (), {"data": message})()))
 
     assert received == [b'{"hello":"world"}']
+
+
+def test_issuer_for_activity_subject_is_gateway() -> None:
+    assert issuer_for_subject("activity.events") == "gateway"

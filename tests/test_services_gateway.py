@@ -657,12 +657,16 @@ class _ManagedClient:
 
 
 class _InviteRepo:
-    def __init__(self, snapshot=None) -> None:
+    def __init__(self, snapshot=None, settings: domain.GuildSettings | None = None) -> None:
         self.snapshot = snapshot
+        self.settings = settings or domain.GuildSettings(guild_id="123")
         self.catalog_entries: list[object] = []
         self.deleted_codes: list[tuple[str, str, object, str]] = []
         self.attributions: list[object] = []
         self.state_by_member: dict[str, object] = {}
+
+    def get_guild_settings(self, _ctx, _guild_id: str) -> domain.GuildSettings:
+        return self.settings
 
     def get_guild_invite_snapshot(self, _ctx, guild_id: str):
         if self.snapshot is None:
@@ -980,11 +984,41 @@ async def test_invite_attribution_records_unknown_when_seed_is_unavailable() -> 
     assert getattr(projected, "invite_code", "") == ""
 
 
+async def test_invite_attribution_publishes_callback_for_created_rows() -> None:
+    guild = _InviteGuild("123", invites=[])
+    current = _make_invite(guild, code="abc", uses=2)
+    repo = _InviteRepo(snapshot=domain.GuildInviteSnapshot(guild_id="123", captured_at=gateway._utc_now(), invites=[{
+        "code": "abc",
+        "uses": 1,
+        "url": "https://discord.gg/abc",
+        "channelId": "55",
+        "inviterUserId": "7",
+        "inviterName": "Owner",
+        "inviteType": gateway.INVITE_TYPE_REGULAR,
+    }]))
+    client = _InviteClient(guild)
+    published: list[str] = []
+
+    async def _on_attribution(attribution: object) -> None:
+        published.append(str(getattr(attribution, "attribution_status", "")))
+
+    controller = gateway.InviteAttributionController(client=client, repo=repo, guild_id="123", on_attribution=_on_attribution)
+    controller._ready["123"] = True
+    guild.set_invites([current])
+    member = SimpleNamespace(id="42", bot=False, guild=guild, joined_at=gateway._utc_now())
+
+    await controller.on_member_join(member)
+
+    assert published == [gateway.ATTRIBUTION_STATUS_EXACT]
+
+
 async def test_invite_reconciliation_repairs_catalog_only() -> None:
     guild = _InviteGuild("123", invites=[])
     repo = _InviteRepo()
     client = _InviteClient(guild)
-    controller = gateway.InviteAttributionController(client=client, repo=repo, guild_id="123", reconciliation_enabled=True)
+    settings = domain.GuildSettings(guild_id="123", invite_reconciliation_enabled=True)
+    controller = gateway.InviteAttributionController(client=client, repo=repo, guild_id="123", reconciliation_default=True)
+    repo.settings = settings
     now = gateway._utc_now()
     create_entry = SimpleNamespace(
         created_at=now,

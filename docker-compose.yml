@@ -55,5 +55,16 @@ services:
       - mongo
       - nats
 
+  activity:
+    build:
+      context: .
+      args:
+        SERVICE: activity
+    env_file:
+      - .env
+    depends_on:
+      - mongo
+      - nats
+
 volumes:
   mongo-data:
