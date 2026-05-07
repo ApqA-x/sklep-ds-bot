@@ -246,7 +246,7 @@ async def test_dispatch_userinfo_command_shows_stored_roles_for_user_not_in_guil
 
 
 @pytest.mark.asyncio
-async def test_dispatch_userinfo_command_hides_invite_lines_when_disabled(
+async def test_dispatch_userinfo_command_always_renders_invite_lines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     member = _FakeMember()
@@ -277,4 +277,5 @@ async def test_dispatch_userinfo_command_hides_invite_lines_when_disabled(
     )
 
     assert embed.description is not None
-    assert "Invite attribution: disabled by configuration" in embed.description
+    assert "Invite used: https://discord.gg/abc" in embed.description
+    assert "Invite attribution: exact" in embed.description

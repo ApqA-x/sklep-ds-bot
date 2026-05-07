@@ -52,10 +52,12 @@ class _FakeDispatchSession:
 SUPPORTED_ADMIN_ONLY_ROUTES = [
     (SETTINGS_COMMAND_NAME, ""),
     (SETTINGS_COMMAND_NAME, "show"),
-    (SETTINGS_COMMAND_NAME, "mode"),
     (SETTINGS_COMMAND_NAME, "soundboard"),
     (SETTINGS_COMMAND_NAME, "summary-set"),
     (SETTINGS_COMMAND_NAME, "summary-clear"),
+    (SETTINGS_COMMAND_NAME, "activity-channel-set"),
+    (SETTINGS_COMMAND_NAME, "activity-channel-clear"),
+    (SETTINGS_COMMAND_NAME, "activity"),
     ("connect", ""),
     ("connect", "channel"),
     ("disconnect", ""),

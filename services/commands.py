@@ -508,8 +508,7 @@ async def _dispatch_userinfo_command(
     username = _sanitize_public_text(_userinfo_username(member, fetched_user, user_id)) or user_id
     status_label = _userinfo_status(member)
     profile = _userinfo_profile(service, model.guild_id, user_id)
-    settings = service.get_guild_settings(None, model.guild_id)
-    invite_reads_enabled = bool(getattr(settings, "invite_userinfo_enabled", True))
+    invite_reads_enabled = True
     total_voice_time = _userinfo_total_voice_time(profile)
     joined_at = _format_discord_datetime(getattr(member, "joined_at", None))
     created_at = _format_discord_datetime(_userinfo_created_at(member, fetched_user))

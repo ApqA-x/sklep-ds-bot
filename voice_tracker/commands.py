@@ -45,17 +45,9 @@ DASHBOARD_COMMAND_NAME = "dashboard"
 USERINFO_COMMAND_NAME = "userinfo"
 STATUS_COMMAND_NAME = "status"
 
-SETTINGS_INVITE_SNAPSHOT_COMMAND = "invite-snapshot"
-SETTINGS_INVITE_LIVE_COMMAND = "invite-live"
-SETTINGS_INVITE_USERINFO_COMMAND = "invite-userinfo"
-SETTINGS_INVITE_RECONCILE_COMMAND = "invite-reconcile"
 SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND = "activity-channel-set"
 SETTINGS_ACTIVITY_CHANNEL_CLEAR_COMMAND = "activity-channel-clear"
-SETTINGS_ACTIVITY_MEMBER_JOIN_COMMAND = "activity-member-join"
-SETTINGS_ACTIVITY_MEMBER_LEAVE_COMMAND = "activity-member-leave"
-SETTINGS_ACTIVITY_INVITE_CREATE_COMMAND = "activity-invite-create"
-SETTINGS_ACTIVITY_INVITE_DELETE_COMMAND = "activity-invite-delete"
-SETTINGS_ACTIVITY_INVITE_USED_COMMAND = "activity-invite-used"
+SETTINGS_ACTIVITY_MODE_COMMAND = "activity"
 
 VOICE_COMMAND_NAMES = {
     SETTINGS_COMMAND_NAME,
@@ -109,21 +101,12 @@ class CommandPolicy:
 
 COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
     (SETTINGS_COMMAND_NAME, "show"): CommandPolicy(SETTINGS_COMMAND_NAME, "show", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, "mode"): CommandPolicy(SETTINGS_COMMAND_NAME, "mode", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "soundboard"): CommandPolicy(SETTINGS_COMMAND_NAME, "soundboard", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "summary-set"): CommandPolicy(SETTINGS_COMMAND_NAME, "summary-set", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, "summary-clear"): CommandPolicy(SETTINGS_COMMAND_NAME, "summary-clear", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_INVITE_SNAPSHOT_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_INVITE_SNAPSHOT_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_INVITE_LIVE_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_INVITE_LIVE_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_INVITE_USERINFO_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_INVITE_USERINFO_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_INVITE_RECONCILE_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_INVITE_RECONCILE_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_CHANNEL_CLEAR_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_CHANNEL_CLEAR_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_MEMBER_JOIN_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_MEMBER_JOIN_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_MEMBER_LEAVE_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_MEMBER_LEAVE_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_INVITE_CREATE_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_INVITE_CREATE_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_INVITE_DELETE_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_INVITE_DELETE_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
-    (SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_INVITE_USED_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_INVITE_USED_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
+    (SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_MODE_COMMAND): CommandPolicy(SETTINGS_COMMAND_NAME, SETTINGS_ACTIVITY_MODE_COMMAND, COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_settings_command"),
     (CONNECT_COMMAND_NAME, ""): CommandPolicy(CONNECT_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_connect_command"),
     (DISCONNECT_COMMAND_NAME, ""): CommandPolicy(DISCONNECT_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_disconnect_command"),
     (JUMP_COMMAND_NAME, ""): CommandPolicy(JUMP_COMMAND_NAME, "", COMMAND_ACCESS_ALL_USER, None, "handle_jump_command"),
@@ -297,34 +280,6 @@ class Service:
         self._save(ctx, settings)
         return settings
 
-    def set_invite_snapshot_sync(self, ctx: Any, guild_id: str, enabled: bool) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.invite_snapshot_sync_enabled = bool(enabled)
-        if not settings.invite_snapshot_sync_enabled:
-            settings.invite_live_attribution_enabled = False
-        self._save(ctx, settings)
-        return settings
-
-    def set_invite_live_attribution(self, ctx: Any, guild_id: str, enabled: bool) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.invite_live_attribution_enabled = bool(enabled)
-        if settings.invite_live_attribution_enabled:
-            settings.invite_snapshot_sync_enabled = True
-        self._save(ctx, settings)
-        return settings
-
-    def set_invite_userinfo(self, ctx: Any, guild_id: str, enabled: bool) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.invite_userinfo_enabled = bool(enabled)
-        self._save(ctx, settings)
-        return settings
-
-    def set_invite_reconciliation(self, ctx: Any, guild_id: str, enabled: bool) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.invite_reconciliation_enabled = bool(enabled)
-        self._save(ctx, settings)
-        return settings
-
     def set_activity_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
         settings = self.get_guild_settings(ctx, guild_id)
         settings.activity_channel_id = (channel_id or "").strip()
@@ -334,17 +289,23 @@ class Service:
     def clear_activity_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
         return self.set_activity_channel(ctx, guild_id, "")
 
-    def set_activity_event_enabled(self, ctx: Any, guild_id: str, event_type: str, enabled: bool) -> domain.GuildSettings:
-        event_type = (event_type or "").strip().lower()
-        if event_type not in domain.ACTIVITY_EVENT_TYPES:
-            raise ValueError("unknown activity event type")
+    def set_activity_mode(self, ctx: Any, guild_id: str, mode: str) -> domain.GuildSettings:
+        mode = (mode or "").strip().lower()
+        if mode not in {domain.ACTIVITY_MODE_OFF, domain.ACTIVITY_MODE_MINIMAL, domain.ACTIVITY_MODE_FULL}:
+            raise ValueError("mode must be one of: off, minimal, full")
         settings = self.get_guild_settings(ctx, guild_id)
-        selected = set(domain.clean_activity_event_types(settings.activity_event_types))
-        if enabled:
-            selected.add(event_type)
+        if mode == domain.ACTIVITY_MODE_OFF:
+            settings.activity_event_types = []
+        elif mode == domain.ACTIVITY_MODE_MINIMAL:
+            settings.activity_event_types = sorted(
+                {
+                    domain.ACTIVITY_EVENT_MEMBER_JOIN,
+                    domain.ACTIVITY_EVENT_MEMBER_LEAVE,
+                    domain.ACTIVITY_EVENT_INVITE_USED,
+                }
+            )
         else:
-            selected.discard(event_type)
-        settings.activity_event_types = sorted(selected)
+            settings.activity_event_types = sorted(domain.ACTIVITY_EVENT_TYPES)
         self._save(ctx, settings)
         return settings
 
@@ -369,16 +330,6 @@ class Service:
         return settings
 
     def describe_settings(self, settings: domain.GuildSettings) -> str:
-        mode = domain.normalize_tracking_mode(settings.tracking_mode)
-        tracked = "all voice channels"
-        stored = _channel_mentions(domain.clean_channel_ids(settings.tracked_channel_ids))
-        if mode == domain.GUILD_TRACKING_MODE_NONE:
-            tracked = "no voice channels"
-        elif mode == domain.GUILD_TRACKING_MODE_SPECIFIC:
-            tracked = stored
-            if not tracked:
-                tracked = "no configured channels"
-
         summary_channel = settings.summary_channel_id.strip()
         fallback_channel = settings.fallback_summary_channel_id.strip()
         if summary_channel:
@@ -399,26 +350,18 @@ class Service:
         )
         managed_voice_channel = _channel_mention(managed_voice_channel_id) if managed_voice_channel_id else "not connected"
         soundboard_enforcement = "on" if bool(getattr(settings, "soundboard_enforcement_enabled", False)) else "off"
-        invite_snapshot = "on" if bool(getattr(settings, "invite_snapshot_sync_enabled", True)) else "off"
-        invite_live = "on" if bool(getattr(settings, "invite_live_attribution_enabled", True)) else "off"
-        invite_userinfo = "on" if bool(getattr(settings, "invite_userinfo_enabled", True)) else "off"
-        invite_reconcile = "on" if bool(getattr(settings, "invite_reconciliation_enabled", False)) else "off"
         activity_channel_id = _optional_setting(settings, "activity_channel_id", _optional_setting(settings, "activityChannelId", ""))
         activity_channel = _channel_mention(activity_channel_id) if activity_channel_id else "not set"
         raw_activity_events = getattr(settings, "activity_event_types", getattr(settings, "activityEventTypes", []))
-        activity_events = ", ".join(domain.clean_activity_event_types(raw_activity_events)) or "none"
-        lines = [f"tracking mode: {mode}", f"tracked channels: {tracked}"]
+        activity_mode = activity_mode_from_event_types(raw_activity_events)
+        lines: list[str] = []
         lines.append(f"summary channel: {summary_channel}")
         lines.append(f"autorole: {autorole}")
         lines.append(f"auto-unmute: {auto_unmute}")
         lines.append(f"voice connection: {managed_voice_channel}")
         lines.append(f"soundboard enforcement: {soundboard_enforcement}")
-        lines.append(f"invite snapshot sync: {invite_snapshot}")
-        lines.append(f"invite live attribution: {invite_live}")
-        lines.append(f"invite userinfo: {invite_userinfo}")
-        lines.append(f"invite reconciliation: {invite_reconcile}")
         lines.append(f"activity channel: {activity_channel}")
-        lines.append(f"activity events: {activity_events}")
+        lines.append(f"activity mode: {activity_mode}")
         created_at = format_time(settings.created_at)
         if created_at != "":
             lines.append(f"created: {created_at}")
@@ -652,18 +595,6 @@ class Service:
         if command in {"", "show"}:
             settings = self.get_guild_settings(ctx, interaction.guild_id)
             return self.describe_settings(settings)
-        if command == "mode":
-            requested_mode = option_string(options, "mode")
-            if not requested_mode:
-                raise ValueError("mode value is required")
-            settings = self.enforce_track_all(ctx, interaction.guild_id)
-            if domain.normalize_tracking_mode(requested_mode) != domain.GUILD_TRACKING_MODE_ALL:
-                return (
-                    "Tracking mode is fixed to 'all'. "
-                    "Per-channel and disabled tracking modes are no longer supported.\n"
-                    f"{self.describe_settings(settings)}"
-                )
-            return self.describe_settings(settings)
         if command == "soundboard":
             requested_state = option_string(options, "state").lower()
             if requested_state not in {"on", "off"}:
@@ -677,30 +608,6 @@ class Service:
         if command == "summary-clear":
             settings = self.clear_summary_channel(ctx, interaction.guild_id)
             return self.describe_settings(settings)
-        if command == SETTINGS_INVITE_SNAPSHOT_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_invite_snapshot_sync(ctx, interaction.guild_id, requested_state == "on")
-            return self.describe_settings(settings)
-        if command == SETTINGS_INVITE_LIVE_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_invite_live_attribution(ctx, interaction.guild_id, requested_state == "on")
-            return self.describe_settings(settings)
-        if command == SETTINGS_INVITE_USERINFO_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_invite_userinfo(ctx, interaction.guild_id, requested_state == "on")
-            return self.describe_settings(settings)
-        if command == SETTINGS_INVITE_RECONCILE_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_invite_reconciliation(ctx, interaction.guild_id, requested_state == "on")
-            return self.describe_settings(settings)
         if command == SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND:
             channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_TEXT)
             settings = self.set_activity_channel(ctx, interaction.guild_id, channel_id)
@@ -708,45 +615,9 @@ class Service:
         if command == SETTINGS_ACTIVITY_CHANNEL_CLEAR_COMMAND:
             settings = self.clear_activity_channel(ctx, interaction.guild_id)
             return self.describe_settings(settings)
-        if command == SETTINGS_ACTIVITY_MEMBER_JOIN_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_activity_event_enabled(
-                ctx, interaction.guild_id, domain.ACTIVITY_EVENT_MEMBER_JOIN, requested_state == "on"
-            )
-            return self.describe_settings(settings)
-        if command == SETTINGS_ACTIVITY_MEMBER_LEAVE_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_activity_event_enabled(
-                ctx, interaction.guild_id, domain.ACTIVITY_EVENT_MEMBER_LEAVE, requested_state == "on"
-            )
-            return self.describe_settings(settings)
-        if command == SETTINGS_ACTIVITY_INVITE_CREATE_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_activity_event_enabled(
-                ctx, interaction.guild_id, domain.ACTIVITY_EVENT_INVITE_CREATE, requested_state == "on"
-            )
-            return self.describe_settings(settings)
-        if command == SETTINGS_ACTIVITY_INVITE_DELETE_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_activity_event_enabled(
-                ctx, interaction.guild_id, domain.ACTIVITY_EVENT_INVITE_DELETE, requested_state == "on"
-            )
-            return self.describe_settings(settings)
-        if command == SETTINGS_ACTIVITY_INVITE_USED_COMMAND:
-            requested_state = option_string(options, "state").lower()
-            if requested_state not in {"on", "off"}:
-                raise ValueError("state must be 'on' or 'off'")
-            settings = self.set_activity_event_enabled(
-                ctx, interaction.guild_id, domain.ACTIVITY_EVENT_INVITE_USED, requested_state == "on"
-            )
+        if command == SETTINGS_ACTIVITY_MODE_COMMAND:
+            mode = option_string(options, "mode").lower()
+            settings = self.set_activity_mode(ctx, interaction.guild_id, mode)
             return self.describe_settings(settings)
         raise ValueError("unknown settings command")
 
@@ -1102,12 +973,6 @@ def settings_application_command() -> CommandDefinition:
             ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="show", description="Show current settings"),
             ApplicationCommandOption(
                 type=OPTION_TYPE_SUB_COMMAND,
-                name="mode",
-                description="Tracking mode (fixed to all)",
-                options=[_tracking_mode_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
                 name="soundboard",
                 description="Toggle soundboard kick enforcement",
                 options=[_soundboard_state_option()],
@@ -1125,30 +990,6 @@ def settings_application_command() -> CommandDefinition:
             ),
             ApplicationCommandOption(
                 type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_INVITE_SNAPSHOT_COMMAND,
-                description="Toggle invite snapshot sync",
-                options=[_soundboard_state_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_INVITE_LIVE_COMMAND,
-                description="Toggle invite live attribution",
-                options=[_soundboard_state_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_INVITE_USERINFO_COMMAND,
-                description="Toggle invite lines in userinfo",
-                options=[_soundboard_state_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_INVITE_RECONCILE_COMMAND,
-                description="Toggle invite audit reconciliation",
-                options=[_soundboard_state_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
                 name=SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND,
                 description="Set activity messages channel",
                 options=[_text_channel_option("channel", "Activity text channel")],
@@ -1160,33 +1001,9 @@ def settings_application_command() -> CommandDefinition:
             ),
             ApplicationCommandOption(
                 type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_ACTIVITY_MEMBER_JOIN_COMMAND,
-                description="Toggle member join activity messages",
-                options=[_soundboard_state_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_ACTIVITY_MEMBER_LEAVE_COMMAND,
-                description="Toggle member leave activity messages",
-                options=[_soundboard_state_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_ACTIVITY_INVITE_CREATE_COMMAND,
-                description="Toggle invite create activity messages",
-                options=[_soundboard_state_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_ACTIVITY_INVITE_DELETE_COMMAND,
-                description="Toggle invite delete activity messages",
-                options=[_soundboard_state_option()],
-            ),
-            ApplicationCommandOption(
-                type=OPTION_TYPE_SUB_COMMAND,
-                name=SETTINGS_ACTIVITY_INVITE_USED_COMMAND,
-                description="Toggle invite used activity messages",
-                options=[_soundboard_state_option()],
+                name=SETTINGS_ACTIVITY_MODE_COMMAND,
+                description="Set activity feed mode",
+                options=[_activity_mode_option()],
             ),
         ],
         default_member_permissions=PERMISSION_ADMINISTRATOR,
@@ -1248,14 +1065,16 @@ def _user_option(name: str, description: str) -> ApplicationCommandOption:
     return ApplicationCommandOption(type=OPTION_TYPE_USER, name=name, description=description, required=True)
 
 
-def _tracking_mode_option() -> ApplicationCommandOption:
+def _activity_mode_option() -> ApplicationCommandOption:
     return ApplicationCommandOption(
         type=OPTION_TYPE_STRING,
         name="mode",
-        description="Only 'all' is supported",
+        description="off, minimal, or full",
         required=True,
         choices=[
-            ApplicationCommandOptionChoice(name=domain.GUILD_TRACKING_MODE_ALL, value=domain.GUILD_TRACKING_MODE_ALL),
+            ApplicationCommandOptionChoice(name=domain.ACTIVITY_MODE_OFF, value=domain.ACTIVITY_MODE_OFF),
+            ApplicationCommandOptionChoice(name=domain.ACTIVITY_MODE_MINIMAL, value=domain.ACTIVITY_MODE_MINIMAL),
+            ApplicationCommandOptionChoice(name=domain.ACTIVITY_MODE_FULL, value=domain.ACTIVITY_MODE_FULL),
         ],
     )
 
@@ -1271,6 +1090,15 @@ def _soundboard_state_option() -> ApplicationCommandOption:
             ApplicationCommandOptionChoice(name="off", value="off"),
         ],
     )
+
+
+def activity_mode_from_event_types(values: list[str] | tuple[str, ...] | None) -> str:
+    selected = set(domain.clean_activity_event_types(values))
+    if len(selected) == 0:
+        return domain.ACTIVITY_MODE_OFF
+    if selected == set(domain.ACTIVITY_EVENT_TYPES):
+        return domain.ACTIVITY_MODE_FULL
+    return domain.ACTIVITY_MODE_MINIMAL
 
 
 def _status_state_option() -> ApplicationCommandOption:

@@ -96,26 +96,17 @@ def test_mvp_command_payloads_have_expected_shapes_and_permissions() -> None:
 
     assert _option_names(commands["settings"]["options"]) == [
         "show",
-        "mode",
         "soundboard",
         "summary-set",
         "summary-clear",
-        "invite-snapshot",
-        "invite-live",
-        "invite-userinfo",
-        "invite-reconcile",
         "activity-channel-set",
         "activity-channel-clear",
-        "activity-member-join",
-        "activity-member-leave",
-        "activity-invite-create",
-        "activity-invite-delete",
-        "activity-invite-used",
+        "activity",
     ]
-    mode_option = _nested_option_by_name(commands["settings"]["options"], "mode", "mode")
-    assert _choice_names(mode_option) == ["all"]
     soundboard_option = _nested_option_by_name(commands["settings"]["options"], "soundboard", "state")
     assert _choice_names(soundboard_option) == ["on", "off"]
+    activity_mode_option = _nested_option_by_name(commands["settings"]["options"], "activity", "mode")
+    assert _choice_names(activity_mode_option) == ["off", "minimal", "full"]
     assert _channel_types(_option_by_name(commands["connect"]["options"], "channel")) == [2, 13]
     assert commands["disconnect"].get("options", []) == []
     assert _channel_types(_option_by_name(commands["jump"]["options"], "channel")) == [2, 13]

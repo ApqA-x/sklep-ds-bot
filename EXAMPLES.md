@@ -30,8 +30,8 @@ EVENT_SIGNING_SECRET=replace-with-a-long-random-secret
 
 - Tracking is all-channel.
 - Configure summary/output destination with `/settings summary-set`.
-- Configure invite behavior with `/settings invite-snapshot`, `/settings invite-live`, `/settings invite-userinfo`, and `/settings invite-reconcile`.
-- Configure activity output with `/settings activity-channel-set` and activity event toggles.
+- Invite attribution internals are automatic and do not require command-level tuning.
+- Configure activity output with `/settings activity-channel-set` and `/settings activity mode:off|minimal|full`.
 
 ## Minimal Local Setup
 

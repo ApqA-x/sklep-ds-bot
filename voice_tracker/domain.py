@@ -36,6 +36,10 @@ ACTIVITY_EVENT_INVITE_CREATE = "invite_create"
 ACTIVITY_EVENT_INVITE_DELETE = "invite_delete"
 ACTIVITY_EVENT_INVITE_USED = "invite_used"
 
+ACTIVITY_MODE_OFF = "off"
+ACTIVITY_MODE_MINIMAL = "minimal"
+ACTIVITY_MODE_FULL = "full"
+
 ACTIVITY_EVENT_TYPES = {
     ACTIVITY_EVENT_MEMBER_JOIN,
     ACTIVITY_EVENT_MEMBER_LEAVE,
@@ -156,8 +160,6 @@ class GuildSettings:
         self.invite_reconciliation_enabled = bool(self.invite_reconciliation_enabled)
         self.activity_channel_id = _clean(self.activity_channel_id)
         self.activity_event_types = clean_activity_event_types(self.activity_event_types)
-        if len(self.activity_event_types) == 0:
-            self.activity_event_types = sorted(ACTIVITY_EVENT_TYPES)
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
 

@@ -15,8 +15,6 @@ Last updated: May 7, 2026.
 
 - `/settings show`
   - Show current bot settings.
-- `/settings mode mode:all`
-  - Show or confirm all-channel tracking mode. Only `all` is supported.
 - `/settings soundboard state:on|off`
   - Toggle only soundboard kick enforcement.
   - Does not connect/disconnect the bot from voice by itself.
@@ -25,30 +23,15 @@ Last updated: May 7, 2026.
 - `/settings summary-clear`
   - Clear configured summary channel (fallback behavior applies).
 
-- `/settings invite-snapshot state:on|off`
-  - Toggle invite snapshot sync used for attribution seeding.
-- `/settings invite-live state:on|off`
-  - Toggle live invite attribution on member joins.
-  - Turning this on auto-requires snapshot sync.
-- `/settings invite-userinfo state:on|off`
-  - Toggle invite attribution lines in `/userinfo`.
-- `/settings invite-reconcile state:on|off`
-  - Toggle periodic invite catalog reconciliation from audit logs.
-
 - `/settings activity-channel-set channel:<text>`
   - Set the text channel used by `services.activity` embeds.
 - `/settings activity-channel-clear`
   - Disable activity message destination.
-- `/settings activity-member-join state:on|off`
-  - Toggle member join activity embeds.
-- `/settings activity-member-leave state:on|off`
-  - Toggle member leave activity embeds.
-- `/settings activity-invite-create state:on|off`
-  - Toggle invite create activity embeds.
-- `/settings activity-invite-delete state:on|off`
-  - Toggle invite delete activity embeds.
-- `/settings activity-invite-used state:on|off`
-  - Toggle invite-used attribution activity embeds.
+- `/settings activity mode:off|minimal|full`
+  - Control activity feed intensity with one setting.
+  - `off`: no activity feed messages.
+  - `minimal`: member join/leave + invite-used attribution messages.
+  - `full`: all activity events (join/leave/invite create/invite delete/invite used).
 
 - `/connect channel:<voice|stage>`
   - Set managed voice channel and enable sticky voice presence.
@@ -87,7 +70,8 @@ Last updated: May 7, 2026.
 ## Notes
 
 - Tracking is all-channel; there are no public per-channel tracking commands.
-- Invite and activity settings are command-driven and persisted per guild.
+- Invite attribution internals are managed automatically and are not part of the public command surface.
+- Activity feed settings are command-driven and persisted per guild.
 - Voice connection management is independent from enforcement toggles.
 - Soundboard enforcement runs only when both conditions are true: managed voice connection is active and `/settings soundboard` is `on`.
 - Command registration owner is `services.commands`.

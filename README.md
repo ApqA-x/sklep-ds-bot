@@ -8,9 +8,9 @@ Last updated: May 7, 2026.
 
 Recent production stabilization changes include:
 
-- Migrated invite behavior toggles from env-first controls to guild settings managed by Discord commands.
+- Migrated invite behavior from env-first controls to persisted guild settings with automatic internal management.
 - Added a new `services.activity` service that consumes `activity.events` and posts member/invite lifecycle embeds.
-- Added settings controls for invite snapshot/live/userinfo/reconciliation and activity channel/event-type toggles.
+- Simplified `/settings` UX: internal invite mechanics are hidden, and activity feed is controlled by a single mode (`off|minimal|full`) plus channel selection.
 - Gateway now publishes activity events for member join/leave, invite create/delete, and invite attribution outcomes.
 
 - Removed legacy root commands `/audit`, `/bot-setting`, `/track`, and `/track-list` from the public command surface.
@@ -76,7 +76,7 @@ Important variables:
 
 `BOT_ADMIN_USER_IDS` remains for compatibility but is not the primary admin policy path.
 
-Invite and activity behavior is configured at runtime through `/settings` and persisted in `guild_settings`.
+Activity behavior is configured at runtime through `/settings` and persisted in `guild_settings`. Invite attribution internals run automatically.
 
 ## Local Development
 

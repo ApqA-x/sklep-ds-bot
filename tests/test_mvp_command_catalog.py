@@ -47,10 +47,12 @@ ADMIN_ONLY_TOP_LEVEL_COMMAND_NAMES = {
 ADMIN_ONLY_COMMAND_ROUTES = (
     ("settings", ""),
     ("settings", "show"),
-    ("settings", "mode"),
     ("settings", "soundboard"),
     ("settings", "summary-set"),
     ("settings", "summary-clear"),
+    ("settings", "activity-channel-set"),
+    ("settings", "activity-channel-clear"),
+    ("settings", "activity"),
     ("connect", ""),
     ("connect", "channel"),
     ("disconnect", ""),

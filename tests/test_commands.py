@@ -223,21 +223,12 @@ def test_can_use_voice_command_requires_admin_for_admin_only_commands() -> None:
 
     admin_only_routes = [
         (SETTINGS_COMMAND_NAME, "show"),
-        (SETTINGS_COMMAND_NAME, "mode"),
         (SETTINGS_COMMAND_NAME, "soundboard"),
         (SETTINGS_COMMAND_NAME, "summary-set"),
         (SETTINGS_COMMAND_NAME, "summary-clear"),
-        (SETTINGS_COMMAND_NAME, "invite-snapshot"),
-        (SETTINGS_COMMAND_NAME, "invite-live"),
-        (SETTINGS_COMMAND_NAME, "invite-userinfo"),
-        (SETTINGS_COMMAND_NAME, "invite-reconcile"),
         (SETTINGS_COMMAND_NAME, "activity-channel-set"),
         (SETTINGS_COMMAND_NAME, "activity-channel-clear"),
-        (SETTINGS_COMMAND_NAME, "activity-member-join"),
-        (SETTINGS_COMMAND_NAME, "activity-member-leave"),
-        (SETTINGS_COMMAND_NAME, "activity-invite-create"),
-        (SETTINGS_COMMAND_NAME, "activity-invite-delete"),
-        (SETTINGS_COMMAND_NAME, "activity-invite-used"),
+        (SETTINGS_COMMAND_NAME, "activity"),
         ("connect", ""),
         ("disconnect", ""),
         ("status", ""),
@@ -329,28 +320,19 @@ def test_voice_application_commands_have_expected_routes() -> None:
 
     assert [option.name for option in commands[SETTINGS_COMMAND_NAME].options] == [
         "show",
-        "mode",
         "soundboard",
         "summary-set",
         "summary-clear",
-        "invite-snapshot",
-        "invite-live",
-        "invite-userinfo",
-        "invite-reconcile",
         "activity-channel-set",
         "activity-channel-clear",
-        "activity-member-join",
-        "activity-member-leave",
-        "activity-invite-create",
-        "activity-invite-delete",
-        "activity-invite-used",
+        "activity",
     ]
-    mode_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "mode")
-    assert len(mode_option.options) == 1
-    assert [choice.name for choice in mode_option.options[0].choices] == [domain.GUILD_TRACKING_MODE_ALL]
     soundboard_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "soundboard")
     assert len(soundboard_option.options) == 1
     assert [choice.name for choice in soundboard_option.options[0].choices] == ["on", "off"]
+    activity_mode_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "activity")
+    assert len(activity_mode_option.options) == 1
+    assert [choice.name for choice in activity_mode_option.options[0].choices] == ["off", "minimal", "full"]
     assert [option.name for option in commands["connect"].options] == ["channel"]
     assert commands["disconnect"].options == []
     assert [option.name for option in commands[INSPECT_COMMAND_NAME].options] == ["channel"]
@@ -361,10 +343,6 @@ def test_handle_settings_commands() -> None:
     repo = FakeRepo()
     svc = Service(repo)
     interaction = interaction_with_channels("g1", PERMISSION_MANAGE_GUILD, {"t1": Channel(id="t1", guild_id="g1", type="guild_text")})
-
-    content = svc.handle_settings_command(None, interaction, "mode", [option("mode", domain.GUILD_TRACKING_MODE_NONE)])
-    assert "Tracking mode is fixed to 'all'" in content
-    assert "tracking mode: all" in content
 
     content = svc.handle_settings_command(None, interaction, "soundboard", [option("state", "on")])
     assert "soundboard enforcement: on" in content
@@ -377,21 +355,14 @@ def test_handle_settings_commands() -> None:
 
     content = svc.handle_settings_command(None, interaction, "summary-clear", [])
     assert "summary channel: not set" in content
-
-    content = svc.handle_settings_command(None, interaction, "invite-userinfo", [option("state", "off")])
-    assert "invite userinfo: off" in content
-
-    content = svc.handle_settings_command(None, interaction, "invite-live", [option("state", "on")])
-    assert "invite live attribution: on" in content
+    assert "tracking mode:" not in content
+    assert "tracked channels:" not in content
 
     content = svc.handle_settings_command(None, interaction, "activity-channel-set", [option("channel", "t1")])
     assert "activity channel: <#t1>" in content
 
-    content = svc.handle_settings_command(None, interaction, "activity-member-join", [option("state", "off")])
-    assert "member_join" not in content
-
-    content = svc.handle_settings_command(None, interaction, "activity-member-join", [option("state", "on")])
-    assert "member_join" in content
+    content = svc.handle_settings_command(None, interaction, "activity", [option("mode", "minimal")])
+    assert "activity mode: minimal" in content
 
 
 def test_fallback_summary_channel_is_described() -> None:
