@@ -84,6 +84,10 @@ def _clean_codes(values: list[str] | tuple[str, ...] | None) -> list[str]:
     return out
 
 
+def clean_text_values(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    return _clean_codes(values)
+
+
 def clean_activity_event_types(values: list[str] | tuple[str, ...] | None) -> list[str]:
     cleaned = [value.lower() for value in _clean_codes(values)]
     return sorted(value for value in cleaned if value in ACTIVITY_EVENT_TYPES)
@@ -120,6 +124,23 @@ def member_role_state_id(guild_id: str, user_id: str) -> str:
     if not guild_id or not user_id:
         return ""
     return f"{guild_id}:{user_id}"
+
+
+def member_nickname_state_id(guild_id: str, user_id: str) -> str:
+    guild_id = _clean(guild_id)
+    user_id = _clean(user_id)
+    if not guild_id or not user_id:
+        return ""
+    return f"{guild_id}:{user_id}"
+
+
+def member_nickname_change_id(guild_id: str, user_id: str, changed_at: datetime | None) -> str:
+    guild_id = _clean(guild_id)
+    user_id = _clean(user_id)
+    changed_at = ensure_utc(changed_at)
+    if not guild_id or not user_id or changed_at is None:
+        return ""
+    return f"{guild_id}:{user_id}:{datetime_to_json(changed_at)}"
 
 
 @dataclass(slots=True)
@@ -830,6 +851,102 @@ class MemberJoinState:
         }
         if self.updated_at is not None:
             data["updatedAt"] = self.updated_at
+        return data
+
+
+@dataclass(slots=True)
+class MemberNicknameChange:
+    id: str = ""
+    guild_id: str = ""
+    user_id: str = ""
+    previous_nickname: str = ""
+    nickname: str = ""
+    changed_at: datetime | None = None
+    source: str = ""
+
+    def __post_init__(self) -> None:
+        self.guild_id = _clean(self.guild_id)
+        self.user_id = _clean(self.user_id)
+        self.previous_nickname = _clean(self.previous_nickname)
+        self.nickname = _clean(self.nickname)
+        self.changed_at = ensure_utc(self.changed_at)
+        if not self.id:
+            self.id = member_nickname_change_id(self.guild_id, self.user_id, self.changed_at)
+        self.id = _clean(self.id)
+        self.source = _clean(self.source)
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "MemberNicknameChange | None":
+        if data is None:
+            return None
+        return cls(
+            id=data.get("_id") or data.get("id", ""),
+            guild_id=data.get("guildId", ""),
+            user_id=data.get("userId", ""),
+            previous_nickname=data.get("previousNickname", ""),
+            nickname=data.get("nickname", ""),
+            changed_at=parse_datetime(data.get("changedAt")),
+            source=data.get("source", ""),
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        data = {
+            "_id": self.id,
+            "guildId": self.guild_id,
+            "userId": self.user_id,
+            "previousNickname": self.previous_nickname,
+            "nickname": self.nickname,
+            "changedAt": self.changed_at,
+        }
+        if self.source != "":
+            data["source"] = self.source
+        return data
+
+
+@dataclass(slots=True)
+class MemberNicknameState:
+    id: str = ""
+    guild_id: str = ""
+    user_id: str = ""
+    nickname: str = ""
+    last_seen_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        self.guild_id = _clean(self.guild_id)
+        self.user_id = _clean(self.user_id)
+        self.nickname = _clean(self.nickname)
+        if not self.id:
+            self.id = member_nickname_state_id(self.guild_id, self.user_id)
+        self.id = _clean(self.id)
+        self.last_seen_at = ensure_utc(self.last_seen_at)
+        self.updated_at = ensure_utc(self.updated_at)
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "MemberNicknameState | None":
+        if data is None:
+            return None
+        return cls(
+            id=data.get("_id") or data.get("id", ""),
+            guild_id=data.get("guildId", ""),
+            user_id=data.get("userId", ""),
+            nickname=data.get("nickname", ""),
+            last_seen_at=parse_datetime(data.get("lastSeenAt")),
+            updated_at=parse_datetime(data.get("updatedAt")),
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        data = {
+            "_id": self.id,
+            "guildId": self.guild_id,
+            "userId": self.user_id,
+            "nickname": self.nickname,
+        }
+        optional = {
+            "lastSeenAt": self.last_seen_at,
+            "updatedAt": self.updated_at,
+        }
+        data.update({key: value for key, value in optional.items() if value is not None})
         return data
 
 

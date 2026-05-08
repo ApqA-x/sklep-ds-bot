@@ -119,6 +119,8 @@ class _FakeDb:
             "member_join_attributions": _Collection(),
             "member_join_state": _Collection(),
             "member_role_state": _Collection(),
+            "member_nickname_state": _Collection(),
+            "member_nickname_history": _Collection(),
         }
 
     def __getitem__(self, name: str) -> _Collection:
@@ -312,7 +314,14 @@ def test_get_member_profile_and_alias_return_aggregated_voice_totals() -> None:
 
     profile = repo.get_member_profile(None, "g1", "u1")
 
-    assert profile == {"user_id": "u1", "user_name": "NewName", "total_for": 180_000, "roles": []}
+    assert profile == {
+        "user_id": "u1",
+        "user_name": "NewName",
+        "total_for": 180_000,
+        "roles": [],
+        "nickname": "",
+        "nickname_history": [],
+    }
     assert repo.get_user_voice_summary(None, "g1", "u1") == profile
     assert repo.get_member_profile(None, "g1", "missing") is None
 
@@ -372,7 +381,14 @@ def test_get_member_profile_keeps_empty_user_name_when_repository_has_no_name() 
 
     profile = repo.get_member_profile(None, "g1", "u1")
 
-    assert profile == {"user_id": "u1", "user_name": "", "total_for": 180_000, "roles": []}
+    assert profile == {
+        "user_id": "u1",
+        "user_name": "",
+        "total_for": 180_000,
+        "roles": [],
+        "nickname": "",
+        "nickname_history": [],
+    }
     assert repo.get_user_voice_summary(None, "g1", "u1") == profile
 
 
@@ -448,6 +464,68 @@ def test_get_member_profile_reads_persisted_roles_without_voice_activity() -> No
     assert profile["roles"] == ["role-a", "role-b"]
     assert profile["total_for"] == 0
 
+
+def test_get_member_profile_reads_persisted_nickname_history_without_voice_activity() -> None:
+    repo = Repository(_FakeDb())
+    base = datetime(2026, 4, 5, 18, 0, tzinfo=UTC)
+
+    repo.save_member_nickname_snapshot(None, "g1", "u8", "Current Nick", base + timedelta(minutes=2))
+    repo.append_member_nickname_change(
+        None,
+        domain.MemberNicknameChange(
+            guild_id="g1",
+            user_id="u8",
+            previous_nickname="Older Nick",
+            nickname="Current Nick",
+            changed_at=base + timedelta(minutes=1),
+            source="member_update",
+        ),
+    )
+    repo.append_member_nickname_change(
+        None,
+        domain.MemberNicknameChange(
+            guild_id="g1",
+            user_id="u8",
+            previous_nickname="Oldest Nick",
+            nickname="Older Nick",
+            changed_at=base,
+            source="member_update",
+        ),
+    )
+
+    profile = repo.get_member_profile(None, "g1", "u8")
+
+    assert profile is not None
+    assert profile["user_id"] == "u8"
+    assert profile["nickname"] == "Current Nick"
+    assert profile["nickname_history"] == ["Older Nick", "Oldest Nick"]
+    assert profile["total_for"] == 0
+
+
+def test_record_member_nickname_appends_history_only_when_nickname_changes() -> None:
+    repo = Repository(_FakeDb())
+    base = datetime(2026, 4, 5, 18, 0, tzinfo=UTC)
+
+    _, first_change = repo.record_member_nickname(None, "g1", "u9", "First Nick", base, source="guild_sync")
+    _, second_change = repo.record_member_nickname(None, "g1", "u9", "First Nick", base + timedelta(minutes=1), source="guild_sync")
+    state, third_change = repo.record_member_nickname(
+        None,
+        "g1",
+        "u9",
+        "Second Nick",
+        base + timedelta(minutes=2),
+        source="member_update",
+    )
+
+    assert first_change is None
+    assert second_change is None
+    assert state is not None
+    assert state.nickname == "Second Nick"
+    assert third_change is not None
+    assert third_change.previous_nickname == "First Nick"
+    assert len(repo.member_nickname_history.documents) == 1
+
+
 def test_ensure_indexes_adds_repository_read_model_indexes() -> None:
     db = _FakeDb()
     repo = Repository(db)
@@ -460,3 +538,8 @@ def test_ensure_indexes_adds_repository_read_model_indexes() -> None:
     member_role_indexes = [call["keys"] for call in db.collections["member_role_state"].index_calls]
     assert [("guildId", 1), ("userId", 1)] in member_role_indexes
     assert [("guildId", 1), ("updatedAt", -1)] in member_role_indexes
+    member_nickname_state_indexes = [call["keys"] for call in db.collections["member_nickname_state"].index_calls]
+    assert [("guildId", 1), ("userId", 1)] in member_nickname_state_indexes
+    assert [("guildId", 1), ("updatedAt", -1)] in member_nickname_state_indexes
+    member_nickname_history_indexes = [call["keys"] for call in db.collections["member_nickname_history"].index_calls]
+    assert [("guildId", 1), ("userId", 1), ("changedAt", -1)] in member_nickname_history_indexes

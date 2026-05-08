@@ -110,6 +110,56 @@ def test_save_member_role_snapshot_persists_normalized_ids() -> None:
     assert calls == [("123", "42", ["2"])]
 
 
+def test_sync_member_nickname_state_records_current_nickname() -> None:
+    calls: list[tuple[str, str, str, str]] = []
+
+    def record_member_nickname(
+        _ctx,
+        guild_id: str,
+        user_id: str,
+        nickname: str,
+        _seen_at,
+        *,
+        source: str = "",
+        previous_nickname: str | None = None,
+    ):
+        assert previous_nickname is None
+        calls.append((guild_id, user_id, nickname, source))
+
+    repo = SimpleNamespace(record_member_nickname=record_member_nickname)
+    member = SimpleNamespace(id="42", guild=SimpleNamespace(id="123"), nick="Raid Nick", bot=False)
+
+    gateway._sync_member_nickname_state(repo, member, source="member_join")
+
+    assert calls == [("123", "42", "Raid Nick", "member_join")]
+
+
+def test_record_member_nickname_change_persists_only_real_changes() -> None:
+    calls: list[tuple[str, str, str, str]] = []
+
+    def record_member_nickname(
+        _ctx,
+        guild_id: str,
+        user_id: str,
+        nickname: str,
+        _seen_at,
+        *,
+        source: str = "",
+        previous_nickname: str | None = None,
+    ):
+        assert previous_nickname == "Old Nick"
+        calls.append((guild_id, user_id, nickname, source))
+
+    repo = SimpleNamespace(record_member_nickname=record_member_nickname)
+    before = SimpleNamespace(id="42", guild=SimpleNamespace(id="123"), nick="Old Nick")
+    after = SimpleNamespace(id="42", guild=SimpleNamespace(id="123"), nick="New Nick", bot=False)
+
+    gateway._record_member_nickname_change(repo, before, after, source="member_update")
+    gateway._record_member_nickname_change(repo, after, after, source="member_update")
+
+    assert calls == [("123", "42", "New Nick", "member_update")]
+
+
 async def test_restore_member_roles_prunes_missing_roles_and_assigns_safe_roles(monkeypatch) -> None:
     restored: list[tuple[str, str, list[str]]] = []
 
@@ -344,6 +394,28 @@ async def test_sync_current_guild_member_roles_skips_pending_restore_members(mon
     await gateway._sync_current_guild_member_roles(client, _Repo(), "123")
 
     assert synced == ["99"]
+
+
+async def test_sync_current_guild_member_nicknames_skips_bots(monkeypatch) -> None:
+    synced: list[str] = []
+
+    def _sync_member_nickname_state(_repo, member, *, source: str = "sync"):
+        synced.append(f"{member.id}:{source}")
+
+    guild = SimpleNamespace(
+        id=123,
+        members=[
+            SimpleNamespace(id="42", bot=False, guild=SimpleNamespace(id="123"), nick="One"),
+            SimpleNamespace(id="99", bot=True, guild=SimpleNamespace(id="123"), nick="Two"),
+        ],
+    )
+    client = SimpleNamespace(get_guild=lambda guild_id: guild if int(guild_id) == 123 else None, guilds=[guild])
+
+    monkeypatch.setattr(gateway, "_sync_member_nickname_state", _sync_member_nickname_state)
+
+    await gateway._sync_current_guild_member_nicknames(client, object(), "123")
+
+    assert synced == ["42:guild_sync"]
 
 
 async def _boot_gateway(monkeypatch, fake_repo: FakeRepo) -> object:

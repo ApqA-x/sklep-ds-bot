@@ -388,6 +388,10 @@ def _member_role_ids(member: discord.Member) -> list[str]:
     return _normalize_ids(role_ids)
 
 
+def _member_nickname(member: object | None) -> str:
+    return str(getattr(member, "nick", "") or "").strip()
+
+
 def _save_member_role_snapshot(repo: Repository, member: discord.Member) -> None:
     saver = getattr(repo, "save_member_role_snapshot", None)
     if not callable(saver):
@@ -408,6 +412,58 @@ def _sync_member_role_state(repo: Repository, member: discord.Member) -> None:
     if guild_id == "" or user_id == "" or bool(getattr(member, "bot", False)):
         return
     saver(None, guild_id, user_id, _member_role_ids(member), _utc_now(), pending_restore=False)
+
+
+def _sync_member_nickname_state(repo: Repository, member: discord.Member, *, source: str = "sync") -> None:
+    guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
+    user_id = str(getattr(member, "id", "") or "")
+    if guild_id == "" or user_id == "" or bool(getattr(member, "bot", False)):
+        return
+    recorder = getattr(repo, "record_member_nickname", None)
+    if callable(recorder):
+        recorder(None, guild_id, user_id, _member_nickname(member), _utc_now(), source=source)
+        return
+    saver = getattr(repo, "save_member_nickname_snapshot", None)
+    if callable(saver):
+        saver(None, guild_id, user_id, _member_nickname(member), _utc_now())
+
+
+def _record_member_nickname_change(
+    repo: Repository,
+    before: discord.Member,
+    after: discord.Member,
+    *,
+    source: str,
+) -> None:
+    guild_id = str(getattr(getattr(after, "guild", None), "id", "") or getattr(getattr(before, "guild", None), "id", "") or "")
+    user_id = str(getattr(after, "id", "") or getattr(before, "id", "") or "")
+    if guild_id == "" or user_id == "" or bool(getattr(after, "bot", False)):
+        return
+    before_nickname = _member_nickname(before)
+    after_nickname = _member_nickname(after)
+    if before_nickname == after_nickname:
+        return
+    recorder = getattr(repo, "record_member_nickname", None)
+    if callable(recorder):
+        recorder(None, guild_id, user_id, after_nickname, _utc_now(), source=source, previous_nickname=before_nickname)
+        return
+    appender = getattr(repo, "append_member_nickname_change", None)
+    saver = getattr(repo, "save_member_nickname_snapshot", None)
+    now = _utc_now()
+    if callable(appender):
+        appender(
+            None,
+            domain.MemberNicknameChange(
+                guild_id=guild_id,
+                user_id=user_id,
+                previous_nickname=before_nickname,
+                nickname=after_nickname,
+                changed_at=now,
+                source=source,
+            ),
+        )
+    if callable(saver):
+        saver(None, guild_id, user_id, after_nickname, now)
 
 
 async def _role_lookup_map(guild: discord.Guild) -> tuple[dict[str, discord.Role], bool]:
@@ -595,6 +651,20 @@ async def _sync_current_guild_member_roles(client: discord.Client, repo: Reposit
         except Exception:
             member_id = str(getattr(member, "id", "") or "")
             logger.exception("member role sync failed guild=%s member=%s", guild_id, member_id)
+
+
+async def _sync_current_guild_member_nicknames(client: discord.Client, repo: Repository, guild_id: str) -> None:
+    guild = _guild_from_client(client, guild_id)
+    if guild is None:
+        return
+    for member in list(getattr(guild, "members", []) or []):
+        if bool(getattr(member, "bot", False)):
+            continue
+        try:
+            _sync_member_nickname_state(repo, member, source="guild_sync")
+        except Exception:
+            member_id = str(getattr(member, "id", "") or "")
+            logger.exception("member nickname sync failed guild=%s member=%s", guild_id, member_id)
 
 
 def _managed_voice_channel_id(settings: domain.GuildSettings | None) -> str:
@@ -1449,6 +1519,7 @@ async def main() -> None:
         await voice_controller.reconcile()
         await _reconcile_member_roles(client, repo, cfg.discord_guild_id)
         await _sync_current_guild_member_roles(client, repo, cfg.discord_guild_id)
+        await _sync_current_guild_member_nicknames(client, repo, cfg.discord_guild_id)
 
     @client.event
     async def on_member_join(member: discord.Member) -> None:
@@ -1483,6 +1554,10 @@ async def main() -> None:
                 _sync_member_role_state(repo, member)
             except Exception:
                 logger.exception("role state sync failed guild=%s member=%s", member.guild.id, member.id)
+        try:
+            _sync_member_nickname_state(repo, member, source="member_join")
+        except Exception:
+            logger.exception("member nickname sync failed guild=%s member=%s", member.guild.id, member.id)
         role_id = _autorole_id_for_guild(repo, str(member.guild.id))
         if role_id == "":
             return
@@ -1524,6 +1599,21 @@ async def main() -> None:
             _save_member_role_snapshot(repo, member)
         except Exception:
             logger.exception("role snapshot failed guild=%s member=%s", member.guild.id, member.id)
+        try:
+            _sync_member_nickname_state(repo, member, source="member_remove")
+        except Exception:
+            logger.exception("member nickname snapshot failed guild=%s member=%s", member.guild.id, member.id)
+
+    @client.event
+    async def on_member_update(before: discord.Member, after: discord.Member) -> None:
+        if str(getattr(getattr(after, "guild", None), "id", "") or "") != cfg.discord_guild_id:
+            return
+        if getattr(after, "bot", False):
+            return
+        try:
+            _record_member_nickname_change(repo, before, after, source="member_update")
+        except Exception:
+            logger.exception("member nickname update failed guild=%s member=%s", after.guild.id, after.id)
 
     @client.event
     async def on_invite_create(invite: object) -> None:
@@ -1733,6 +1823,7 @@ async def main() -> None:
             try:
                 await _reconcile_member_roles(client, repo, cfg.discord_guild_id)
                 await _sync_current_guild_member_roles(client, repo, cfg.discord_guild_id)
+                await _sync_current_guild_member_nicknames(client, repo, cfg.discord_guild_id)
             except Exception:
                 logger.exception("member role reconciliation iteration failed guild=%s", cfg.discord_guild_id)
 

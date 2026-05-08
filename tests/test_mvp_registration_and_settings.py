@@ -46,6 +46,8 @@ class _FakeDb:
             "member_join_attributions": _FakeCollection(),
             "member_join_state": _FakeCollection(),
             "member_role_state": _FakeCollection(),
+            "member_nickname_state": _FakeCollection(),
+            "member_nickname_history": _FakeCollection(),
         }
 
     def __getitem__(self, name: str) -> _FakeCollection:

@@ -95,6 +95,8 @@ class _FakeDb:
             "member_join_attributions": _Collection(),
             "member_join_state": _Collection(),
             "member_role_state": _Collection(),
+            "member_nickname_state": _Collection(),
+            "member_nickname_history": _Collection(),
         }
 
     def __getitem__(self, name: str) -> _Collection:
@@ -279,6 +281,8 @@ def test_get_member_profile_returns_persisted_invite_attribution_from_join_state
         "user_name": "",
         "total_for": 0,
         "roles": [],
+        "nickname": "",
+        "nickname_history": [],
         "latest_join_attribution_id": attribution.id,
         "joined_at": datetime(2026, 5, 6, 16, 0, tzinfo=UTC),
         "invite_code": "welcome",
