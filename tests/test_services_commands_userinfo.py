@@ -93,13 +93,13 @@ async def test_dispatch_userinfo_command_renders_exact_invite_attribution_from_p
     assert "User ID: `669151106814967819`" in embed.description
     assert "Username: apqa_ (ApqA)" in embed.description
     assert "Status: 🟢 Online" in embed.description
+    assert "Nickname: ApqA Nick" in embed.description
     assert "Total voice time: 2:30:00" in embed.description
     assert "Invite used: https://discord.gg/abc123" in embed.description
     assert "Invite created by: SomeUser (123456789012345678)" in embed.description
     assert "Invite attribution: exact" in embed.description
     assert "Joined at: <t:" in embed.description
     assert "Registered at: <t:" in embed.description
-    assert "Nickname:" not in embed.description
     assert "Avatar:" not in embed.description
     assert "Banner:" not in embed.description
     assert embed.thumbnail.url == "https://cdn.test/avatar.png"
@@ -221,6 +221,8 @@ async def test_dispatch_userinfo_command_shows_stored_roles_for_user_not_in_guil
     def _load_profile(_ctx, _guild_id: str, _user_id: str):
         return SimpleNamespace(
             total_for=timedelta(minutes=5),
+            nickname="Raid Nick",
+            nickname_history=["Previous Nick", "Older Nick"],
             roles=["7", "999999"],
             attribution_status="unknown",
         )
@@ -242,6 +244,8 @@ async def test_dispatch_userinfo_command_shows_stored_roles_for_user_not_in_guil
 
     assert embed.description is not None
     assert "Status: ⚫ Not in server" in embed.description
+    assert "Nickname (stored): Raid Nick" in embed.description
+    assert "Past nicknames (stored): Previous Nick, Older Nick" in embed.description
     assert "Roles (stored): Raid Team" in embed.description
 
 

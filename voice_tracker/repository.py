@@ -13,6 +13,8 @@ from .domain import (
     InviteCatalogEntry,
     MemberJoinAttribution,
     MemberJoinState,
+    MemberNicknameChange,
+    MemberNicknameState,
     MemberRoleState,
     ParticipantInterval,
     Session,
@@ -72,6 +74,8 @@ class Repository:
         self.member_join_attributions = _collection(db, "member_join_attributions")
         self.member_join_state = _collection(db, "member_join_state")
         self.member_role_state = _collection(db, "member_role_state")
+        self.member_nickname_state = _collection(db, "member_nickname_state")
+        self.member_nickname_history = _collection(db, "member_nickname_history")
 
     def ensure_indexes(self, _ctx: Any = None) -> None:
         self.sessions.create_index(
@@ -114,6 +118,13 @@ class Repository:
         self.member_role_state.create_index([("guildId", 1), ("updatedAt", -1)])
         self.member_role_state.create_index([("guildId", 1), ("lastSeenAt", -1)])
         self.member_role_state.create_index([("guildId", 1), ("pendingRestore", 1), ("updatedAt", -1)])
+
+        self.member_nickname_state.create_index([("guildId", 1), ("userId", 1)], unique=True)
+        self.member_nickname_state.create_index([("guildId", 1), ("updatedAt", -1)])
+        self.member_nickname_state.create_index([("guildId", 1), ("lastSeenAt", -1)])
+
+        self.member_nickname_history.create_index([("guildId", 1), ("userId", 1), ("changedAt", -1)])
+        self.member_nickname_history.create_index([("guildId", 1), ("changedAt", -1)])
 
     def claim_message(self, _ctx: Any, subject: str, message_id: str, issuer: str, issued_at: int) -> bool:
         try:
@@ -484,6 +495,125 @@ class Repository:
             cursor = cursor.limit(max(1, int(limit)))
         return [item for item in (MemberRoleState.from_mongo(doc) for doc in _cursor_all(cursor)) if item is not None]
 
+    def get_member_nickname_state(self, _ctx: Any, guild_id: str, user_id: str) -> MemberNicknameState | None:
+        guild_id = str(guild_id or "").strip()
+        user_id = str(user_id or "").strip()
+        if guild_id == "" or user_id == "":
+            return None
+        return MemberNicknameState.from_mongo(self.member_nickname_state.find_one({"_id": f"{guild_id}:{user_id}"}))
+
+    def upsert_member_nickname_state(self, _ctx: Any, state: MemberNicknameState | None) -> MemberNicknameState | None:
+        if state is None or state.id == "" or state.guild_id == "" or state.user_id == "":
+            return None
+        if state.updated_at is None:
+            state.updated_at = _utc_now()
+        payload = state.to_mongo()
+        self.member_nickname_state.update_one(
+            {"_id": state.id},
+            {
+                "$set": {
+                    "guildId": payload["guildId"],
+                    "userId": payload["userId"],
+                    "nickname": payload["nickname"],
+                    "updatedAt": payload["updatedAt"],
+                    "lastSeenAt": payload.get("lastSeenAt"),
+                }
+            },
+            upsert=True,
+        )
+        return state
+
+    def save_member_nickname_snapshot(
+        self,
+        _ctx: Any,
+        guild_id: str,
+        user_id: str,
+        nickname: str,
+        seen_at: datetime | None = None,
+    ) -> MemberNicknameState | None:
+        return self.upsert_member_nickname_state(
+            None,
+            MemberNicknameState(
+                guild_id=guild_id,
+                user_id=user_id,
+                nickname=str(nickname or "").strip(),
+                last_seen_at=seen_at or _utc_now(),
+                updated_at=_utc_now(),
+            ),
+        )
+
+    def append_member_nickname_change(self, _ctx: Any, change: MemberNicknameChange | None) -> bool:
+        if change is None or change.id == "" or change.guild_id == "" or change.user_id == "":
+            return False
+        if change.changed_at is None:
+            return False
+        try:
+            self.member_nickname_history.insert_one(change.to_mongo())
+        except Exception as err:
+            if _is_duplicate_key_error(err):
+                return False
+            raise
+        return True
+
+    def list_member_nickname_history(
+        self,
+        _ctx: Any,
+        guild_id: str,
+        user_id: str,
+        limit: int = 0,
+    ) -> list[MemberNicknameChange]:
+        guild_id = str(guild_id or "").strip()
+        user_id = str(user_id or "").strip()
+        if guild_id == "" or user_id == "":
+            return []
+        rows = [
+            item
+            for item in (
+                MemberNicknameChange.from_mongo(doc)
+                for doc in _cursor_all(self.member_nickname_history.find({"guildId": guild_id, "userId": user_id}))
+            )
+            if item is not None
+        ]
+        rows.sort(key=lambda item: _time_or_min(item.changed_at), reverse=True)
+        if int(limit or 0) > 0:
+            rows = rows[: max(1, int(limit))]
+        return rows
+
+    def record_member_nickname(
+        self,
+        _ctx: Any,
+        guild_id: str,
+        user_id: str,
+        nickname: str,
+        seen_at: datetime | None = None,
+        *,
+        source: str = "",
+        previous_nickname: str | None = None,
+    ) -> tuple[MemberNicknameState | None, MemberNicknameChange | None]:
+        guild_id = str(guild_id or "").strip()
+        user_id = str(user_id or "").strip()
+        if guild_id == "" or user_id == "":
+            return None, None
+        now = seen_at or _utc_now()
+        cleaned_nickname = str(nickname or "").strip()
+        current = self.get_member_nickname_state(None, guild_id, user_id)
+        change: MemberNicknameChange | None = None
+        prior_nickname = str(getattr(current, "nickname", "") or "").strip()
+        if current is None and previous_nickname is not None:
+            prior_nickname = str(previous_nickname or "").strip()
+        if prior_nickname != cleaned_nickname and (current is not None or previous_nickname is not None):
+            change = MemberNicknameChange(
+                guild_id=guild_id,
+                user_id=user_id,
+                previous_nickname=prior_nickname,
+                nickname=cleaned_nickname,
+                changed_at=now,
+                source=source,
+            )
+            self.append_member_nickname_change(None, change)
+        state = self.save_member_nickname_snapshot(None, guild_id, user_id, cleaned_nickname, now)
+        return state, change
+
     def list_closed_sessions_pending_notification(self, _ctx: Any) -> list[Session]:
         cursor = self.sessions.find(
             {
@@ -743,6 +873,8 @@ class Repository:
 
         join_state = self.get_member_join_state(None, guild_id, user_id)
         role_state = self.get_member_role_state(None, guild_id, user_id)
+        nickname_state = self.get_member_nickname_state(None, guild_id, user_id)
+        nickname_history = self.list_member_nickname_history(None, guild_id, user_id, 20)
 
         participants = [
             p
@@ -752,7 +884,7 @@ class Repository:
             )
             if p is not None
         ]
-        if len(participants) == 0 and join_state is None and role_state is None:
+        if len(participants) == 0 and join_state is None and role_state is None and nickname_state is None and len(nickname_history) == 0:
             return None
         total_for = 0
         user_name = ""
@@ -782,6 +914,8 @@ class Repository:
             "user_name": user_name,
             "total_for": total_for,
             "roles": list(getattr(role_state, "role_ids", []) or []),
+            "nickname": str(getattr(nickname_state, "nickname", "") or ""),
+            "nickname_history": self._nickname_history(getattr(nickname_state, "nickname", ""), nickname_history),
         }
         if role_state is not None:
             profile.update(
@@ -790,6 +924,8 @@ class Repository:
                     "roles_last_restored_at": role_state.last_restored_at,
                 }
             )
+        if nickname_state is not None:
+            profile.update({"nickname_last_seen_at": nickname_state.last_seen_at})
         if join_state is not None:
             profile.update(
                 {
@@ -829,6 +965,23 @@ class Repository:
         if end is None and session is not None and session.ended_at is not None:
             end = session.ended_at
         return _millis_between(participant.joined_at, end)
+
+    def _nickname_history(
+        self,
+        current_nickname: str,
+        changes: list[MemberNicknameChange],
+    ) -> list[str]:
+        seen: set[str] = set()
+        if current_nickname != "":
+            seen.add(current_nickname)
+        history: list[str] = []
+        for change in changes:
+            nickname = str(getattr(change, "previous_nickname", "") or "").strip()
+            if nickname == "" or nickname in seen:
+                continue
+            seen.add(nickname)
+            history.append(nickname)
+        return history
 
     def _merge_invite_catalog_entry(
         self,

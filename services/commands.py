@@ -518,6 +518,7 @@ async def _dispatch_userinfo_command(
         f"User ID: `{user_id}`",
         f"Username: {username}",
         f"Status: {status_label}",
+        *_userinfo_nickname_lines(profile, member),
         await _userinfo_roles_line(profile, member, guild),
         f"Total voice time: {total_voice_time}",
         *_userinfo_invite_lines(profile, invite_reads_enabled=invite_reads_enabled),
@@ -711,6 +712,21 @@ async def _userinfo_roles(profile: object | None, member: discord.Member | None,
     return safe_roles
 
 
+def _userinfo_nickname_lines(profile: object | None, member: discord.Member | None) -> list[str]:
+    current_nickname = _sanitize_public_text(str(getattr(member, "nick", "") or "")) if member is not None else ""
+    if current_nickname == "":
+        current_nickname = _userinfo_profile_text(profile, "nickname", "current_nickname", "currentNickname")
+    history = _userinfo_profile_list(profile, "nickname_history", "nicknameHistory")
+    lines: list[str] = []
+    if current_nickname != "":
+        label = "Nickname" if member is not None else "Nickname (stored)"
+        lines.append(f"{label}: {current_nickname}")
+    if len(history) > 0:
+        label = "Past nicknames" if member is not None else "Past nicknames (stored)"
+        lines.append(f"{label}: {', '.join(history[:10])}")
+    return lines
+
+
 def _userinfo_invite_lines(profile: object | None, *, invite_reads_enabled: bool = True) -> list[str]:
     if not invite_reads_enabled:
         return ["Invite attribution: disabled by configuration"]
@@ -763,6 +779,31 @@ def _userinfo_profile_text(profile: object | None, *names: str) -> str:
         if cleaned:
             return cleaned
     return ""
+
+
+def _userinfo_profile_list(profile: object | None, *names: str) -> list[str]:
+    if profile is None:
+        return []
+    value = None
+    if isinstance(profile, dict):
+        for name in names:
+            value = profile.get(name)
+            if value is not None:
+                break
+    else:
+        for name in names:
+            value = getattr(profile, name, None)
+            if value is not None:
+                break
+    if value is None:
+        return []
+    safe_values: list[str] = []
+    for item in list(value or []):
+        cleaned = _sanitize_public_text(str(item))
+        if cleaned == "" or cleaned in safe_values:
+            continue
+        safe_values.append(cleaned)
+    return safe_values
 
 
 def _option_string(options: list[ApplicationCommandInteractionDataOption], name: str) -> str:

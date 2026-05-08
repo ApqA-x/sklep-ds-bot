@@ -257,6 +257,8 @@ def test_member_profile_from_row_reads_invite_attribution_fields() -> None:
             "userName": "Example User",
             "totalFor": 90_000,
             "roles": ["role-a"],
+            "nickname": "Current Nick",
+            "nicknameHistory": ["Older Nick"],
             "inviteUrl": "https://discord.gg/abc123",
             "inviterUserId": "555",
             "inviterName": "Invite Builder",
@@ -270,6 +272,8 @@ def test_member_profile_from_row_reads_invite_attribution_fields() -> None:
     assert profile.user_name == "Example User"
     assert profile.total_for == timedelta(seconds=90)
     assert profile.roles == ["role-a"]
+    assert profile.nickname == "Current Nick"
+    assert profile.nickname_history == ["Older Nick"]
     assert profile.invite_url == "https://discord.gg/abc123"
     assert profile.inviter_user_id == "555"
     assert profile.inviter_name == "Invite Builder"
@@ -285,6 +289,8 @@ def test_handle_userinfo_command_renders_persisted_invite_attribution() -> None:
                 "userId": "u1",
                 "userName": "Example User",
                 "totalFor": 60_000,
+                "nickname": "Current Nick",
+                "nicknameHistory": ["Older Nick"],
                 "inviteUrl": "https://discord.gg/abc123",
                 "inviterUserId": "555",
                 "inviterName": "@everyone <@123> Invite Builder",
@@ -298,6 +304,8 @@ def test_handle_userinfo_command_renders_persisted_invite_attribution() -> None:
 
     assert "User: Example User" in result
     assert "Total voice time: 0:01:00" in result
+    assert "Nickname: Current Nick" in result
+    assert "Past nicknames: Older Nick" in result
     assert "Invite used: https://discord.gg/abc123" in result
     assert "Invite created by: Invite Builder (555)" in result
     assert "Invite attribution: exact" in result

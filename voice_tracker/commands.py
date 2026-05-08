@@ -186,6 +186,8 @@ class MemberProfileView:
     user_name: str
     total_for: timedelta
     roles: list[str] = field(default_factory=list)
+    nickname: str = ""
+    nickname_history: list[str] = field(default_factory=list)
     invite_code: str = ""
     invite_url: str = ""
     inviter_user_id: str = ""
@@ -782,6 +784,7 @@ class Service:
             ]
             return "\n".join(lines)
         lines = [f"User: {profile.user_name or profile.user_id}", f"Total voice time: {format_duration(profile.total_for)}"]
+        lines.extend(_member_profile_nickname_lines(profile))
         if len(profile.roles) > 0:
             lines.append(f"Roles: {_truncate_list(profile.roles, 10)}")
         lines.extend(_member_profile_invite_lines(profile))
@@ -1490,6 +1493,23 @@ def _member_profile_invite_lines(profile: MemberProfileView | None) -> list[str]
     ]
 
 
+def _member_profile_nickname_lines(profile: MemberProfileView | None) -> list[str]:
+    if profile is None:
+        return []
+    lines: list[str] = []
+    nickname = _sanitize_public_text(profile.nickname)
+    if nickname != "":
+        lines.append(f"Nickname: {nickname}")
+    history = [
+        cleaned
+        for cleaned in (_sanitize_public_text(value) for value in list(profile.nickname_history or []))
+        if cleaned != ""
+    ]
+    if len(history) > 0:
+        lines.append(f"Past nicknames: {_truncate_list(history, 10)}")
+    return lines
+
+
 def _member_profile_attribution_status(profile: MemberProfileView | None) -> str:
     status = str(getattr(profile, "attribution_status", "") or "").strip().lower()
     if status in {"exact", "ambiguous", "unknown"}:
@@ -1545,6 +1565,12 @@ def _member_profile_from_row(row: Any, default_user_id: str) -> MemberProfileVie
             str(role).strip()
             for role in (_member_profile_value(row, "roles", "role_names", "roleNames") or [])
             if str(role).strip()
+        ],
+        nickname=_member_profile_string(row, "nickname", "current_nickname", "currentNickname"),
+        nickname_history=[
+            str(value).strip()
+            for value in (_member_profile_value(row, "nickname_history", "nicknameHistory") or [])
+            if str(value).strip()
         ],
         invite_code=_member_profile_string(row, "invite_code", "inviteCode"),
         invite_url=_member_profile_string(row, "invite_url", "inviteUrl"),
