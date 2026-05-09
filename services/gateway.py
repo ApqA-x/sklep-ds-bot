@@ -419,13 +419,23 @@ def _sync_member_nickname_state(repo: Repository, member: discord.Member, *, sou
     user_id = str(getattr(member, "id", "") or "")
     if guild_id == "" or user_id == "" or bool(getattr(member, "bot", False)):
         return
+    nickname = _member_nickname(member)
+    if nickname == "" and source in {"member_join", "member_remove"}:
+        getter = getattr(repo, "get_member_nickname_state", None)
+        if callable(getter):
+            current = getter(None, guild_id, user_id)
+            stored_nickname = str(getattr(current, "nickname", "") or "").strip()
+            if stored_nickname != "":
+                nickname = stored_nickname
+        if nickname == "":
+            return
     recorder = getattr(repo, "record_member_nickname", None)
     if callable(recorder):
-        recorder(None, guild_id, user_id, _member_nickname(member), _utc_now(), source=source)
+        recorder(None, guild_id, user_id, nickname, _utc_now(), source=source)
         return
     saver = getattr(repo, "save_member_nickname_snapshot", None)
     if callable(saver):
-        saver(None, guild_id, user_id, _member_nickname(member), _utc_now())
+        saver(None, guild_id, user_id, nickname, _utc_now())
 
 
 def _record_member_nickname_change(
