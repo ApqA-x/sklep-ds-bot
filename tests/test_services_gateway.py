@@ -134,6 +134,101 @@ def test_sync_member_nickname_state_records_current_nickname() -> None:
     assert calls == [("123", "42", "Raid Nick", "member_join")]
 
 
+def test_sync_member_nickname_state_preserves_stored_nickname_for_member_remove() -> None:
+    calls: list[tuple[str, str, str, str]] = []
+
+    def get_member_nickname_state(_ctx, guild_id: str, user_id: str):
+        assert guild_id == "123"
+        assert user_id == "42"
+        return SimpleNamespace(nickname="Raid Nick")
+
+    def record_member_nickname(
+        _ctx,
+        guild_id: str,
+        user_id: str,
+        nickname: str,
+        _seen_at,
+        *,
+        source: str = "",
+        previous_nickname: str | None = None,
+    ):
+        assert previous_nickname is None
+        calls.append((guild_id, user_id, nickname, source))
+
+    repo = SimpleNamespace(
+        get_member_nickname_state=get_member_nickname_state,
+        record_member_nickname=record_member_nickname,
+    )
+    member = SimpleNamespace(id="42", guild=SimpleNamespace(id="123"), nick="", bot=False)
+
+    gateway._sync_member_nickname_state(repo, member, source="member_remove")
+
+    assert calls == [("123", "42", "Raid Nick", "member_remove")]
+
+
+def test_sync_member_nickname_state_preserves_stored_nickname_for_member_join() -> None:
+    calls: list[tuple[str, str, str, str]] = []
+
+    def get_member_nickname_state(_ctx, guild_id: str, user_id: str):
+        assert guild_id == "123"
+        assert user_id == "42"
+        return SimpleNamespace(nickname="Raid Nick")
+
+    def record_member_nickname(
+        _ctx,
+        guild_id: str,
+        user_id: str,
+        nickname: str,
+        _seen_at,
+        *,
+        source: str = "",
+        previous_nickname: str | None = None,
+    ):
+        assert previous_nickname is None
+        calls.append((guild_id, user_id, nickname, source))
+
+    repo = SimpleNamespace(
+        get_member_nickname_state=get_member_nickname_state,
+        record_member_nickname=record_member_nickname,
+    )
+    member = SimpleNamespace(id="42", guild=SimpleNamespace(id="123"), nick="", bot=False)
+
+    gateway._sync_member_nickname_state(repo, member, source="member_join")
+
+    assert calls == [("123", "42", "Raid Nick", "member_join")]
+
+
+def test_sync_member_nickname_state_skips_empty_member_remove_without_stored_nickname() -> None:
+    calls: list[tuple[str, str, str, str]] = []
+
+    def get_member_nickname_state(_ctx, guild_id: str, user_id: str):
+        assert guild_id == "123"
+        assert user_id == "42"
+        return None
+
+    def record_member_nickname(
+        _ctx,
+        guild_id: str,
+        user_id: str,
+        nickname: str,
+        _seen_at,
+        *,
+        source: str = "",
+        previous_nickname: str | None = None,
+    ):
+        calls.append((guild_id, user_id, nickname, source))
+
+    repo = SimpleNamespace(
+        get_member_nickname_state=get_member_nickname_state,
+        record_member_nickname=record_member_nickname,
+    )
+    member = SimpleNamespace(id="42", guild=SimpleNamespace(id="123"), nick="", bot=False)
+
+    gateway._sync_member_nickname_state(repo, member, source="member_remove")
+
+    assert calls == []
+
+
 def test_record_member_nickname_change_persists_only_real_changes() -> None:
     calls: list[tuple[str, str, str, str]] = []
 
