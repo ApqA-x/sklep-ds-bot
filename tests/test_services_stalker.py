@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from services import stalker
 from voice_tracker import domain
 
@@ -54,6 +56,18 @@ def test_activity_event_message_describes_guild_join_and_leave() -> None:
 
     assert joined == "Stalker update: Alice (<@42>) joined Guild One."
     assert left == "Stalker update: Alice (<@42>) left Guild One."
+
+
+def test_build_dm_embed_matches_voice_tracker_style() -> None:
+    occurred_at = datetime(2026, 5, 18, 17, 0, tzinfo=UTC)
+
+    embed = stalker._build_dm_embed("Stalker update: Alice joined.", occurred_at)
+
+    assert embed.title == "Voice Tracker"
+    assert embed.description == "Stalker update: Alice joined."
+    assert embed.color.value == 0x5865F2
+    assert embed.footer.text == "Voice Tracker"
+    assert embed.timestamp == occurred_at
 
 
 def test_active_watcher_user_ids_filters_and_revokes_untrusted_watchers() -> None:
