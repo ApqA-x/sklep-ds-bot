@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import warnings
+from datetime import datetime
 
 with warnings.catch_warnings():
     warnings.filterwarnings(
@@ -15,6 +16,7 @@ with warnings.catch_warnings():
 from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
+from services.chat_templates import stalker_update
 from voice_tracker import domain
 from voice_tracker.bus import Bus
 from voice_tracker.repository import Repository
@@ -81,6 +83,18 @@ def _activity_event_message(event: domain.ActivityEvent, guild_name: str) -> str
     return f"Stalker update: {target} left {guild_label}."
 
 
+def _build_dm_embed(message: str, occurred_at: datetime | None = None) -> discord.Embed:
+    payload = stalker_update.render(message=message)
+    embed = discord.Embed(
+        title=str(payload.get("title", "Voice Tracker")),
+        description=str(payload.get("description", message)),
+        color=int(payload.get("color", 0x5865F2)),
+        timestamp=occurred_at,
+    )
+    embed.set_footer(text=str(payload.get("footer", "Voice Tracker")))
+    return embed
+
+
 async def _resolve_channel(client: discord.Client, channel_id: str):
     if not str(channel_id or "").strip():
         return None
@@ -110,15 +124,15 @@ async def _resolve_user(client: discord.Client, user_id: str):
     return user
 
 
-async def _send_dm(client: discord.Client, watcher_user_id: str, content: str) -> None:
+async def _send_dm(client: discord.Client, watcher_user_id: str, embed: discord.Embed) -> None:
     user = await _resolve_user(client, watcher_user_id)
-    await user.send(content)
+    await user.send(embed=embed)
 
 
-async def _deliver_to_watchers(client: discord.Client, watcher_user_ids: list[str], content: str) -> None:
+async def _deliver_to_watchers(client: discord.Client, watcher_user_ids: list[str], embed: discord.Embed) -> None:
     for watcher_user_id in watcher_user_ids:
         try:
-            await _send_dm(client, watcher_user_id, content)
+            await _send_dm(client, watcher_user_id, embed)
         except Exception:
             logger.exception("stalker dm failed watcher=%s", watcher_user_id)
 
@@ -189,7 +203,8 @@ async def main() -> None:
         previous_channel_label = await _resolve_channel_name(client, event.previous_channel_id) if event.previous_channel_id else ""
         current_channel_label = await _resolve_channel_name(client, event.channel_id) if event.channel_id else ""
         message = _voice_event_message(event, guild_name, previous_channel_label, current_channel_label)
-        await _deliver_to_watchers(client, [watcher_user_id for watcher_user_id in watcher_user_ids if watcher_user_id != event.user_id], message)
+        embed = _build_dm_embed(message, event.occurred_at)
+        await _deliver_to_watchers(client, [watcher_user_id for watcher_user_id in watcher_user_ids if watcher_user_id != event.user_id], embed)
 
     async def handle_activity(payload: bytes) -> None:
         await ready.wait()
@@ -211,10 +226,11 @@ async def main() -> None:
         guild = client.get_guild(int(event.guild_id)) if event.guild_id.isdigit() else None
         guild_name = str(getattr(guild, "name", "") or "")
         message = _activity_event_message(event, guild_name)
+        embed = _build_dm_embed(message, event.occurred_at)
         await _deliver_to_watchers(
             client,
             [watcher_user_id for watcher_user_id in watcher_user_ids if watcher_user_id != event.member_user_id],
-            message,
+            embed,
         )
 
     await bus.subscribe(None, domain.SUBJECT_VOICE_EVENT, deduper, handle_voice)
