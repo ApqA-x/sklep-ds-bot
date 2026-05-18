@@ -18,6 +18,7 @@ from .domain import (
     MemberRoleState,
     ParticipantInterval,
     Session,
+    StalkerSubscription,
 )
 
 
@@ -29,7 +30,16 @@ def _collection(db: Any, name: str) -> Any:
     if db is None:
         raise ValueError("database is nil")
     if hasattr(db, "__getitem__"):
-        return db[name]
+        try:
+            return db[name]
+        except KeyError:
+            collections = getattr(db, "collections", None)
+            if isinstance(collections, dict):
+                sample = next(iter(collections.values()), None)
+                if sample is not None:
+                    collections[name] = sample.__class__()
+                    return collections[name]
+            raise
     return getattr(db, name)
 
 
@@ -76,6 +86,7 @@ class Repository:
         self.member_role_state = _collection(db, "member_role_state")
         self.member_nickname_state = _collection(db, "member_nickname_state")
         self.member_nickname_history = _collection(db, "member_nickname_history")
+        self.stalker_subscriptions = _collection(db, "stalker_subscriptions")
 
     def ensure_indexes(self, _ctx: Any = None) -> None:
         self.sessions.create_index(
@@ -127,6 +138,10 @@ class Repository:
         self.member_nickname_history.create_index([("guildId", 1), ("userId", 1), ("changedAt", -1)])
         self.member_nickname_history.create_index([("guildId", 1), ("changedAt", -1)])
 
+        self.stalker_subscriptions.create_index([("guildId", 1), ("watcherUserId", 1)])
+        self.stalker_subscriptions.create_index([("guildId", 1), ("targetUserId", 1)])
+        self.stalker_subscriptions.create_index([("guildId", 1), ("watcherUserId", 1), ("targetUserId", 1)], unique=True)
+
     def claim_message(self, _ctx: Any, subject: str, message_id: str, issuer: str, issued_at: int) -> bool:
         try:
             self.messages.insert_one(
@@ -165,6 +180,7 @@ class Repository:
                     "fallbackSummaryChannelId": settings.fallback_summary_channel_id,
                     "autoRoleId": settings.auto_role_id,
                     "autoUnmuteUserIds": settings.auto_unmute_user_ids,
+                    "trustedUserIds": settings.trusted_user_ids,
                     "soundboardEnforcementEnabled": settings.soundboard_enforcement_enabled,
                     "managedVoiceChannelId": settings.managed_voice_channel_id,
                     "managedVoiceConnectedAt": settings.managed_voice_connected_at,
@@ -219,6 +235,101 @@ class Repository:
         settings.auto_unmute_user_ids = [uid for uid in settings.auto_unmute_user_ids if uid != user_id]
         self.upsert_guild_settings(ctx, settings)
         return list(settings.auto_unmute_user_ids)
+
+    def get_trusted_user_ids(self, ctx: Any, guild_id: str) -> list[str]:
+        settings = self.get_guild_settings(ctx, guild_id)
+        if settings is None:
+            return []
+        return list(settings.trusted_user_ids)
+
+    def add_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]:
+        settings = self.get_guild_settings(ctx, guild_id)
+        if settings is None:
+            settings = GuildSettings(guild_id=guild_id)
+        user_id = str(user_id or "").strip()
+        if user_id and user_id not in settings.trusted_user_ids:
+            settings.trusted_user_ids = sorted({*settings.trusted_user_ids, user_id})
+        self.upsert_guild_settings(ctx, settings)
+        return list(settings.trusted_user_ids)
+
+    def remove_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]:
+        settings = self.get_guild_settings(ctx, guild_id)
+        if settings is None:
+            settings = GuildSettings(guild_id=guild_id)
+        user_id = str(user_id or "").strip()
+        settings.trusted_user_ids = [uid for uid in settings.trusted_user_ids if uid != user_id]
+        self.upsert_guild_settings(ctx, settings)
+        return list(settings.trusted_user_ids)
+
+    def upsert_stalker_subscription(self, _ctx: Any, subscription: StalkerSubscription | None) -> StalkerSubscription | None:
+        if subscription is None or subscription.id == "" or subscription.guild_id == "":
+            return None
+        now = _utc_now()
+        if subscription.created_at is None:
+            subscription.created_at = now
+        subscription.updated_at = now
+        payload = subscription.to_mongo()
+        self.stalker_subscriptions.update_one(
+            {"_id": subscription.id},
+            {
+                "$set": {
+                    "guildId": payload["guildId"],
+                    "watcherUserId": payload["watcherUserId"],
+                    "targetUserId": payload["targetUserId"],
+                    "updatedAt": payload["updatedAt"],
+                },
+                "$setOnInsert": {"createdAt": payload["createdAt"]},
+            },
+            upsert=True,
+        )
+        return subscription
+
+    def delete_stalker_subscription(self, _ctx: Any, guild_id: str, watcher_user_id: str, target_user_id: str) -> bool:
+        guild_id = str(guild_id or "").strip()
+        watcher_user_id = str(watcher_user_id or "").strip()
+        target_user_id = str(target_user_id or "").strip()
+        if guild_id == "" or watcher_user_id == "" or target_user_id == "":
+            return False
+        result = self.stalker_subscriptions.delete_one(
+            {"_id": f"{guild_id}:{watcher_user_id}:{target_user_id}"}
+        )
+        return bool(getattr(result, "deleted_count", 0))
+
+    def delete_stalker_subscriptions_by_watcher(self, _ctx: Any, guild_id: str, watcher_user_id: str) -> int:
+        subscriptions = self.list_stalker_subscriptions_by_watcher(None, guild_id, watcher_user_id)
+        removed = 0
+        for subscription in subscriptions:
+            if self.delete_stalker_subscription(None, subscription.guild_id, subscription.watcher_user_id, subscription.target_user_id):
+                removed += 1
+        return removed
+
+    def list_stalker_subscriptions_by_watcher(self, _ctx: Any, guild_id: str, watcher_user_id: str) -> list[StalkerSubscription]:
+        guild_id = str(guild_id or "").strip()
+        watcher_user_id = str(watcher_user_id or "").strip()
+        if guild_id == "" or watcher_user_id == "":
+            return []
+        cursor = self.stalker_subscriptions.find({"guildId": guild_id, "watcherUserId": watcher_user_id}).sort(
+            [("targetUserId", 1)]
+        )
+        return [
+            item
+            for item in (StalkerSubscription.from_mongo(doc) for doc in _cursor_all(cursor))
+            if item is not None
+        ]
+
+    def list_stalker_subscriptions_by_target(self, _ctx: Any, guild_id: str, target_user_id: str) -> list[StalkerSubscription]:
+        guild_id = str(guild_id or "").strip()
+        target_user_id = str(target_user_id or "").strip()
+        if guild_id == "" or target_user_id == "":
+            return []
+        cursor = self.stalker_subscriptions.find({"guildId": guild_id, "targetUserId": target_user_id}).sort(
+            [("watcherUserId", 1)]
+        )
+        return [
+            item
+            for item in (StalkerSubscription.from_mongo(doc) for doc in _cursor_all(cursor))
+            if item is not None
+        ]
 
     def get_guild_invite_snapshot(self, _ctx: Any, guild_id: str) -> GuildInviteSnapshot | None:
         guild_id = str(guild_id or "").strip()

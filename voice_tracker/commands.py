@@ -44,6 +44,8 @@ UNMUTE_COMMAND_NAME = "unmute"
 DASHBOARD_COMMAND_NAME = "dashboard"
 USERINFO_COMMAND_NAME = "userinfo"
 STATUS_COMMAND_NAME = "status"
+TRUSTED_COMMAND_NAME = "trusted"
+STALKER_COMMAND_NAME = "stalker"
 
 SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND = "activity-channel-set"
 SETTINGS_ACTIVITY_CHANNEL_CLEAR_COMMAND = "activity-channel-clear"
@@ -60,6 +62,8 @@ VOICE_COMMAND_NAMES = {
     DASHBOARD_COMMAND_NAME,
     USERINFO_COMMAND_NAME,
     STATUS_COMMAND_NAME,
+    TRUSTED_COMMAND_NAME,
+    STALKER_COMMAND_NAME,
 }
 INSPECT_HISTORY_ALL_COMMAND = "history.all"
 INSPECT_HISTORY_PICK_COMMAND = "history.pick"
@@ -122,6 +126,12 @@ COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
     (DASHBOARD_COMMAND_NAME, ""): CommandPolicy(DASHBOARD_COMMAND_NAME, "", COMMAND_ACCESS_ALL_USER, None, "handle_dashboard_command"),
     (USERINFO_COMMAND_NAME, ""): CommandPolicy(USERINFO_COMMAND_NAME, "", COMMAND_ACCESS_ALL_USER, None, "handle_userinfo_command"),
     (STATUS_COMMAND_NAME, ""): CommandPolicy(STATUS_COMMAND_NAME, "", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_status_command"),
+    (TRUSTED_COMMAND_NAME, "add"): CommandPolicy(TRUSTED_COMMAND_NAME, "add", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_trusted_command"),
+    (TRUSTED_COMMAND_NAME, "remove"): CommandPolicy(TRUSTED_COMMAND_NAME, "remove", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_trusted_command"),
+    (TRUSTED_COMMAND_NAME, "list"): CommandPolicy(TRUSTED_COMMAND_NAME, "list", COMMAND_ACCESS_ADMIN_ONLY, PERMISSION_ADMINISTRATOR, "handle_trusted_command"),
+    (STALKER_COMMAND_NAME, "start"): CommandPolicy(STALKER_COMMAND_NAME, "start", COMMAND_ACCESS_ALL_USER, None, "handle_stalker_command"),
+    (STALKER_COMMAND_NAME, "stop"): CommandPolicy(STALKER_COMMAND_NAME, "stop", COMMAND_ACCESS_ALL_USER, None, "handle_stalker_command"),
+    (STALKER_COMMAND_NAME, "list"): CommandPolicy(STALKER_COMMAND_NAME, "list", COMMAND_ACCESS_ALL_USER, None, "handle_stalker_command"),
 }
 
 COMMAND_ROUTE_ALIASES: dict[tuple[str, str], tuple[str, str]] = {
@@ -138,6 +148,22 @@ class Repository(Protocol):
     def get_guild_settings(self, ctx: Any, guild_id: str) -> domain.GuildSettings | None: ...
 
     def upsert_guild_settings(self, ctx: Any, settings: domain.GuildSettings) -> None: ...
+
+    def add_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]: ...
+
+    def remove_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]: ...
+
+    def get_trusted_user_ids(self, ctx: Any, guild_id: str) -> list[str]: ...
+
+    def upsert_stalker_subscription(self, ctx: Any, subscription: domain.StalkerSubscription) -> domain.StalkerSubscription | None: ...
+
+    def delete_stalker_subscription(self, ctx: Any, guild_id: str, watcher_user_id: str, target_user_id: str) -> bool: ...
+
+    def delete_stalker_subscriptions_by_watcher(self, ctx: Any, guild_id: str, watcher_user_id: str) -> int: ...
+
+    def list_stalker_subscriptions_by_watcher(
+        self, ctx: Any, guild_id: str, watcher_user_id: str
+    ) -> list[domain.StalkerSubscription]: ...
 
     def list_active_sessions_by_guild(self, ctx: Any, guild_id: str) -> list[domain.Session]: ...
 
@@ -345,6 +371,8 @@ class Service:
         autorole = _role_mention(autorole_id) if autorole_id else "not set"
         auto_unmute_ids = list(getattr(settings, "auto_unmute_user_ids", []) or [])
         auto_unmute = f"{len(auto_unmute_ids)} user(s)" if auto_unmute_ids else "none"
+        trusted_user_ids = list(getattr(settings, "trusted_user_ids", []) or [])
+        trusted_users = f"{len(trusted_user_ids)} user(s)" if trusted_user_ids else "none"
         managed_voice_channel_id = _optional_setting(
             settings,
             "managed_voice_channel_id",
@@ -360,6 +388,7 @@ class Service:
         lines.append(f"summary channel: {summary_channel}")
         lines.append(f"autorole: {autorole}")
         lines.append(f"auto-unmute: {auto_unmute}")
+        lines.append(f"trusted users: {trusted_users}")
         lines.append(f"voice connection: {managed_voice_channel}")
         lines.append(f"soundboard enforcement: {soundboard_enforcement}")
         lines.append(f"activity channel: {activity_channel}")
@@ -530,6 +559,7 @@ class Service:
         settings.invite_live_attribution_enabled = bool(getattr(settings, "invite_live_attribution_enabled", True))
         settings.invite_userinfo_enabled = bool(getattr(settings, "invite_userinfo_enabled", True))
         settings.invite_reconciliation_enabled = bool(getattr(settings, "invite_reconciliation_enabled", False))
+        settings.trusted_user_ids = domain.clean_channel_ids(getattr(settings, "trusted_user_ids", []))
         settings.activity_channel_id = str(getattr(settings, "activity_channel_id", "") or "").strip()
         settings.activity_event_types = domain.clean_activity_event_types(getattr(settings, "activity_event_types", []))
         self.repo.upsert_guild_settings(ctx, settings)
@@ -745,6 +775,84 @@ class Service:
             return _describe_auto_unmute_list(ids)
         raise ValueError("unknown unmute command")
 
+    def handle_trusted_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        if self.repo is None:
+            raise ValueError("repository unavailable")
+        guild_id = interaction.guild_id
+        if command == "add":
+            user_id = option_user_id(options, "user")
+            if not user_id:
+                raise ValueError("user is required")
+            ids = self.repo.add_trusted_user(ctx, guild_id, user_id)
+            return f"Added <@{user_id}> to trusted users.\n{_describe_trusted_user_list(ids)}"
+        if command == "remove":
+            user_id = option_user_id(options, "user")
+            if not user_id:
+                raise ValueError("user is required")
+            ids = self.repo.remove_trusted_user(ctx, guild_id, user_id)
+            self.repo.delete_stalker_subscriptions_by_watcher(ctx, guild_id, user_id)
+            return f"Removed <@{user_id}> from trusted users.\n{_describe_trusted_user_list(ids)}"
+        if command == "list":
+            ids = self.repo.get_trusted_user_ids(ctx, guild_id)
+            return _describe_trusted_user_list(ids)
+        raise ValueError("unknown trusted command")
+
+    def is_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> bool:
+        if self.repo is None:
+            return False
+        normalized_user_id = (user_id or "").strip()
+        if normalized_user_id == "":
+            return False
+        return normalized_user_id in set(self.repo.get_trusted_user_ids(ctx, guild_id))
+
+    def handle_stalker_command(
+        self,
+        ctx: Any,
+        interaction: InteractionCreate,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+    ) -> str:
+        if self.repo is None:
+            raise ValueError("repository unavailable")
+        watcher_user_id = _interaction_user_id(interaction)
+        if watcher_user_id == "":
+            raise ValueError("user is required")
+        if not self.is_trusted_user(ctx, interaction.guild_id, watcher_user_id):
+            raise ValueError("You are not in the trusted users list.")
+        if command == "list":
+            subscriptions = self.repo.list_stalker_subscriptions_by_watcher(ctx, interaction.guild_id, watcher_user_id)
+            return _describe_stalker_subscription_list(subscriptions)
+        target_user_id = option_user_id(options, "user")
+        if target_user_id == "":
+            raise ValueError("user is required")
+        if target_user_id == watcher_user_id:
+            raise ValueError("you cannot stalk yourself")
+        if command == "start":
+            self.repo.upsert_stalker_subscription(
+                ctx,
+                domain.StalkerSubscription(
+                    guild_id=interaction.guild_id,
+                    watcher_user_id=watcher_user_id,
+                    target_user_id=target_user_id,
+                ),
+            )
+            return (
+                f"Stalker enabled for <@{target_user_id}>. "
+                "DM updates require the stalker service to be running and your DMs to be open."
+            )
+        if command == "stop":
+            removed = self.repo.delete_stalker_subscription(ctx, interaction.guild_id, watcher_user_id, target_user_id)
+            if removed:
+                return f"Stalker disabled for <@{target_user_id}>."
+            return f"No active stalker subscription for <@{target_user_id}>."
+        raise ValueError("unknown stalker command")
+
     def handle_dashboard_command(
         self,
         ctx: Any,
@@ -869,6 +977,8 @@ def voice_application_commands() -> list[ApplicationCommand]:
         dashboard_application_command(),
         userinfo_application_command(),
         status_application_command(),
+        trusted_application_command(),
+        stalker_application_command(),
     ]
 
 
@@ -965,6 +1075,51 @@ def status_application_command() -> CommandDefinition:
         description="Set bot presence status",
         options=[_status_state_option()],
         default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def trusted_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=TRUSTED_COMMAND_NAME,
+        description="Manage trusted users for sensitive commands",
+        options=[
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="add",
+                description="Add a user to the trusted list",
+                options=[_user_option("user", "User to trust")],
+            ),
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="remove",
+                description="Remove a user from the trusted list",
+                options=[_user_option("user", "User to untrust")],
+            ),
+            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="list", description="List trusted users"),
+        ],
+        default_member_permissions=PERMISSION_ADMINISTRATOR,
+    )
+
+
+def stalker_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=STALKER_COMMAND_NAME,
+        description="DM voice and guild activity updates for one member",
+        options=[
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="start",
+                description="Start stalking one member",
+                options=[_user_option("user", "Member to stalk")],
+            ),
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="stop",
+                description="Stop stalking one member",
+                options=[_user_option("user", "Member to stop stalking")],
+            ),
+            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="list", description="List your stalked members"),
+        ],
     )
 
 
@@ -1348,6 +1503,20 @@ def _describe_auto_unmute_list(user_ids: list[str]) -> str:
         return "Auto-unmute list is empty."
     mentions = ", ".join(f"<@{uid}>" for uid in user_ids)
     return f"Auto-unmute list ({len(user_ids)}): {mentions}"
+
+
+def _describe_trusted_user_list(user_ids: list[str]) -> str:
+    if not user_ids:
+        return "Trusted users list is empty."
+    mentions = ", ".join(f"<@{uid}>" for uid in user_ids)
+    return f"Trusted users ({len(user_ids)}): {mentions}"
+
+
+def _describe_stalker_subscription_list(subscriptions: list[domain.StalkerSubscription]) -> str:
+    if not subscriptions:
+        return "You are not stalking anyone."
+    mentions = ", ".join(f"<@{subscription.target_user_id}>" for subscription in subscriptions)
+    return f"Stalking {len(subscriptions)} user(s): {mentions}"
 
 
 def _remove_channel_id(ids: list[str], target: str) -> list[str]:

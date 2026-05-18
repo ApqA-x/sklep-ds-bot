@@ -54,6 +54,13 @@ Last updated: May 7, 2026.
 - `/unmute list`
   - Show auto-unmute list.
 
+- `/trusted add user:<member>`
+  - Add member to the trusted users list for sensitive commands.
+- `/trusted remove user:<member>`
+  - Remove member from the trusted users list.
+- `/trusted list`
+  - Show trusted users.
+
 ### ALL_USER
 
 - `/jump channel:<voice|stage>`
@@ -67,13 +74,24 @@ Last updated: May 7, 2026.
   - Show member profile summary and total voice time.
   - Presence status is shown only when Presence Intent is enabled for the commands service.
 
+- `/stalker start user:<member>`
+  - Start DM notifications for the target member's voice join/move/leave and guild join/leave events.
+  - Invoking user must already be on the trusted users list.
+  - Requires the `services.stalker` worker to be running and the watcher's Discord DMs to be open.
+- `/stalker stop user:<member>`
+  - Stop DM notifications for that member.
+- `/stalker list`
+  - Show the current invoking user's stalked members.
+
 ## Notes
 
 - Tracking is all-channel; there are no public per-channel tracking commands.
 - Invite attribution internals are managed automatically and are not part of the public command surface.
 - Activity feed settings are command-driven and persisted per guild.
+- Trusted users are command-driven and persisted per guild.
 - Voice connection management is independent from enforcement toggles.
 - Soundboard enforcement runs only when both conditions are true: managed voice connection is active and `/settings soundboard` is `on`.
 - Command registration owner is `services.commands`.
 - Runtime policy enforcement exists in command handlers; Discord UI visibility alone is not treated as authorization.
 - `/inspect` supports additional internal route forms for compatibility/tests, but only the public route above is registered.
+- `/stalker` only observes voice and guild lifecycle signals currently emitted by the bot runtime.

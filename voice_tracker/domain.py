@@ -143,6 +143,15 @@ def member_nickname_change_id(guild_id: str, user_id: str, changed_at: datetime 
     return f"{guild_id}:{user_id}:{datetime_to_json(changed_at)}"
 
 
+def stalker_subscription_id(guild_id: str, watcher_user_id: str, target_user_id: str) -> str:
+    guild_id = _clean(guild_id)
+    watcher_user_id = _clean(watcher_user_id)
+    target_user_id = _clean(target_user_id)
+    if not guild_id or not watcher_user_id or not target_user_id:
+        return ""
+    return f"{guild_id}:{watcher_user_id}:{target_user_id}"
+
+
 @dataclass(slots=True)
 class GuildSettings:
     guild_id: str = ""
@@ -154,6 +163,7 @@ class GuildSettings:
     fallback_summary_channel_id: str = ""
     auto_role_id: str = ""
     auto_unmute_user_ids: list[str] = field(default_factory=list)
+    trusted_user_ids: list[str] = field(default_factory=list)
     soundboard_enforcement_enabled: bool = False
     managed_voice_channel_id: str = ""
     managed_voice_connected_at: datetime | None = None
@@ -172,6 +182,7 @@ class GuildSettings:
         self.fallback_summary_channel_id = _clean(self.fallback_summary_channel_id)
         self.auto_role_id = _clean(self.auto_role_id)
         self.auto_unmute_user_ids = clean_channel_ids(self.auto_unmute_user_ids)
+        self.trusted_user_ids = clean_channel_ids(self.trusted_user_ids)
         self.soundboard_enforcement_enabled = bool(self.soundboard_enforcement_enabled)
         self.managed_voice_channel_id = _clean(self.managed_voice_channel_id)
         self.managed_voice_connected_at = ensure_utc(self.managed_voice_connected_at)
@@ -217,6 +228,7 @@ class GuildSettings:
             fallback_summary_channel_id=data.get("fallbackSummaryChannelId", ""),
             auto_role_id=data.get("autoRoleId", ""),
             auto_unmute_user_ids=list(data.get("autoUnmuteUserIds") or []),
+            trusted_user_ids=list(data.get("trustedUserIds") or []),
             soundboard_enforcement_enabled=bool(data.get("soundboardEnforcementEnabled", False)),
             managed_voice_channel_id=data.get("managedVoiceChannelId", ""),
             managed_voice_connected_at=parse_datetime(data.get("managedVoiceConnectedAt")),
@@ -239,6 +251,7 @@ def new_guild_settings(
     fallback_summary_channel_id: str = "",
     auto_role_id: str = "",
     auto_unmute_user_ids: list[str] | None = None,
+    trusted_user_ids: list[str] | None = None,
     soundboard_enforcement_enabled: bool = False,
     managed_voice_channel_id: str = "",
     managed_voice_connected_at: datetime | None = None,
@@ -257,6 +270,7 @@ def new_guild_settings(
         fallback_summary_channel_id=fallback_summary_channel_id,
         auto_role_id=auto_role_id,
         auto_unmute_user_ids=auto_unmute_user_ids or [],
+        trusted_user_ids=trusted_user_ids or [],
         soundboard_enforcement_enabled=soundboard_enforcement_enabled,
         managed_voice_channel_id=managed_voice_channel_id,
         managed_voice_connected_at=managed_voice_connected_at,
@@ -1008,6 +1022,53 @@ class MemberRoleState:
             "lastSeenAt": self.last_seen_at,
             "updatedAt": self.updated_at,
             "lastRestoredAt": self.last_restored_at,
+        }
+        data.update({key: value for key, value in optional.items() if value is not None})
+        return data
+
+
+@dataclass(slots=True)
+class StalkerSubscription:
+    id: str = ""
+    guild_id: str = ""
+    watcher_user_id: str = ""
+    target_user_id: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        self.guild_id = _clean(self.guild_id)
+        self.watcher_user_id = _clean(self.watcher_user_id)
+        self.target_user_id = _clean(self.target_user_id)
+        if not self.id:
+            self.id = stalker_subscription_id(self.guild_id, self.watcher_user_id, self.target_user_id)
+        self.id = _clean(self.id)
+        self.created_at = ensure_utc(self.created_at)
+        self.updated_at = ensure_utc(self.updated_at)
+
+    @classmethod
+    def from_mongo(cls, data: dict[str, Any] | None) -> "StalkerSubscription | None":
+        if data is None:
+            return None
+        return cls(
+            id=data.get("_id") or data.get("id", ""),
+            guild_id=data.get("guildId", ""),
+            watcher_user_id=data.get("watcherUserId", ""),
+            target_user_id=data.get("targetUserId", ""),
+            created_at=parse_datetime(data.get("createdAt")),
+            updated_at=parse_datetime(data.get("updatedAt")),
+        )
+
+    def to_mongo(self) -> dict[str, Any]:
+        data = {
+            "_id": self.id,
+            "guildId": self.guild_id,
+            "watcherUserId": self.watcher_user_id,
+            "targetUserId": self.target_user_id,
+        }
+        optional = {
+            "createdAt": self.created_at,
+            "updatedAt": self.updated_at,
         }
         data.update({key: value for key, value in optional.items() if value is not None})
         return data

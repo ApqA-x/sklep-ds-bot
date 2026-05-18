@@ -29,5 +29,15 @@ services:
     env_file:
       - .env
 
+  activity:
+    image: ghcr.io/robinlant/sklep-ds-bot/activity:${IMAGE_TAG}
+    env_file:
+      - .env
+
+  stalker:
+    image: ghcr.io/robinlant/sklep-ds-bot/stalker:${IMAGE_TAG}
+    env_file:
+      - .env
+
 volumes:
   mongo-data:

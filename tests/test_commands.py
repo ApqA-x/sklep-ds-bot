@@ -47,6 +47,7 @@ class FakeRepo:
         self.settings: dict[str, domain.GuildSettings] = {}
         self.sessions: dict[str, domain.Session] = {}
         self.participants: dict[str, list[domain.ParticipantInterval]] = {}
+        self.stalker_subscriptions: dict[tuple[str, str, str], domain.StalkerSubscription] = {}
 
     def get_guild_settings(self, _ctx, guild_id: str):
         settings = self.settings.get(guild_id)
@@ -60,6 +61,7 @@ class FakeRepo:
             fallback_summary_channel_id=settings.fallback_summary_channel_id,
             auto_role_id=settings.auto_role_id,
             auto_unmute_user_ids=list(settings.auto_unmute_user_ids),
+            trusted_user_ids=list(settings.trusted_user_ids),
             soundboard_enforcement_enabled=settings.soundboard_enforcement_enabled,
             managed_voice_channel_id=settings.managed_voice_channel_id,
             managed_voice_connected_at=settings.managed_voice_connected_at,
@@ -82,6 +84,7 @@ class FakeRepo:
             fallback_summary_channel_id=settings.fallback_summary_channel_id,
             auto_role_id=settings.auto_role_id,
             auto_unmute_user_ids=list(settings.auto_unmute_user_ids),
+            trusted_user_ids=list(settings.trusted_user_ids),
             soundboard_enforcement_enabled=settings.soundboard_enforcement_enabled,
             managed_voice_channel_id=settings.managed_voice_channel_id,
             managed_voice_connected_at=settings.managed_voice_connected_at,
@@ -92,6 +95,44 @@ class FakeRepo:
             activity_channel_id=settings.activity_channel_id,
             activity_event_types=list(settings.activity_event_types),
         )
+
+    def add_trusted_user(self, _ctx, guild_id: str, user_id: str):
+        settings = self.get_guild_settings(None, guild_id) or domain.GuildSettings(guild_id=guild_id)
+        settings.trusted_user_ids = sorted({*settings.trusted_user_ids, user_id})
+        self.upsert_guild_settings(None, settings)
+        return list(settings.trusted_user_ids)
+
+    def remove_trusted_user(self, _ctx, guild_id: str, user_id: str):
+        settings = self.get_guild_settings(None, guild_id) or domain.GuildSettings(guild_id=guild_id)
+        settings.trusted_user_ids = [value for value in settings.trusted_user_ids if value != user_id]
+        self.upsert_guild_settings(None, settings)
+        return list(settings.trusted_user_ids)
+
+    def get_trusted_user_ids(self, _ctx, guild_id: str):
+        settings = self.get_guild_settings(None, guild_id)
+        return [] if settings is None else list(settings.trusted_user_ids)
+
+    def upsert_stalker_subscription(self, _ctx, subscription: domain.StalkerSubscription):
+        self.stalker_subscriptions[(subscription.guild_id, subscription.watcher_user_id, subscription.target_user_id)] = subscription
+        return subscription
+
+    def delete_stalker_subscription(self, _ctx, guild_id: str, watcher_user_id: str, target_user_id: str):
+        return self.stalker_subscriptions.pop((guild_id, watcher_user_id, target_user_id), None) is not None
+
+    def delete_stalker_subscriptions_by_watcher(self, _ctx, guild_id: str, watcher_user_id: str):
+        keys = [key for key in self.stalker_subscriptions if key[0] == guild_id and key[1] == watcher_user_id]
+        for key in keys:
+            self.stalker_subscriptions.pop(key, None)
+        return len(keys)
+
+    def list_stalker_subscriptions_by_watcher(self, _ctx, guild_id: str, watcher_user_id: str):
+        subscriptions = [
+            subscription
+            for key, subscription in self.stalker_subscriptions.items()
+            if key[0] == guild_id and key[1] == watcher_user_id
+        ]
+        subscriptions.sort(key=lambda subscription: subscription.target_user_id)
+        return subscriptions
 
     def list_active_sessions_by_guild(self, _ctx, guild_id: str):
         return [session for session in self.sessions.values() if session.guild_id == guild_id and session.status == domain.SESSION_STATUS_ACTIVE]
@@ -234,6 +275,9 @@ def test_can_use_voice_command_requires_admin_for_admin_only_commands() -> None:
         ("status", ""),
         (INSPECT_COMMAND_NAME, ""),
         ("autorole", ""),
+        ("trusted", "add"),
+        ("trusted", "remove"),
+        ("trusted", "list"),
     ]
     for root, command in admin_only_routes:
         assert can_use_voice_command(plain, [], root, command) is False
@@ -248,6 +292,7 @@ def test_can_use_voice_command_all_user_routes_do_not_require_admin() -> None:
     assert can_use_voice_command(plain, [], "jump", "") is True
     assert can_use_voice_command(plain, [], "dashboard", "") is True
     assert can_use_voice_command(plain, [], "userinfo", "") is True
+    assert can_use_voice_command(plain, [], "stalker", "start") is True
 
 
 def test_member_profile_from_row_reads_invite_attribution_fields() -> None:
@@ -324,6 +369,8 @@ def test_voice_application_commands_have_expected_routes() -> None:
         "dashboard",
         "userinfo",
         "status",
+        "trusted",
+        "stalker",
     ]
 
     assert [option.name for option in commands[SETTINGS_COMMAND_NAME].options] == [
@@ -346,6 +393,78 @@ def test_voice_application_commands_have_expected_routes() -> None:
     assert [option.name for option in commands[INSPECT_COMMAND_NAME].options] == ["channel"]
     assert [option.name for option in commands["unmute"].options] == ["add", "remove", "list"]
     assert [option.name for option in commands["status"].options] == ["state"]
+    assert [option.name for option in commands["trusted"].options] == ["add", "remove", "list"]
+    assert [option.name for option in commands["stalker"].options] == ["start", "stop", "list"]
+
+
+def test_handle_trusted_commands() -> None:
+    repo = FakeRepo()
+    svc = Service(repo)
+    interaction = interaction_with_channels("g1", PERMISSION_ADMINISTRATOR)
+
+    content = svc.handle_trusted_command(None, interaction, "add", [option("user", "u2")])
+    assert "Added <@u2> to trusted users." in content
+    assert repo.settings["g1"].trusted_user_ids == ["u2"]
+
+    content = svc.handle_trusted_command(None, interaction, "list", [])
+    assert "Trusted users (1): <@u2>" == content
+
+    content = svc.handle_trusted_command(None, interaction, "remove", [option("user", "u2")])
+    assert "Removed <@u2> from trusted users." in content
+    assert repo.settings["g1"].trusted_user_ids == []
+
+
+def test_handle_trusted_remove_revokes_existing_stalker_subscriptions() -> None:
+    repo = FakeRepo()
+    svc = Service(repo)
+    repo.add_trusted_user(None, "g1", "u2")
+    repo.upsert_stalker_subscription(
+        None,
+        domain.StalkerSubscription(guild_id="g1", watcher_user_id="u2", target_user_id="u9"),
+    )
+    interaction = interaction_with_channels("g1", PERMISSION_ADMINISTRATOR)
+
+    svc.handle_trusted_command(None, interaction, "remove", [option("user", "u2")])
+
+    assert repo.stalker_subscriptions == {}
+
+
+def test_handle_stalker_commands_require_trusted_user() -> None:
+    repo = FakeRepo()
+    svc = Service(repo)
+    interaction = interaction_with_channels("g1", 0)
+
+    with pytest.raises(ValueError, match="trusted users list"):
+        svc.handle_stalker_command(None, interaction, "start", [option("user", "u2")])
+
+
+def test_handle_stalker_commands_manage_subscriptions() -> None:
+    repo = FakeRepo()
+    svc = Service(repo)
+    repo.add_trusted_user(None, "g1", "u1")
+    interaction = interaction_with_channels("g1", 0)
+
+    content = svc.handle_stalker_command(None, interaction, "start", [option("user", "u2")])
+    assert "Stalker enabled for <@u2>." in content
+    assert "DM updates require the stalker service to be running" in content
+    assert ("g1", "u1", "u2") in repo.stalker_subscriptions
+
+    content = svc.handle_stalker_command(None, interaction, "list", [])
+    assert content == "Stalking 1 user(s): <@u2>"
+
+    content = svc.handle_stalker_command(None, interaction, "stop", [option("user", "u2")])
+    assert content == "Stalker disabled for <@u2>."
+    assert repo.stalker_subscriptions == {}
+
+
+def test_handle_stalker_command_rejects_self_watch() -> None:
+    repo = FakeRepo()
+    svc = Service(repo)
+    repo.add_trusted_user(None, "g1", "u1")
+    interaction = interaction_with_channels("g1", 0)
+
+    with pytest.raises(ValueError, match="cannot stalk yourself"):
+        svc.handle_stalker_command(None, interaction, "start", [option("user", "u1")])
 
 def test_handle_settings_commands() -> None:
     repo = FakeRepo()

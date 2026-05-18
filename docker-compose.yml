@@ -66,5 +66,16 @@ services:
       - mongo
       - nats
 
+  stalker:
+    build:
+      context: .
+      args:
+        SERVICE: stalker
+    env_file:
+      - .env
+    depends_on:
+      - mongo
+      - nats
+
 volumes:
   mongo-data:

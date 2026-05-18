@@ -36,6 +36,14 @@ class _CanonicalRoutingServiceStub:
     def handle_voice_command(self, _ctx, _model, _root: str, _command: str, _options) -> str:
         raise AssertionError("legacy voice command handler should not be used for canonical admin commands")
 
+    def handle_trusted_command(self, _ctx, _model, command: str, options: list[ApplicationCommandInteractionDataOption]) -> str:
+        self.calls.append(("trusted", command, _option_value(options, "user")))
+        return f"trusted:{command}"
+
+    def handle_stalker_command(self, _ctx, _model, command: str, options: list[ApplicationCommandInteractionDataOption]) -> str:
+        self.calls.append(("stalker", command, _option_value(options, "user")))
+        return f"stalker:{command}"
+
 
 def _interaction_model(permissions: int) -> InteractionCreate:
     return InteractionCreate(
@@ -59,6 +67,20 @@ def _interaction_model(permissions: int) -> InteractionCreate:
             [ApplicationCommandInteractionDataOption(name="channel", value=123456789012345678)],
             "inspect:active.channel",
             [("inspect", "active.channel", "123456789012345678")],
+        ),
+        (
+            "trusted",
+            "add",
+            [ApplicationCommandInteractionDataOption(name="user", value=123456789012345678)],
+            "trusted:add",
+            [("trusted", "add", "123456789012345678")],
+        ),
+        (
+            "stalker",
+            "start",
+            [ApplicationCommandInteractionDataOption(name="user", value=123456789012345678)],
+            "stalker:start",
+            [("stalker", "start", "123456789012345678")],
         ),
     ],
 )
@@ -125,6 +147,24 @@ async def test_dispatch_command_rejects_top_level_inspect_channel_without_admin(
         "inspect",
         "",
         [ApplicationCommandInteractionDataOption(name="channel", value=123456789012345678)],
+        [],
+    )
+
+    assert result == "Insufficient permissions."
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_rejects_trusted_without_admin() -> None:
+    service = _CanonicalRoutingServiceStub()
+    result = await commands_service._dispatch_command(
+        object(),
+        service,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _interaction_model(0),
+        "trusted",
+        "add",
+        [ApplicationCommandInteractionDataOption(name="user", value=123456789012345678)],
         [],
     )
 

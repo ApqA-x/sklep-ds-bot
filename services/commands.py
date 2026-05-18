@@ -58,6 +58,8 @@ TARGET_COMMAND_NAMES = {
     "dashboard",
     "userinfo",
     STATUS_COMMAND_NAME,
+    "trusted",
+    "stalker",
 }
 
 SUPPORTED_COMMAND_NAMES = (VOICE_COMMAND_NAMES | TARGET_COMMAND_NAMES) - LEGACY_ROOT_COMMAND_NAMES
@@ -329,6 +331,10 @@ async def _dispatch_command(
         if not _is_admin_only(model):
             return "Insufficient permissions."
         return _dispatch_unmute_command(service, model, command, options)
+    if root == "trusted":
+        if not _is_admin_only(model):
+            return "Insufficient permissions."
+        return _dispatch_trusted_command(service, model, command, options)
     if root == "dashboard":
         return await _dispatch_dashboard_command(client, service, model, interaction)
     if root == "userinfo":
@@ -339,6 +345,8 @@ async def _dispatch_command(
             interaction,
             options,
         )
+    if root == "stalker":
+        return _dispatch_stalker_command(service, model, command, options)
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
         if not _is_admin_only(model):
             return "Insufficient permissions."
@@ -383,6 +391,28 @@ def _dispatch_unmute_command(
     if command not in {"add", "remove", "list"}:
         return "Unknown unmute command."
     return service.handle_unmute_command(None, model, command, options)
+
+
+def _dispatch_trusted_command(
+    service: VoiceService,
+    model: InteractionCreate,
+    command: str,
+    options: list[ApplicationCommandInteractionDataOption],
+) -> str:
+    if command not in {"add", "remove", "list"}:
+        return "Unknown trusted command."
+    return service.handle_trusted_command(None, model, command, options)
+
+
+def _dispatch_stalker_command(
+    service: VoiceService,
+    model: InteractionCreate,
+    command: str,
+    options: list[ApplicationCommandInteractionDataOption],
+) -> str:
+    if command not in {"start", "stop", "list"}:
+        return "Unknown stalker command."
+    return service.handle_stalker_command(None, model, command, options)
 
 
 def _dispatch_inspect_channel_command(

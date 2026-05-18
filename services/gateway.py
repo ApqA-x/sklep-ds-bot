@@ -456,6 +456,15 @@ def _save_member_nickname_snapshot(repo: Repository, member: discord.Member) -> 
     saver(None, guild_id, user_id, nickname, _utc_now(), pending_restore=True)
 
 
+def _revoke_stalker_access(repo: Repository, guild_id: str, user_id: str) -> None:
+    remover = getattr(repo, "remove_trusted_user", None)
+    if callable(remover):
+        remover(None, guild_id, user_id)
+    deleter = getattr(repo, "delete_stalker_subscriptions_by_watcher", None)
+    if callable(deleter):
+        deleter(None, guild_id, user_id)
+
+
 def _sync_member_nickname_state(
     repo: Repository,
     member: discord.Member,
@@ -1814,6 +1823,10 @@ async def main() -> None:
             _save_member_nickname_snapshot(repo, member)
         except Exception:
             logger.exception("member nickname snapshot failed guild=%s member=%s", member.guild.id, member.id)
+        try:
+            _revoke_stalker_access(repo, str(member.guild.id), str(member.id))
+        except Exception:
+            logger.exception("stalker access revoke failed guild=%s member=%s", member.guild.id, member.id)
 
     @client.event
     async def on_member_update(before: discord.Member, after: discord.Member) -> None:

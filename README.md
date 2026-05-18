@@ -20,8 +20,11 @@ Recent production stabilization changes include:
 - Refactored `services.activity`, `services.gateway`, and `services.commands` to render embeds via these templates for easier customization.
 - Migrated invite behavior from env-first controls to persisted guild settings with automatic internal management.
 - Added a new `services.activity` service that consumes `activity.events` and posts member/invite lifecycle embeds.
+- Added a new `services.stalker` service that consumes `voice.events` plus member lifecycle activity and sends DM alerts to trusted watchers.
 - Simplified `/settings` UX: internal invite mechanics are hidden, and activity feed is controlled by a single mode (`off|minimal|full`) plus channel selection.
 - Gateway now publishes activity events for member join/leave, invite create/delete, and invite attribution outcomes.
+- Added `/trusted add|remove|list` to maintain a persisted guild-level trusted users allowlist.
+- Added `/stalker start|stop|list` for trusted users to receive DM alerts about watched members.
 
 - Removed legacy root commands `/audit`, `/bot-setting`, `/track`, and `/track-list` from the public command surface.
 - Tracking is all-channel.
@@ -44,6 +47,7 @@ Recent production stabilization changes include:
 - `services.writer`: consumes `session.closed`, builds summary text, emits `session.summary`.
 - `services.commands`: owns slash command registration and command execution.
 - `services.activity`: consumes `activity.events` and posts configurable activity embeds.
+- `services.stalker`: consumes `voice.events` and member lifecycle `activity.events` and DMs subscribed watchers.
 
 Shared package code is in `voice_tracker/`.
 
@@ -57,6 +61,7 @@ Shared package code is in `voice_tracker/`.
 6. Gateway receives `session.summary` and posts it to the configured output channel.
 7. Gateway emits `activity.events` for member/invite lifecycle events.
 8. Activity service receives `activity.events` and posts embeds to the configured activity channel.
+9. Stalker service receives `voice.events` plus member join/leave `activity.events` and DMs subscribed watchers.
 
 ## Command Docs
 
@@ -87,6 +92,8 @@ Important variables:
 `BOT_ADMIN_USER_IDS` remains for compatibility but is not the primary admin policy path.
 
 Activity behavior is configured at runtime through `/settings` and persisted in `guild_settings`. Invite attribution internals run automatically.
+Trusted-user access for `/stalker` is configured at runtime through `/trusted` and persisted in `guild_settings`.
+`/stalker` delivery requires the `services.stalker` worker to be healthy and the watcher's Discord DMs to be open.
 
 ## Local Development
 
@@ -117,7 +124,7 @@ The local `stack.yaml` in this repo is not the active production deployment cont
 - forward canary: Python 3.14 (non-blocking)
 - deprecation-strict lane: `pytest -W error::DeprecationWarning` (non-blocking)
 
-`Release` workflow publishes service images for `gateway`, `tracker`, `writer`, `commands`, and `activity`.
+`Release` workflow publishes service images for `gateway`, `tracker`, `writer`, `commands`, `activity`, and `stalker`.
 
 ## Documentation Map
 

@@ -32,6 +32,9 @@ EVENT_SIGNING_SECRET=replace-with-a-long-random-secret
 - Configure summary/output destination with `/settings summary-set`.
 - Invite attribution internals are automatic and do not require command-level tuning.
 - Configure activity output with `/settings activity-channel-set` and `/settings activity mode:off|minimal|full`.
+- Configure trusted access with `/trusted add|remove|list`.
+- Trusted users can manage DM watchers with `/stalker start|stop|list`.
+- `/stalker` delivery requires the `services.stalker` worker to be running and the watcher's DMs to be open.
 
 ## Minimal Local Setup
 
@@ -44,6 +47,7 @@ EVENT_SIGNING_SECRET=replace-with-a-long-random-secret
 
 - `services.commands` is the only command registration owner.
 - `services.activity` posts member/invite lifecycle embeds to the configured activity channel.
+- `services.stalker` sends DM alerts for watched members using the persisted trusted users allowlist.
 - Auto-unmute clears server mute/deafen state for users on the configured list.
 - `/userinfo` presence status depends on Presence Intent being enabled.
 - `BOT_ADMIN_USER_IDS` is not the primary admin authorization path.

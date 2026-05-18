@@ -25,6 +25,8 @@ TARGET_TOP_LEVEL_COMMAND_NAMES = {
     "dashboard",
     "userinfo",
     "status",
+    "trusted",
+    "stalker",
 }
 
 REMOVED_TOP_LEVEL_COMMAND_NAMES = {
@@ -42,6 +44,7 @@ ADMIN_ONLY_TOP_LEVEL_COMMAND_NAMES = {
     "autorole",
     "unmute",
     "status",
+    "trusted",
 }
 
 ADMIN_ONLY_COMMAND_ROUTES = (
@@ -64,6 +67,9 @@ ADMIN_ONLY_COMMAND_ROUTES = (
     ("unmute", "remove"),
     ("unmute", "list"),
     ("status", ""),
+    ("trusted", "add"),
+    ("trusted", "remove"),
+    ("trusted", "list"),
 )
 
 REMOVED_COMMAND_ROUTES = (

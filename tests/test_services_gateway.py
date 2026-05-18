@@ -240,6 +240,28 @@ def test_save_member_nickname_snapshot_marks_pending_and_preserves_stored_value(
     assert calls == [("123", "42", "Stored Nick", True)]
 
 
+def test_revoke_stalker_access_removes_trust_and_watchers() -> None:
+    trusted_calls: list[tuple[str, str]] = []
+    stalker_calls: list[tuple[str, str]] = []
+
+    def remove_trusted_user(_ctx, guild_id: str, user_id: str):
+        trusted_calls.append((guild_id, user_id))
+
+    def delete_stalker_subscriptions_by_watcher(_ctx, guild_id: str, user_id: str):
+        stalker_calls.append((guild_id, user_id))
+        return 1
+
+    repo = SimpleNamespace(
+        remove_trusted_user=remove_trusted_user,
+        delete_stalker_subscriptions_by_watcher=delete_stalker_subscriptions_by_watcher,
+    )
+
+    gateway._revoke_stalker_access(repo, "123", "42")
+
+    assert trusted_calls == [("123", "42")]
+    assert stalker_calls == [("123", "42")]
+
+
 async def test_restore_member_nickname_applies_stored_value_and_marks_restored(monkeypatch) -> None:
     restored: list[tuple[str, str, str]] = []
     edit_calls: list[str | None] = []
