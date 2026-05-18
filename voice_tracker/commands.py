@@ -790,14 +790,14 @@ class Service:
             if not user_id:
                 raise ValueError("user is required")
             ids = self.repo.add_trusted_user(ctx, guild_id, user_id)
-            return f"Added <@{user_id}> to trusted users.\n{_describe_trusted_user_list(ids)}"
+            return f"Added <@{user_id}> to trusted users list.\n{_describe_trusted_user_list(ids)}"
         if command == "remove":
             user_id = option_user_id(options, "user")
             if not user_id:
                 raise ValueError("user is required")
             ids = self.repo.remove_trusted_user(ctx, guild_id, user_id)
             self.repo.delete_stalker_subscriptions_by_watcher(ctx, guild_id, user_id)
-            return f"Removed <@{user_id}> from trusted users.\n{_describe_trusted_user_list(ids)}"
+            return f"Removed <@{user_id}> from trusted users list.\n{_describe_trusted_user_list(ids)}"
         if command == "list":
             ids = self.repo.get_trusted_user_ids(ctx, guild_id)
             return _describe_trusted_user_list(ids)
@@ -843,14 +843,14 @@ class Service:
                 ),
             )
             return (
-                f"Stalker enabled for <@{target_user_id}>. "
+                f"Started stalking <@{target_user_id}>. "
                 "DM updates require the stalker service to be running and your DMs to be open."
             )
         if command == "stop":
             removed = self.repo.delete_stalker_subscription(ctx, interaction.guild_id, watcher_user_id, target_user_id)
             if removed:
-                return f"Stalker disabled for <@{target_user_id}>."
-            return f"No active stalker subscription for <@{target_user_id}>."
+                return f"Stopped stalking <@{target_user_id}>."
+            return f"Stalker list does not include <@{target_user_id}>."
         raise ValueError("unknown stalker command")
 
     def handle_dashboard_command(
@@ -1509,14 +1509,14 @@ def _describe_trusted_user_list(user_ids: list[str]) -> str:
     if not user_ids:
         return "Trusted users list is empty."
     mentions = ", ".join(f"<@{uid}>" for uid in user_ids)
-    return f"Trusted users ({len(user_ids)}): {mentions}"
+    return f"Trusted users list ({len(user_ids)}): {mentions}"
 
 
 def _describe_stalker_subscription_list(subscriptions: list[domain.StalkerSubscription]) -> str:
     if not subscriptions:
-        return "You are not stalking anyone."
+        return "Stalker list is empty."
     mentions = ", ".join(f"<@{subscription.target_user_id}>" for subscription in subscriptions)
-    return f"Stalking {len(subscriptions)} user(s): {mentions}"
+    return f"Stalker list ({len(subscriptions)}): {mentions}"
 
 
 def _remove_channel_id(ids: list[str], target: str) -> list[str]:

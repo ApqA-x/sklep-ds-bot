@@ -403,14 +403,14 @@ def test_handle_trusted_commands() -> None:
     interaction = interaction_with_channels("g1", PERMISSION_ADMINISTRATOR)
 
     content = svc.handle_trusted_command(None, interaction, "add", [option("user", "u2")])
-    assert "Added <@u2> to trusted users." in content
+    assert "Added <@u2> to trusted users list." in content
     assert repo.settings["g1"].trusted_user_ids == ["u2"]
 
     content = svc.handle_trusted_command(None, interaction, "list", [])
-    assert "Trusted users (1): <@u2>" == content
+    assert "Trusted users list (1): <@u2>" == content
 
     content = svc.handle_trusted_command(None, interaction, "remove", [option("user", "u2")])
-    assert "Removed <@u2> from trusted users." in content
+    assert "Removed <@u2> from trusted users list." in content
     assert repo.settings["g1"].trusted_user_ids == []
 
 
@@ -445,15 +445,15 @@ def test_handle_stalker_commands_manage_subscriptions() -> None:
     interaction = interaction_with_channels("g1", 0)
 
     content = svc.handle_stalker_command(None, interaction, "start", [option("user", "u2")])
-    assert "Stalker enabled for <@u2>." in content
+    assert "Started stalking <@u2>." in content
     assert "DM updates require the stalker service to be running" in content
     assert ("g1", "u1", "u2") in repo.stalker_subscriptions
 
     content = svc.handle_stalker_command(None, interaction, "list", [])
-    assert content == "Stalking 1 user(s): <@u2>"
+    assert content == "Stalker list (1): <@u2>"
 
     content = svc.handle_stalker_command(None, interaction, "stop", [option("user", "u2")])
-    assert content == "Stalker disabled for <@u2>."
+    assert content == "Stopped stalking <@u2>."
     assert repo.stalker_subscriptions == {}
 
 
