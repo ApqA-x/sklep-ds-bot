@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import warnings
 from datetime import UTC, datetime
@@ -115,6 +116,11 @@ def _build_embed(event: domain.ActivityEvent) -> discord.Embed:
     return embed
 
 
+def _activity_event_from_payload(payload: bytes) -> domain.ActivityEvent:
+    body = json.loads(payload.decode("utf-8"))
+    return domain.ActivityEvent.from_dict(body)
+
+
 async def _resolve_channel(client: discord.Client, channel_id: str):
     snowflake = int(channel_id)
     channel = client.get_channel(snowflake)
@@ -152,8 +158,7 @@ async def main() -> None:
 
     async def handle_activity(payload: bytes) -> None:
         try:
-            body = json.loads(payload.decode("utf-8"))
-            event = domain.ActivityEvent.from_dict(body)
+            event = _activity_event_from_payload(payload)
         except Exception:
             logger.exception("invalid activity payload")
             return

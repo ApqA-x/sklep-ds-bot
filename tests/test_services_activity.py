@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from services import activity
@@ -50,3 +51,24 @@ def test_activity_channel_id_returns_empty_when_not_configured() -> None:
     repo = _Repo(domain.GuildSettings(guild_id="g1", activity_channel_id=""))
 
     assert activity._activity_channel_id(repo, "g1") == ""
+
+
+def test_activity_event_from_payload_decodes_json_bytes() -> None:
+    payload = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_INVITE_USED,
+        guild_id="g1",
+        occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+        member_user_id="42",
+        invite_code="abc",
+        attribution_status=domain.INVITE_ATTRIBUTION_STATUS_EXACT,
+    ).to_dict()
+
+    event = activity._activity_event_from_payload(json_bytes(payload))
+
+    assert event.event_type == domain.ACTIVITY_EVENT_INVITE_USED
+    assert event.guild_id == "g1"
+    assert event.member_user_id == "42"
+
+
+def json_bytes(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload).encode("utf-8")
