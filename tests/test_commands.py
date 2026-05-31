@@ -492,6 +492,16 @@ def test_handle_settings_commands() -> None:
     assert "activity mode: minimal" in content
 
 
+def test_legacy_full_activity_event_set_expands_to_current_full_mode() -> None:
+    settings = domain.GuildSettings(
+        guild_id="g1",
+        activity_event_types=sorted(domain.LEGACY_FULL_ACTIVITY_EVENT_TYPES),
+    )
+
+    assert set(settings.activity_event_types) == set(domain.ACTIVITY_EVENT_TYPES)
+    assert commands_module.activity_mode_from_event_types(settings.activity_event_types) == domain.ACTIVITY_MODE_FULL
+
+
 def test_fallback_summary_channel_is_described() -> None:
     repo = FakeRepo()
     svc = Service(repo)
