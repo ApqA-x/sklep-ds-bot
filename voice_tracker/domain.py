@@ -58,6 +58,14 @@ ACTIVITY_EVENT_TYPES = {
     ACTIVITY_EVENT_REACTION_REMOVE,
 }
 
+LEGACY_FULL_ACTIVITY_EVENT_TYPES = {
+    ACTIVITY_EVENT_MEMBER_JOIN,
+    ACTIVITY_EVENT_MEMBER_LEAVE,
+    ACTIVITY_EVENT_INVITE_CREATE,
+    ACTIVITY_EVENT_INVITE_DELETE,
+    ACTIVITY_EVENT_INVITE_USED,
+}
+
 
 def _clean(value: str | None) -> str:
     return (value or "").strip()
@@ -100,7 +108,10 @@ def clean_text_values(values: list[str] | tuple[str, ...] | None) -> list[str]:
 
 def clean_activity_event_types(values: list[str] | tuple[str, ...] | None) -> list[str]:
     cleaned = [value.lower() for value in _clean_codes(values)]
-    return sorted(value for value in cleaned if value in ACTIVITY_EVENT_TYPES)
+    selected = {value for value in cleaned if value in ACTIVITY_EVENT_TYPES}
+    if selected == LEGACY_FULL_ACTIVITY_EVENT_TYPES:
+        selected = set(ACTIVITY_EVENT_TYPES)
+    return sorted(selected)
 
 
 def invite_catalog_id(guild_id: str, code: str) -> str:
