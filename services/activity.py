@@ -71,8 +71,78 @@ def _label_with_mention(name: str, user_id: str) -> str:
     return "unknown"
 
 
+def _metadata_text(event: domain.ActivityEvent, key: str) -> str:
+    return str(event.metadata.get(key, "") or "").strip()
+
+
+def _channel_label(event: domain.ActivityEvent) -> str:
+    channel_id = _metadata_text(event, "channel_id")
+    return f"<#{channel_id}>" if channel_id else "unknown channel"
+
+
+def _message_link(event: domain.ActivityEvent) -> str:
+    channel_id = _metadata_text(event, "channel_id")
+    message_id = _metadata_text(event, "message_id")
+    if event.guild_id and channel_id and message_id:
+        return f"https://discord.com/channels/{event.guild_id}/{channel_id}/{message_id}"
+    return ""
+
+
+def _snippet(value: str, *, limit: int = 500) -> str:
+    clean = " ".join(str(value or "").split())
+    clean = clean.replace("@everyone", "@ everyone").replace("@here", "@ here")
+    if clean == "":
+        return ""
+    if len(clean) > limit:
+        clean = f"{clean[: limit - 1]}..."
+    return clean
+
+
+def _append_detail(lines: list[str], label: str, value: str) -> None:
+    snippet = _snippet(value)
+    if snippet:
+        lines.append(f"**{label}:** {snippet}")
+
+
 def _embed_description(event: domain.ActivityEvent) -> str:
     return str(_template_payload(event).get("description", ""))
+
+
+def _message_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
+    actor = _actor_label(event)
+    member = _member_label(event)
+    channel = _channel_label(event)
+    link = _message_link(event)
+    if event.event_type == domain.ACTIVITY_EVENT_MESSAGE_CREATE:
+        title = "Message sent"
+        lines = [f"{member} sent a message in {channel}."]
+        _append_detail(lines, "Message", _metadata_text(event, "content"))
+    elif event.event_type == domain.ACTIVITY_EVENT_MESSAGE_UPDATE:
+        title = "Message edited"
+        lines = [f"{member} edited a message in {channel}."]
+        _append_detail(lines, "Before", _metadata_text(event, "before_content"))
+        _append_detail(lines, "After", _metadata_text(event, "after_content"))
+    elif event.event_type == domain.ACTIVITY_EVENT_MESSAGE_DELETE:
+        title = "Message deleted"
+        lines = [f"{member} had a message deleted in {channel}."]
+        _append_detail(lines, "Message", _metadata_text(event, "content"))
+    elif event.event_type == domain.ACTIVITY_EVENT_REACTION_ADD:
+        title = "Reaction added"
+        lines = [f"{actor} reacted to {member}'s message in {channel} with {_metadata_text(event, 'emoji') or 'an emoji'}."]
+    elif event.event_type == domain.ACTIVITY_EVENT_REACTION_REMOVE:
+        title = "Reaction removed"
+        lines = [f"{actor} removed a reaction from {member}'s message in {channel}."]
+        _append_detail(lines, "Reaction", _metadata_text(event, "emoji"))
+    else:
+        return activity_unknown_event.render(payload=event.to_dict())
+    if link:
+        lines.append(f"**Message:** {link}")
+    return {
+        "title": title,
+        "description": "\n".join(lines),
+        "color": 0x5865F2,
+        "footer": "Voice Tracker Activity",
+    }
 
 
 def _template_payload(event: domain.ActivityEvent) -> dict[str, object]:
@@ -101,6 +171,14 @@ def _template_payload(event: domain.ActivityEvent) -> dict[str, object]:
             actor_label=_actor_label(event),
             exact_status_value=domain.INVITE_ATTRIBUTION_STATUS_EXACT,
         )
+    if event.event_type in {
+        domain.ACTIVITY_EVENT_MESSAGE_CREATE,
+        domain.ACTIVITY_EVENT_MESSAGE_UPDATE,
+        domain.ACTIVITY_EVENT_MESSAGE_DELETE,
+        domain.ACTIVITY_EVENT_REACTION_ADD,
+        domain.ACTIVITY_EVENT_REACTION_REMOVE,
+    }:
+        return _message_activity_payload(event)
     return activity_unknown_event.render(payload=event.to_dict())
 
 

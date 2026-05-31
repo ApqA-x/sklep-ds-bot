@@ -46,7 +46,7 @@ EVENT_SIGNING_SECRET=replace-with-a-long-random-secret
 ## Operational Notes
 
 - `services.commands` is the only command registration owner.
-- `services.activity` posts member/invite lifecycle embeds to the configured activity channel.
+- `services.activity` posts member/invite/message/reaction lifecycle embeds to the configured activity channel.
 - `services.stalker` sends DM alerts for watched members using the persisted trusted users allowlist.
 - Auto-unmute clears server mute/deafen state for users on the configured list.
 - `/userinfo` presence status depends on Presence Intent being enabled.
