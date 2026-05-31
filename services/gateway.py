@@ -188,6 +188,75 @@ def _member_display_name(member: object | None) -> str:
     return ""
 
 
+def _message_id(message: object | None) -> str:
+    return str(getattr(message, "id", "") or "").strip()
+
+
+def _message_channel_id(message: object | None) -> str:
+    return _channel_id(getattr(message, "channel", None) or getattr(message, "channel_id", None))
+
+
+def _message_guild_id(message: object | None) -> str:
+    guild_id = _guild_id(message)
+    if guild_id:
+        return guild_id
+    return str(getattr(message, "guild_id", "") or "").strip()
+
+
+def _message_author(message: object | None) -> object | None:
+    return getattr(message, "author", None)
+
+
+def _user_display_name(user: object | None) -> str:
+    for attr in ("display_name", "global_name", "name"):
+        value = str(getattr(user, attr, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _message_author_id(message: object | None) -> str:
+    return str(getattr(_message_author(message), "id", "") or "").strip()
+
+
+def _message_author_name(message: object | None) -> str:
+    return _user_display_name(_message_author(message))
+
+
+def _message_author_is_bot(message: object | None) -> bool:
+    return bool(getattr(_message_author(message), "bot", False))
+
+
+def _message_content(message: object | None) -> str:
+    return str(getattr(message, "content", "") or "").strip()
+
+
+def _raw_payload_guild_id(payload: object | None) -> str:
+    return str(getattr(payload, "guild_id", "") or "").strip()
+
+
+def _raw_payload_user_id(payload: object | None) -> str:
+    return str(getattr(payload, "user_id", "") or "").strip()
+
+
+def _raw_payload_channel_id(payload: object | None) -> str:
+    return str(getattr(payload, "channel_id", "") or "").strip()
+
+
+def _raw_payload_message_id(payload: object | None) -> str:
+    return str(getattr(payload, "message_id", "") or "").strip()
+
+
+def _emoji_label(emoji: object | None) -> str:
+    if emoji is None:
+        return ""
+    custom_id = str(getattr(emoji, "id", "") or "").strip()
+    name = str(getattr(emoji, "name", "") or "").strip()
+    if custom_id and name:
+        return f":{name}:"
+    return str(emoji).strip() or name
+
+
 def _activity_event(
     *,
     event_type: str,
@@ -223,6 +292,41 @@ async def _resolve_channel(client: discord.Client, channel_id: str):
     if channel is None:
         channel = await client.fetch_channel(snowflake)
     return channel
+
+
+async def _resolve_user_name(client: discord.Client, guild_id: str, user_id: str) -> str:
+    guild = _guild_from_client(client, guild_id)
+    if guild is not None:
+        member = await _resolve_member(guild, user_id)
+        if member is not None:
+            return _member_display_name(member)
+    try:
+        snowflake = int(user_id)
+    except ValueError:
+        return ""
+    user = client.get_user(snowflake)
+    if user is None:
+        try:
+            user = await client.fetch_user(snowflake)
+        except Exception:
+            return ""
+    return _user_display_name(user)
+
+
+async def _fetch_message_for_activity(client: discord.Client, channel_id: str, message_id: str) -> object | None:
+    if channel_id == "" or message_id == "":
+        return None
+    try:
+        channel = await _resolve_channel(client, channel_id)
+    except Exception:
+        return None
+    fetch_message = getattr(channel, "fetch_message", None)
+    if not callable(fetch_message):
+        return None
+    try:
+        return await fetch_message(int(message_id))
+    except Exception:
+        return None
 
 
 async def _send_summary(client: discord.Client, channel_id: str, message: str) -> None:
@@ -1685,6 +1789,8 @@ async def main() -> None:
     intents.guilds = True
     intents.voice_states = True
     intents.members = True
+    intents.messages = True
+    intents.reactions = True
     client = discord.Client(intents=intents)
     GatewayService(client, bus).install()
     invite_attribution = InviteAttributionController(
@@ -1880,6 +1986,136 @@ async def main() -> None:
             await invite_attribution.on_invite_delete(invite)
         except Exception:
             logger.exception("invite delete refresh failed guild=%s code=%s", _guild_id(invite), _invite_code(invite))
+
+    @client.event
+    async def on_message(message: discord.Message) -> None:
+        guild_id = _message_guild_id(message)
+        if guild_id != cfg.discord_guild_id or _message_author_is_bot(message):
+            return
+        try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=domain.ACTIVITY_EVENT_MESSAGE_CREATE,
+                    guild_id=guild_id,
+                    occurred_at=_ensure_utc(getattr(message, "created_at", None)) or _utc_now(),
+                    member_user_id=_message_author_id(message),
+                    member_name=_message_author_name(message),
+                    metadata={
+                        "channel_id": _message_channel_id(message),
+                        "message_id": _message_id(message),
+                        "content": _message_content(message),
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("message create activity publish failed guild=%s message=%s", guild_id, _message_id(message))
+
+    @client.event
+    async def on_raw_message_edit(payload: object) -> None:
+        guild_id = _raw_payload_guild_id(payload)
+        if guild_id != cfg.discord_guild_id:
+            return
+        cached = getattr(payload, "cached_message", None)
+        data = getattr(payload, "data", {}) if isinstance(getattr(payload, "data", {}), dict) else {}
+        author = data.get("author") if isinstance(data.get("author"), dict) else {}
+        if _message_author_is_bot(cached) or bool(author.get("bot", False)):
+            return
+        before_content = _message_content(cached)
+        after_content = str(data.get("content", "") or "").strip()
+        if before_content == "" and after_content == "":
+            return
+        if before_content == after_content:
+            return
+        user_id = _message_author_id(cached) or str(author.get("id", "") or "").strip()
+        user_name = _message_author_name(cached) or _user_display_name(SimpleNamespace(**author))
+        try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=domain.ACTIVITY_EVENT_MESSAGE_UPDATE,
+                    guild_id=guild_id,
+                    occurred_at=_utc_now(),
+                    member_user_id=user_id,
+                    member_name=user_name,
+                    metadata={
+                        "channel_id": _raw_payload_channel_id(payload),
+                        "message_id": _raw_payload_message_id(payload),
+                        "before_content": before_content,
+                        "after_content": after_content,
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("message update activity publish failed guild=%s message=%s", guild_id, _raw_payload_message_id(payload))
+
+    @client.event
+    async def on_raw_message_delete(payload: object) -> None:
+        guild_id = _raw_payload_guild_id(payload)
+        if guild_id != cfg.discord_guild_id:
+            return
+        cached = getattr(payload, "cached_message", None)
+        if _message_author_is_bot(cached):
+            return
+        try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=domain.ACTIVITY_EVENT_MESSAGE_DELETE,
+                    guild_id=guild_id,
+                    occurred_at=_utc_now(),
+                    member_user_id=_message_author_id(cached),
+                    member_name=_message_author_name(cached),
+                    metadata={
+                        "channel_id": _raw_payload_channel_id(payload),
+                        "message_id": _raw_payload_message_id(payload),
+                        "content": _message_content(cached),
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("message delete activity publish failed guild=%s message=%s", guild_id, _raw_payload_message_id(payload))
+
+    async def _publish_reaction_activity(payload: object, event_type: str) -> None:
+        guild_id = _raw_payload_guild_id(payload)
+        if guild_id != cfg.discord_guild_id:
+            return
+        actor_user_id = _raw_payload_user_id(payload)
+        bot_user_id = str(getattr(getattr(client, "user", None), "id", "") or "")
+        if actor_user_id != "" and actor_user_id == bot_user_id:
+            return
+        member = getattr(payload, "member", None)
+        if bool(getattr(member, "bot", False)):
+            return
+        channel_id = _raw_payload_channel_id(payload)
+        message_id = _raw_payload_message_id(payload)
+        message = await _fetch_message_for_activity(client, channel_id, message_id)
+        if _message_author_is_bot(message):
+            return
+        try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=event_type,
+                    guild_id=guild_id,
+                    occurred_at=_utc_now(),
+                    member_user_id=_message_author_id(message),
+                    member_name=_message_author_name(message),
+                    actor_user_id=actor_user_id,
+                    actor_name=_member_display_name(member) or await _resolve_user_name(client, guild_id, actor_user_id),
+                    metadata={
+                        "channel_id": channel_id,
+                        "message_id": message_id,
+                        "emoji": _emoji_label(getattr(payload, "emoji", None)),
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("reaction activity publish failed guild=%s message=%s event=%s", guild_id, message_id, event_type)
+
+    @client.event
+    async def on_raw_reaction_add(payload: object) -> None:
+        await _publish_reaction_activity(payload, domain.ACTIVITY_EVENT_REACTION_ADD)
+
+    @client.event
+    async def on_raw_reaction_remove(payload: object) -> None:
+        await _publish_reaction_activity(payload, domain.ACTIVITY_EVENT_REACTION_REMOVE)
 
     async def _on_voice_state_update_unmute(
         member: discord.Member, before: discord.VoiceState, after: discord.VoiceState

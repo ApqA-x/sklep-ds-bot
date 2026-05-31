@@ -19,10 +19,10 @@ Recent production stabilization changes include:
   - dashboard ranking card.
 - Refactored `services.activity`, `services.gateway`, and `services.commands` to render embeds via these templates for easier customization.
 - Migrated invite behavior from env-first controls to persisted guild settings with automatic internal management.
-- Added a new `services.activity` service that consumes `activity.events` and posts member/invite lifecycle embeds.
+- Added a new `services.activity` service that consumes `activity.events` and posts member/invite/message/reaction lifecycle embeds.
 - Added a new `services.stalker` service that consumes `voice.events` plus member lifecycle activity and sends DM alerts to trusted watchers.
 - Simplified `/settings` UX: internal invite mechanics are hidden, and activity feed is controlled by a single mode (`off|minimal|full`) plus channel selection.
-- Gateway now publishes activity events for member join/leave, invite create/delete, and invite attribution outcomes.
+- Gateway now publishes activity events for member join/leave, invite create/delete, invite attribution outcomes, message changes, and reactions.
 - Added `/trusted add|remove|list` to maintain a persisted guild-level trusted users allowlist.
 - Added `/stalker start|stop|list` for trusted users to receive DM alerts about watched members.
 
@@ -91,7 +91,7 @@ Important variables:
 
 `BOT_ADMIN_USER_IDS` remains for compatibility but is not the primary admin policy path.
 
-Activity behavior is configured at runtime through `/settings` and persisted in `guild_settings`. Invite attribution internals run automatically.
+Activity behavior is configured at runtime through `/settings` and persisted in `guild_settings`. Full mode includes member, invite, message, and reaction events. Invite attribution internals run automatically.
 Trusted-user access for `/stalker` is configured at runtime through `/trusted` and persisted in `guild_settings`.
 `/stalker` delivery requires the `services.stalker` worker to be healthy and the watcher's Discord DMs to be open.
 

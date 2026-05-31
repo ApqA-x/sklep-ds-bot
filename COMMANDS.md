@@ -31,7 +31,7 @@ Last updated: May 7, 2026.
   - Control activity feed intensity with one setting.
   - `off`: no activity feed messages.
   - `minimal`: member join/leave + invite-used attribution messages.
-  - `full`: all activity events (join/leave/invite create/invite delete/invite used).
+  - `full`: all activity events (member/invite lifecycle, message send/edit/delete, reaction add/remove).
 
 - `/connect channel:<voice|stage>`
   - Set managed voice channel and enable sticky voice presence.
