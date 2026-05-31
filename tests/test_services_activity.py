@@ -70,7 +70,29 @@ def test_activity_event_from_payload_decodes_json_bytes() -> None:
     assert event.member_user_id == "42"
 
 
-def test_message_update_embed_includes_channel_and_before_after_snippets() -> None:
+def test_message_create_embed_puts_written_content_front_and_center() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_MESSAGE_CREATE,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        metadata={
+            "channel_id": "100",
+            "message_id": "200",
+            "content": "hello admin log",
+        },
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Author:** Alice <@42>" in description
+    assert "**Channel:** <#100>" in description
+    assert "**Content:**" in description
+    assert "hello admin log" in description
+    assert "https://discord.com/channels/g1/100/200" in description
+
+
+def test_message_update_embed_includes_channel_and_before_after_content_blocks() -> None:
     event = domain.ActivityEvent(
         event_type=domain.ACTIVITY_EVENT_MESSAGE_UPDATE,
         guild_id="g1",
@@ -86,10 +108,28 @@ def test_message_update_embed_includes_channel_and_before_after_snippets() -> No
 
     description = activity._embed_description(event)
 
-    assert "Alice <@42>" in description
-    assert "<#100>" in description
+    assert "**Author:** Alice <@42>" in description
+    assert "**Channel:** <#100>" in description
+    assert "**Before:**" in description
     assert "old text" in description
+    assert "**After:**" in description
     assert "new text" in description
+    assert "https://discord.com/channels/g1/100/200" in description
+
+
+def test_message_delete_embed_includes_deleted_content_when_available() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_MESSAGE_DELETE,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        metadata={"channel_id": "100", "message_id": "200", "content": "bad deleted text"},
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Deleted content:**" in description
+    assert "bad deleted text" in description
     assert "https://discord.com/channels/g1/100/200" in description
 
 
@@ -106,8 +146,8 @@ def test_reaction_remove_embed_includes_actor_emoji_and_message_link() -> None:
 
     description = activity._embed_description(event)
 
-    assert "Bob <@7>" in description
-    assert "Alice <@42>" in description
+    assert "**Actor:** Bob <@7>" in description
+    assert "**Message author:** Alice <@42>" in description
     assert "thumbsup" in description
     assert "https://discord.com/channels/g1/100/200" in description
 
