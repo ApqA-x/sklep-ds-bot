@@ -89,8 +89,9 @@ def _message_link(event: domain.ActivityEvent) -> str:
 
 
 def _snippet(value: str, *, limit: int = 500) -> str:
-    clean = " ".join(str(value or "").split())
+    clean = str(value or "").strip()
     clean = clean.replace("@everyone", "@ everyone").replace("@here", "@ here")
+    clean = clean.replace("```", "`\u200b``")
     if clean == "":
         return ""
     if len(clean) > limit:
@@ -98,10 +99,18 @@ def _snippet(value: str, *, limit: int = 500) -> str:
     return clean
 
 
-def _append_detail(lines: list[str], label: str, value: str) -> None:
+def _append_content_block(lines: list[str], label: str, value: str) -> None:
     snippet = _snippet(value)
     if snippet:
-        lines.append(f"**{label}:** {snippet}")
+        lines.append(f"**{label}:**\n```text\n{snippet}\n```")
+    else:
+        lines.append(f"**{label}:** unavailable")
+
+
+def _append_fact(lines: list[str], label: str, value: str) -> None:
+    clean = _snippet(value, limit=120)
+    if clean:
+        lines.append(f"**{label}:** {clean}")
 
 
 def _embed_description(event: domain.ActivityEvent) -> str:
@@ -113,26 +122,41 @@ def _message_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
     member = _member_label(event)
     channel = _channel_label(event)
     link = _message_link(event)
+    message_id = _metadata_text(event, "message_id")
     if event.event_type == domain.ACTIVITY_EVENT_MESSAGE_CREATE:
         title = "Message sent"
-        lines = [f"{member} sent a message in {channel}."]
-        _append_detail(lines, "Message", _metadata_text(event, "content"))
+        lines = [f"**Author:** {member}", f"**Channel:** {channel}"]
+        _append_fact(lines, "Message ID", message_id)
+        _append_content_block(lines, "Content", _metadata_text(event, "content"))
     elif event.event_type == domain.ACTIVITY_EVENT_MESSAGE_UPDATE:
         title = "Message edited"
-        lines = [f"{member} edited a message in {channel}."]
-        _append_detail(lines, "Before", _metadata_text(event, "before_content"))
-        _append_detail(lines, "After", _metadata_text(event, "after_content"))
+        lines = [f"**Author:** {member}", f"**Channel:** {channel}"]
+        _append_fact(lines, "Message ID", message_id)
+        _append_content_block(lines, "Before", _metadata_text(event, "before_content"))
+        _append_content_block(lines, "After", _metadata_text(event, "after_content"))
     elif event.event_type == domain.ACTIVITY_EVENT_MESSAGE_DELETE:
         title = "Message deleted"
-        lines = [f"{member} had a message deleted in {channel}."]
-        _append_detail(lines, "Message", _metadata_text(event, "content"))
+        lines = [f"**Author:** {member}", f"**Channel:** {channel}"]
+        _append_fact(lines, "Message ID", message_id)
+        _append_content_block(lines, "Deleted content", _metadata_text(event, "content"))
     elif event.event_type == domain.ACTIVITY_EVENT_REACTION_ADD:
         title = "Reaction added"
-        lines = [f"{actor} reacted to {member}'s message in {channel} with {_metadata_text(event, 'emoji') or 'an emoji'}."]
+        lines = [
+            f"**Actor:** {actor}",
+            f"**Message author:** {member}",
+            f"**Channel:** {channel}",
+            f"**Reaction:** {_metadata_text(event, 'emoji') or 'unknown emoji'}",
+        ]
+        _append_fact(lines, "Message ID", message_id)
     elif event.event_type == domain.ACTIVITY_EVENT_REACTION_REMOVE:
         title = "Reaction removed"
-        lines = [f"{actor} removed a reaction from {member}'s message in {channel}."]
-        _append_detail(lines, "Reaction", _metadata_text(event, "emoji"))
+        lines = [
+            f"**Actor:** {actor}",
+            f"**Message author:** {member}",
+            f"**Channel:** {channel}",
+            f"**Reaction:** {_metadata_text(event, 'emoji') or 'unknown emoji'}",
+        ]
+        _append_fact(lines, "Message ID", message_id)
     else:
         return activity_unknown_event.render(payload=event.to_dict())
     if link:
@@ -209,7 +233,7 @@ async def _resolve_channel(client: discord.Client, channel_id: str):
 
 async def _send_activity(client: discord.Client, channel_id: str, embed: discord.Embed) -> None:
     channel = await _resolve_channel(client, channel_id)
-    await channel.send(embed=embed)
+    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def main() -> None:

@@ -257,6 +257,14 @@ def _emoji_label(emoji: object | None) -> str:
     return str(emoji).strip() or name
 
 
+def _message_cache_key(channel_id: str, message_id: str) -> str:
+    channel_id = str(channel_id or "").strip()
+    message_id = str(message_id or "").strip()
+    if channel_id == "" or message_id == "":
+        return ""
+    return f"{channel_id}:{message_id}"
+
+
 def _activity_event(
     *,
     event_type: str,
@@ -1791,6 +1799,7 @@ async def main() -> None:
     intents.members = True
     intents.messages = True
     intents.reactions = True
+    intents.message_content = True
     client = discord.Client(intents=intents)
     GatewayService(client, bus).install()
     invite_attribution = InviteAttributionController(
@@ -1813,6 +1822,44 @@ async def main() -> None:
         if event.guild_id != cfg.discord_guild_id:
             return
         await bus.publish_json(None, domain.SUBJECT_ACTIVITY_EVENT, event.to_dict())
+
+    message_cache: dict[str, dict[str, str]] = {}
+    message_cache_order: list[str] = []
+    message_cache_limit = 5000
+
+    def remember_message_for_activity(message: object) -> dict[str, str]:
+        channel_id = _message_channel_id(message)
+        message_id = _message_id(message)
+        snapshot = {
+            "guild_id": _message_guild_id(message),
+            "channel_id": channel_id,
+            "message_id": message_id,
+            "author_id": _message_author_id(message),
+            "author_name": _message_author_name(message),
+            "content": _message_content(message),
+        }
+        key = _message_cache_key(channel_id, message_id)
+        if key:
+            if key not in message_cache:
+                message_cache_order.append(key)
+            message_cache[key] = snapshot
+            while len(message_cache_order) > message_cache_limit:
+                stale_key = message_cache_order.pop(0)
+                message_cache.pop(stale_key, None)
+        return snapshot
+
+    def cached_message_snapshot(channel_id: str, message_id: str) -> dict[str, str]:
+        return dict(message_cache.get(_message_cache_key(channel_id, message_id), {}))
+
+    def forget_message_snapshot(channel_id: str, message_id: str) -> dict[str, str]:
+        key = _message_cache_key(channel_id, message_id)
+        snapshot = dict(message_cache.pop(key, {}))
+        if key:
+            try:
+                message_cache_order.remove(key)
+            except ValueError:
+                pass
+        return snapshot
 
     async def publish_invite_used_activity(attribution: object) -> None:
         event = _activity_event(
@@ -1992,18 +2039,19 @@ async def main() -> None:
         guild_id = _message_guild_id(message)
         if guild_id != cfg.discord_guild_id or _message_author_is_bot(message):
             return
+        snapshot = remember_message_for_activity(message)
         try:
             await publish_activity_event(
                 _activity_event(
                     event_type=domain.ACTIVITY_EVENT_MESSAGE_CREATE,
                     guild_id=guild_id,
                     occurred_at=_ensure_utc(getattr(message, "created_at", None)) or _utc_now(),
-                    member_user_id=_message_author_id(message),
-                    member_name=_message_author_name(message),
+                    member_user_id=snapshot.get("author_id", ""),
+                    member_name=snapshot.get("author_name", ""),
                     metadata={
-                        "channel_id": _message_channel_id(message),
-                        "message_id": _message_id(message),
-                        "content": _message_content(message),
+                        "channel_id": snapshot.get("channel_id", ""),
+                        "message_id": snapshot.get("message_id", ""),
+                        "content": snapshot.get("content", ""),
                     },
                 )
             )
@@ -2020,14 +2068,37 @@ async def main() -> None:
         author = data.get("author") if isinstance(data.get("author"), dict) else {}
         if _message_author_is_bot(cached) or bool(author.get("bot", False)):
             return
-        before_content = _message_content(cached)
+        channel_id = _raw_payload_channel_id(payload)
+        message_id = _raw_payload_message_id(payload)
+        previous = cached_message_snapshot(channel_id, message_id)
+        before_content = previous.get("content", "") or _message_content(cached)
         after_content = str(data.get("content", "") or "").strip()
         if before_content == "" and after_content == "":
             return
         if before_content == after_content:
             return
-        user_id = _message_author_id(cached) or str(author.get("id", "") or "").strip()
-        user_name = _message_author_name(cached) or _user_display_name(SimpleNamespace(**author))
+        user_id = previous.get("author_id", "") or _message_author_id(cached) or str(author.get("id", "") or "").strip()
+        user_name = previous.get("author_name", "") or _message_author_name(cached) or _user_display_name(SimpleNamespace(**author))
+        if cached is not None:
+            snapshot = remember_message_for_activity(cached)
+            if after_content:
+                snapshot["content"] = after_content
+                key = _message_cache_key(channel_id, message_id)
+                if key:
+                    message_cache[key] = snapshot
+        elif after_content:
+            key = _message_cache_key(channel_id, message_id)
+            if key:
+                if key not in message_cache:
+                    message_cache_order.append(key)
+                message_cache[key] = {
+                    "guild_id": guild_id,
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "author_id": user_id,
+                    "author_name": user_name,
+                    "content": after_content,
+                }
         try:
             await publish_activity_event(
                 _activity_event(
@@ -2037,8 +2108,8 @@ async def main() -> None:
                     member_user_id=user_id,
                     member_name=user_name,
                     metadata={
-                        "channel_id": _raw_payload_channel_id(payload),
-                        "message_id": _raw_payload_message_id(payload),
+                        "channel_id": channel_id,
+                        "message_id": message_id,
                         "before_content": before_content,
                         "after_content": after_content,
                     },
@@ -2055,18 +2126,24 @@ async def main() -> None:
         cached = getattr(payload, "cached_message", None)
         if _message_author_is_bot(cached):
             return
+        channel_id = _raw_payload_channel_id(payload)
+        message_id = _raw_payload_message_id(payload)
+        snapshot = forget_message_snapshot(channel_id, message_id)
+        author_id = snapshot.get("author_id", "") or _message_author_id(cached)
+        author_name = snapshot.get("author_name", "") or _message_author_name(cached)
+        content = snapshot.get("content", "") or _message_content(cached)
         try:
             await publish_activity_event(
                 _activity_event(
                     event_type=domain.ACTIVITY_EVENT_MESSAGE_DELETE,
                     guild_id=guild_id,
                     occurred_at=_utc_now(),
-                    member_user_id=_message_author_id(cached),
-                    member_name=_message_author_name(cached),
+                    member_user_id=author_id,
+                    member_name=author_name,
                     metadata={
-                        "channel_id": _raw_payload_channel_id(payload),
-                        "message_id": _raw_payload_message_id(payload),
-                        "content": _message_content(cached),
+                        "channel_id": channel_id,
+                        "message_id": message_id,
+                        "content": content,
                     },
                 )
             )
