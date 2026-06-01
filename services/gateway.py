@@ -215,6 +215,40 @@ def _user_display_name(user: object | None) -> str:
     return ""
 
 
+def _avatar_url(user: object | None) -> str:
+    avatar = getattr(user, "display_avatar", None) or getattr(user, "avatar", None)
+    url = str(getattr(avatar, "url", "") or "").strip()
+    if url:
+        return url
+    if avatar is not None:
+        value = str(avatar).strip()
+        if value.startswith(("http://", "https://")):
+            return value
+    return ""
+
+
+def _member_avatar_url(member: object | None) -> str:
+    return _avatar_url(member) or _avatar_url(getattr(member, "user", None))
+
+
+def _role_label(role: object | None) -> str:
+    role_id = str(getattr(role, "id", "") or "").strip()
+    role_name = str(getattr(role, "name", "") or "").strip()
+    mentionable = f"<@&{role_id}>" if role_id else ""
+    if role_name and mentionable:
+        return f"{role_name} {mentionable}"
+    return role_name or mentionable or role_id
+
+
+def _role_labels_by_id(member: object | None) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for role in list(getattr(member, "roles", []) or []):
+        role_id = str(getattr(role, "id", "") or "").strip()
+        if role_id:
+            labels[role_id] = _role_label(role)
+    return labels
+
+
 def _message_author_id(message: object | None) -> str:
     return str(getattr(_message_author(message), "id", "") or "").strip()
 
@@ -335,6 +369,24 @@ async def _fetch_message_for_activity(client: discord.Client, channel_id: str, m
         return await fetch_message(int(message_id))
     except Exception:
         return None
+
+
+async def _audit_actor_for_member_change(guild: discord.Guild, member_id: str, action: object) -> tuple[str, str, str]:
+    try:
+        await asyncio.sleep(1.0)
+        newest_allowed = _utc_now() - timedelta(seconds=15)
+        async for entry in guild.audit_logs(limit=6, action=action):
+            target = getattr(entry, "target", None)
+            if str(getattr(target, "id", "") or "") != str(member_id or ""):
+                continue
+            created_at = _ensure_utc(getattr(entry, "created_at", None))
+            if created_at is not None and created_at < newest_allowed:
+                continue
+            user = getattr(entry, "user", None)
+            return str(getattr(user, "id", "") or ""), _user_display_name(user), _avatar_url(user)
+    except Exception:
+        return "", "", ""
+    return "", "", ""
 
 
 async def _send_summary(client: discord.Client, channel_id: str, message: str) -> None:
@@ -1901,6 +1953,7 @@ async def main() -> None:
                     occurred_at=_join_occurred_at(member),
                     member_user_id=str(member.id),
                     member_name=_member_display_name(member),
+                    metadata={"member_avatar_url": _member_avatar_url(member)},
                 )
             )
         except Exception:
@@ -1964,6 +2017,7 @@ async def main() -> None:
                     occurred_at=_utc_now(),
                     member_user_id=str(member.id),
                     member_name=_member_display_name(member),
+                    metadata={"member_avatar_url": _member_avatar_url(member)},
                 )
             )
         except Exception:
@@ -1991,6 +2045,58 @@ async def main() -> None:
             _record_member_nickname_change(repo, before, after, source="member_update")
         except Exception:
             logger.exception("member nickname update failed guild=%s member=%s", after.guild.id, after.id)
+        before_nickname = _member_nickname(before)
+        after_nickname = _member_nickname(after)
+        before_role_ids = set(_member_role_ids(before))
+        after_role_ids = set(_member_role_ids(after))
+        role_labels = {**_role_labels_by_id(before), **_role_labels_by_id(after)}
+        try:
+            if before_nickname != after_nickname:
+                actor_id, actor_name, actor_avatar_url = await _audit_actor_for_member_change(
+                    after.guild, str(after.id), discord.AuditLogAction.member_update
+                )
+                await publish_activity_event(
+                    _activity_event(
+                        event_type=domain.ACTIVITY_EVENT_PROFILE_NICKNAME_UPDATE,
+                        guild_id=str(after.guild.id),
+                        occurred_at=_utc_now(),
+                        member_user_id=str(after.id),
+                        member_name=_member_display_name(after),
+                        actor_user_id=actor_id,
+                        actor_name=actor_name,
+                        metadata={
+                            "before_nickname": before_nickname,
+                            "after_nickname": after_nickname,
+                            "member_avatar_url": _member_avatar_url(after),
+                            "actor_avatar_url": actor_avatar_url,
+                        },
+                    )
+                )
+            if before_role_ids != after_role_ids:
+                actor_id, actor_name, actor_avatar_url = await _audit_actor_for_member_change(
+                    after.guild, str(after.id), discord.AuditLogAction.member_role_update
+                )
+                added = sorted(after_role_ids - before_role_ids)
+                removed = sorted(before_role_ids - after_role_ids)
+                await publish_activity_event(
+                    _activity_event(
+                        event_type=domain.ACTIVITY_EVENT_PROFILE_ROLES_UPDATE,
+                        guild_id=str(after.guild.id),
+                        occurred_at=_utc_now(),
+                        member_user_id=str(after.id),
+                        member_name=_member_display_name(after),
+                        actor_user_id=actor_id,
+                        actor_name=actor_name,
+                        metadata={
+                            "added_roles": ", ".join(role_labels.get(role_id, role_id) for role_id in added),
+                            "removed_roles": ", ".join(role_labels.get(role_id, role_id) for role_id in removed),
+                            "member_avatar_url": _member_avatar_url(after),
+                            "actor_avatar_url": actor_avatar_url,
+                        },
+                    )
+                )
+        except Exception:
+            logger.exception("member profile activity publish failed guild=%s member=%s", after.guild.id, after.id)
 
     @client.event
     async def on_invite_create(invite: object) -> None:
@@ -2004,6 +2110,7 @@ async def main() -> None:
                     actor_name=_invite_inviter_name(invite),
                     invite_code=_invite_code(invite),
                     invite_url=_invite_url(invite, _invite_code(invite)),
+                    metadata={"actor_avatar_url": _avatar_url(getattr(invite, "inviter", None))},
                 )
             )
         except Exception:
@@ -2025,6 +2132,7 @@ async def main() -> None:
                     actor_name=_invite_inviter_name(invite),
                     invite_code=_invite_code(invite),
                     invite_url=_invite_url(invite, _invite_code(invite)),
+                    metadata={"actor_avatar_url": _avatar_url(getattr(invite, "inviter", None))},
                 )
             )
         except Exception:
@@ -2052,6 +2160,7 @@ async def main() -> None:
                         "channel_id": snapshot.get("channel_id", ""),
                         "message_id": snapshot.get("message_id", ""),
                         "content": snapshot.get("content", ""),
+                        "member_avatar_url": _member_avatar_url(_message_author(message)),
                     },
                 )
             )
@@ -2112,6 +2221,7 @@ async def main() -> None:
                         "message_id": message_id,
                         "before_content": before_content,
                         "after_content": after_content,
+                        "member_avatar_url": _member_avatar_url(_message_author(cached)),
                     },
                 )
             )
@@ -2144,6 +2254,7 @@ async def main() -> None:
                         "channel_id": channel_id,
                         "message_id": message_id,
                         "content": content,
+                        "member_avatar_url": _member_avatar_url(_message_author(cached)),
                     },
                 )
             )
@@ -2180,6 +2291,8 @@ async def main() -> None:
                         "channel_id": channel_id,
                         "message_id": message_id,
                         "emoji": _emoji_label(getattr(payload, "emoji", None)),
+                        "member_avatar_url": _member_avatar_url(_message_author(message)),
+                        "actor_avatar_url": _member_avatar_url(member),
                     },
                 )
             )
@@ -2193,6 +2306,43 @@ async def main() -> None:
     @client.event
     async def on_raw_reaction_remove(payload: object) -> None:
         await _publish_reaction_activity(payload, domain.ACTIVITY_EVENT_REACTION_REMOVE)
+
+    async def _on_voice_state_update_activity(
+        member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
+    ) -> None:
+        if str(getattr(member.guild, "id", "") or "") != cfg.discord_guild_id:
+            return
+        if getattr(member, "bot", False):
+            return
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        before_channel_id = _channel_id(before_channel)
+        after_channel_id = _channel_id(after_channel)
+        if before_channel_id == after_channel_id:
+            return
+        if before_channel_id == "":
+            event_type = domain.ACTIVITY_EVENT_VOICE_JOIN
+        elif after_channel_id == "":
+            event_type = domain.ACTIVITY_EVENT_VOICE_LEAVE
+        else:
+            event_type = domain.ACTIVITY_EVENT_VOICE_MOVE
+        try:
+            await publish_activity_event(
+                _activity_event(
+                    event_type=event_type,
+                    guild_id=str(member.guild.id),
+                    occurred_at=_utc_now(),
+                    member_user_id=str(member.id),
+                    member_name=_member_display_name(member),
+                    metadata={
+                        "previous_channel_id": before_channel_id,
+                        "channel_id": after_channel_id,
+                        "member_avatar_url": _member_avatar_url(member),
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("voice activity publish failed guild=%s member=%s", member.guild.id, member.id)
 
     async def _on_voice_state_update_unmute(
         member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
@@ -2277,6 +2427,7 @@ async def main() -> None:
             ",".join(sorted(edit_kwargs)),
         )
 
+    install_event_listener(client, "on_voice_state_update", _on_voice_state_update_activity)
     install_event_listener(client, "on_voice_state_update", _on_voice_state_update_unmute)
     install_event_listener(client, "on_voice_state_update", voice_controller.on_voice_state_update)
     install_event_listener(client, "on_voice_channel_effect", soundboard_enforcement.on_voice_channel_effect)

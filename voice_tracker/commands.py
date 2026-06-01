@@ -314,8 +314,36 @@ class Service:
         self._save(ctx, settings)
         return settings
 
+    def set_activity_category_channel(
+        self, ctx: Any, guild_id: str, category: str, channel_id: str
+    ) -> domain.GuildSettings:
+        category = domain.clean_activity_category(category)
+        if not category:
+            raise ValueError("category must be one of: join-leave, messages, voice-log, profile")
+        settings = self.get_guild_settings(ctx, guild_id)
+        settings.activity_category_channel_ids = {
+            **domain.clean_activity_category_channel_ids(getattr(settings, "activity_category_channel_ids", {})),
+            category: (channel_id or "").strip(),
+        }
+        self._save(ctx, settings)
+        return settings
+
     def clear_activity_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
-        return self.set_activity_channel(ctx, guild_id, "")
+        settings = self.set_activity_channel(ctx, guild_id, "")
+        settings.activity_category_channel_ids = {}
+        self._save(ctx, settings)
+        return settings
+
+    def clear_activity_category_channel(self, ctx: Any, guild_id: str, category: str) -> domain.GuildSettings:
+        category = domain.clean_activity_category(category)
+        if not category:
+            raise ValueError("category must be one of: join-leave, messages, voice-log, profile")
+        settings = self.get_guild_settings(ctx, guild_id)
+        category_channels = domain.clean_activity_category_channel_ids(getattr(settings, "activity_category_channel_ids", {}))
+        category_channels.pop(category, None)
+        settings.activity_category_channel_ids = category_channels
+        self._save(ctx, settings)
+        return settings
 
     def set_activity_mode(self, ctx: Any, guild_id: str, mode: str) -> domain.GuildSettings:
         mode = (mode or "").strip().lower()
@@ -382,6 +410,9 @@ class Service:
         soundboard_enforcement = "on" if bool(getattr(settings, "soundboard_enforcement_enabled", False)) else "off"
         activity_channel_id = _optional_setting(settings, "activity_channel_id", _optional_setting(settings, "activityChannelId", ""))
         activity_channel = _channel_mention(activity_channel_id) if activity_channel_id else "not set"
+        category_channels = domain.clean_activity_category_channel_ids(
+            getattr(settings, "activity_category_channel_ids", getattr(settings, "activityCategoryChannelIds", {}))
+        )
         raw_activity_events = getattr(settings, "activity_event_types", getattr(settings, "activityEventTypes", []))
         activity_mode = activity_mode_from_event_types(raw_activity_events)
         lines: list[str] = []
@@ -392,6 +423,15 @@ class Service:
         lines.append(f"voice connection: {managed_voice_channel}")
         lines.append(f"soundboard enforcement: {soundboard_enforcement}")
         lines.append(f"activity channel: {activity_channel}")
+        for category in sorted(domain.ACTIVITY_CATEGORIES):
+            channel_id = category_channels.get(category, "")
+            if channel_id:
+                destination = _channel_mention(channel_id)
+            elif activity_channel_id:
+                destination = f"global {_channel_mention(activity_channel_id)}"
+            else:
+                destination = "disabled"
+            lines.append(f"activity {category}: {destination}")
         lines.append(f"activity mode: {activity_mode}")
         created_at = format_time(settings.created_at)
         if created_at != "":
@@ -561,6 +601,9 @@ class Service:
         settings.invite_reconciliation_enabled = bool(getattr(settings, "invite_reconciliation_enabled", False))
         settings.trusted_user_ids = domain.clean_channel_ids(getattr(settings, "trusted_user_ids", []))
         settings.activity_channel_id = str(getattr(settings, "activity_channel_id", "") or "").strip()
+        settings.activity_category_channel_ids = domain.clean_activity_category_channel_ids(
+            getattr(settings, "activity_category_channel_ids", {})
+        )
         settings.activity_event_types = domain.clean_activity_event_types(getattr(settings, "activity_event_types", []))
         self.repo.upsert_guild_settings(ctx, settings)
 
@@ -642,10 +685,18 @@ class Service:
             return self.describe_settings(settings)
         if command == SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND:
             channel_id = resolve_command_channel(interaction, options, "channel", CHANNEL_TYPE_GUILD_TEXT)
-            settings = self.set_activity_channel(ctx, interaction.guild_id, channel_id)
+            category = option_string(options, "category")
+            if category:
+                settings = self.set_activity_category_channel(ctx, interaction.guild_id, category, channel_id)
+            else:
+                settings = self.set_activity_channel(ctx, interaction.guild_id, channel_id)
             return self.describe_settings(settings)
         if command == SETTINGS_ACTIVITY_CHANNEL_CLEAR_COMMAND:
-            settings = self.clear_activity_channel(ctx, interaction.guild_id)
+            category = option_string(options, "category")
+            if category:
+                settings = self.clear_activity_category_channel(ctx, interaction.guild_id, category)
+            else:
+                settings = self.clear_activity_channel(ctx, interaction.guild_id)
             return self.describe_settings(settings)
         if command == SETTINGS_ACTIVITY_MODE_COMMAND:
             mode = option_string(options, "mode").lower()
@@ -1149,13 +1200,14 @@ def settings_application_command() -> CommandDefinition:
             ApplicationCommandOption(
                 type=OPTION_TYPE_SUB_COMMAND,
                 name=SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND,
-                description="Set activity messages channel",
-                options=[_text_channel_option("channel", "Activity text channel")],
+                description="Set activity channel for all logs or one category",
+                options=[_text_channel_option("channel", "Activity text channel"), _activity_category_option(required=False)],
             ),
             ApplicationCommandOption(
                 type=OPTION_TYPE_SUB_COMMAND,
                 name=SETTINGS_ACTIVITY_CHANNEL_CLEAR_COMMAND,
-                description="Disable activity message channel",
+                description="Disable all activity channels or clear one category",
+                options=[_activity_category_option(required=False)],
             ),
             ApplicationCommandOption(
                 type=OPTION_TYPE_SUB_COMMAND,
@@ -1233,6 +1285,21 @@ def _activity_mode_option() -> ApplicationCommandOption:
             ApplicationCommandOptionChoice(name=domain.ACTIVITY_MODE_OFF, value=domain.ACTIVITY_MODE_OFF),
             ApplicationCommandOptionChoice(name=domain.ACTIVITY_MODE_MINIMAL, value=domain.ACTIVITY_MODE_MINIMAL),
             ApplicationCommandOptionChoice(name=domain.ACTIVITY_MODE_FULL, value=domain.ACTIVITY_MODE_FULL),
+        ],
+    )
+
+
+def _activity_category_option(*, required: bool) -> ApplicationCommandOption:
+    return ApplicationCommandOption(
+        type=OPTION_TYPE_STRING,
+        name="category",
+        description="join-leave, messages, voice-log, or profile",
+        required=required,
+        choices=[
+            ApplicationCommandOptionChoice(name=domain.ACTIVITY_CATEGORY_JOIN_LEAVE, value=domain.ACTIVITY_CATEGORY_JOIN_LEAVE),
+            ApplicationCommandOptionChoice(name=domain.ACTIVITY_CATEGORY_MESSAGES, value=domain.ACTIVITY_CATEGORY_MESSAGES),
+            ApplicationCommandOptionChoice(name=domain.ACTIVITY_CATEGORY_VOICE_LOG, value=domain.ACTIVITY_CATEGORY_VOICE_LOG),
+            ApplicationCommandOptionChoice(name=domain.ACTIVITY_CATEGORY_PROFILE, value=domain.ACTIVITY_CATEGORY_PROFILE),
         ],
     )
 

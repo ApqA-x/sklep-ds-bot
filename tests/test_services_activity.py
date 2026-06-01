@@ -53,6 +53,19 @@ def test_activity_channel_id_returns_empty_when_not_configured() -> None:
     assert activity._activity_channel_id(repo, "g1") == ""
 
 
+def test_activity_channel_id_uses_category_override_before_global() -> None:
+    repo = _Repo(
+        domain.GuildSettings(
+            guild_id="g1",
+            activity_channel_id="global",
+            activity_category_channel_ids={domain.ACTIVITY_CATEGORY_MESSAGES: "messages"},
+        )
+    )
+
+    assert activity._activity_channel_id(repo, "g1", domain.ACTIVITY_EVENT_MESSAGE_DELETE) == "messages"
+    assert activity._activity_channel_id(repo, "g1", domain.ACTIVITY_EVENT_MEMBER_JOIN) == "global"
+
+
 def test_activity_event_from_payload_decodes_json_bytes() -> None:
     payload = domain.ActivityEvent(
         event_type=domain.ACTIVITY_EVENT_INVITE_USED,
@@ -150,6 +163,77 @@ def test_reaction_remove_embed_includes_actor_emoji_and_message_link() -> None:
     assert "**Message author:** Alice <@42>" in description
     assert "thumbsup" in description
     assert "https://discord.com/channels/g1/100/200" in description
+
+
+def test_voice_join_embed_includes_member_channel_and_user_id() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_VOICE_JOIN,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        metadata={"channel_id": "300"},
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Member:** Alice <@42>" in description
+    assert "**Channel:** <#300>" in description
+    assert "**User ID:** 42" in description
+
+
+def test_profile_role_embed_includes_actor_and_role_changes() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_PROFILE_ROLES_UPDATE,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        actor_user_id="7",
+        actor_name="Mod",
+        metadata={"added_roles": "Staff <@&9>", "removed_roles": "Muted <@&8>"},
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Member:** Alice <@42>" in description
+    assert "**Changed by:** Mod <@7>" in description
+    assert "**Added:** Staff <@&9>" in description
+    assert "**Removed:** Muted <@&8>" in description
+
+
+def test_profile_embed_marks_unknown_actor_when_audit_log_unavailable() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_PROFILE_NICKNAME_UPDATE,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        metadata={"before_nickname": "Old", "after_nickname": "New"},
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Changed by:** unknown (audit log unavailable)" in description
+
+
+def test_reaction_embed_prefers_actor_avatar_thumbnail() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_REACTION_ADD,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        actor_user_id="7",
+        actor_name="Bob",
+        metadata={
+            "channel_id": "100",
+            "message_id": "200",
+            "emoji": "thumbsup",
+            "member_avatar_url": "https://example.com/member.png",
+            "actor_avatar_url": "https://example.com/actor.png",
+        },
+    )
+
+    embed = activity._build_embed(event)
+
+    assert embed.thumbnail.url == "https://example.com/actor.png"
 
 
 def json_bytes(payload: dict[str, object]) -> bytes:

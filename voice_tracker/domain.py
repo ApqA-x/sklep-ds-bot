@@ -40,6 +40,23 @@ ACTIVITY_EVENT_MESSAGE_UPDATE = "message_update"
 ACTIVITY_EVENT_MESSAGE_DELETE = "message_delete"
 ACTIVITY_EVENT_REACTION_ADD = "reaction_add"
 ACTIVITY_EVENT_REACTION_REMOVE = "reaction_remove"
+ACTIVITY_EVENT_VOICE_JOIN = "voice_join"
+ACTIVITY_EVENT_VOICE_LEAVE = "voice_leave"
+ACTIVITY_EVENT_VOICE_MOVE = "voice_move"
+ACTIVITY_EVENT_PROFILE_NICKNAME_UPDATE = "profile_nickname_update"
+ACTIVITY_EVENT_PROFILE_ROLES_UPDATE = "profile_roles_update"
+
+ACTIVITY_CATEGORY_JOIN_LEAVE = "join-leave"
+ACTIVITY_CATEGORY_MESSAGES = "messages"
+ACTIVITY_CATEGORY_VOICE_LOG = "voice-log"
+ACTIVITY_CATEGORY_PROFILE = "profile"
+
+ACTIVITY_CATEGORIES = {
+    ACTIVITY_CATEGORY_JOIN_LEAVE,
+    ACTIVITY_CATEGORY_MESSAGES,
+    ACTIVITY_CATEGORY_VOICE_LOG,
+    ACTIVITY_CATEGORY_PROFILE,
+}
 
 ACTIVITY_MODE_OFF = "off"
 ACTIVITY_MODE_MINIMAL = "minimal"
@@ -56,6 +73,11 @@ ACTIVITY_EVENT_TYPES = {
     ACTIVITY_EVENT_MESSAGE_DELETE,
     ACTIVITY_EVENT_REACTION_ADD,
     ACTIVITY_EVENT_REACTION_REMOVE,
+    ACTIVITY_EVENT_VOICE_JOIN,
+    ACTIVITY_EVENT_VOICE_LEAVE,
+    ACTIVITY_EVENT_VOICE_MOVE,
+    ACTIVITY_EVENT_PROFILE_NICKNAME_UPDATE,
+    ACTIVITY_EVENT_PROFILE_ROLES_UPDATE,
 }
 
 LEGACY_FULL_ACTIVITY_EVENT_TYPES = {
@@ -64,6 +86,19 @@ LEGACY_FULL_ACTIVITY_EVENT_TYPES = {
     ACTIVITY_EVENT_INVITE_CREATE,
     ACTIVITY_EVENT_INVITE_DELETE,
     ACTIVITY_EVENT_INVITE_USED,
+}
+
+PRE_CATEGORY_FULL_ACTIVITY_EVENT_TYPES = {
+    ACTIVITY_EVENT_MEMBER_JOIN,
+    ACTIVITY_EVENT_MEMBER_LEAVE,
+    ACTIVITY_EVENT_INVITE_CREATE,
+    ACTIVITY_EVENT_INVITE_DELETE,
+    ACTIVITY_EVENT_INVITE_USED,
+    ACTIVITY_EVENT_MESSAGE_CREATE,
+    ACTIVITY_EVENT_MESSAGE_UPDATE,
+    ACTIVITY_EVENT_MESSAGE_DELETE,
+    ACTIVITY_EVENT_REACTION_ADD,
+    ACTIVITY_EVENT_REACTION_REMOVE,
 }
 
 
@@ -109,9 +144,58 @@ def clean_text_values(values: list[str] | tuple[str, ...] | None) -> list[str]:
 def clean_activity_event_types(values: list[str] | tuple[str, ...] | None) -> list[str]:
     cleaned = [value.lower() for value in _clean_codes(values)]
     selected = {value for value in cleaned if value in ACTIVITY_EVENT_TYPES}
-    if selected == LEGACY_FULL_ACTIVITY_EVENT_TYPES:
+    if selected == LEGACY_FULL_ACTIVITY_EVENT_TYPES or selected == PRE_CATEGORY_FULL_ACTIVITY_EVENT_TYPES:
         selected = set(ACTIVITY_EVENT_TYPES)
     return sorted(selected)
+
+
+def clean_activity_category(value: str | None) -> str:
+    category = _clean(value).lower()
+    if category in ACTIVITY_CATEGORIES:
+        return category
+    return ""
+
+
+def clean_activity_category_channel_ids(values: dict[str, Any] | None) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for raw_category, raw_channel_id in (values or {}).items():
+        category = clean_activity_category(str(raw_category))
+        channel_id = _clean(str(raw_channel_id or ""))
+        if category and channel_id:
+            cleaned[category] = channel_id
+    return cleaned
+
+
+def activity_event_category(event_type: str) -> str:
+    event_type = _clean(event_type).lower()
+    if event_type in {
+        ACTIVITY_EVENT_MEMBER_JOIN,
+        ACTIVITY_EVENT_MEMBER_LEAVE,
+        ACTIVITY_EVENT_INVITE_USED,
+        ACTIVITY_EVENT_INVITE_CREATE,
+        ACTIVITY_EVENT_INVITE_DELETE,
+    }:
+        return ACTIVITY_CATEGORY_JOIN_LEAVE
+    if event_type in {
+        ACTIVITY_EVENT_MESSAGE_CREATE,
+        ACTIVITY_EVENT_MESSAGE_UPDATE,
+        ACTIVITY_EVENT_MESSAGE_DELETE,
+        ACTIVITY_EVENT_REACTION_ADD,
+        ACTIVITY_EVENT_REACTION_REMOVE,
+    }:
+        return ACTIVITY_CATEGORY_MESSAGES
+    if event_type in {
+        ACTIVITY_EVENT_VOICE_JOIN,
+        ACTIVITY_EVENT_VOICE_LEAVE,
+        ACTIVITY_EVENT_VOICE_MOVE,
+    }:
+        return ACTIVITY_CATEGORY_VOICE_LOG
+    if event_type in {
+        ACTIVITY_EVENT_PROFILE_NICKNAME_UPDATE,
+        ACTIVITY_EVENT_PROFILE_ROLES_UPDATE,
+    }:
+        return ACTIVITY_CATEGORY_PROFILE
+    return ""
 
 
 def invite_catalog_id(guild_id: str, code: str) -> str:
@@ -193,6 +277,7 @@ class GuildSettings:
     invite_userinfo_enabled: bool = True
     invite_reconciliation_enabled: bool = False
     activity_channel_id: str = ""
+    activity_category_channel_ids: dict[str, str] = field(default_factory=dict)
     activity_event_types: list[str] = field(default_factory=lambda: sorted(ACTIVITY_EVENT_TYPES))
 
     def __post_init__(self) -> None:
@@ -212,6 +297,7 @@ class GuildSettings:
         self.invite_userinfo_enabled = bool(self.invite_userinfo_enabled)
         self.invite_reconciliation_enabled = bool(self.invite_reconciliation_enabled)
         self.activity_channel_id = _clean(self.activity_channel_id)
+        self.activity_category_channel_ids = clean_activity_category_channel_ids(self.activity_category_channel_ids)
         self.activity_event_types = clean_activity_event_types(self.activity_event_types)
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
@@ -258,6 +344,7 @@ class GuildSettings:
             invite_userinfo_enabled=bool(data.get("inviteUserinfoEnabled", True)),
             invite_reconciliation_enabled=bool(data.get("inviteReconciliationEnabled", False)),
             activity_channel_id=data.get("activityChannelId", ""),
+            activity_category_channel_ids=dict(data.get("activityCategoryChannelIds") or {}),
             activity_event_types=list(data.get("activityEventTypes") or sorted(ACTIVITY_EVENT_TYPES)),
             created_at=parse_datetime(data.get("createdAt")),
             updated_at=parse_datetime(data.get("updatedAt")),
@@ -281,6 +368,7 @@ def new_guild_settings(
     invite_userinfo_enabled: bool = True,
     invite_reconciliation_enabled: bool = False,
     activity_channel_id: str = "",
+    activity_category_channel_ids: dict[str, str] | None = None,
     activity_event_types: list[str] | None = None,
 ) -> GuildSettings:
     return GuildSettings(
@@ -300,6 +388,7 @@ def new_guild_settings(
         invite_userinfo_enabled=invite_userinfo_enabled,
         invite_reconciliation_enabled=invite_reconciliation_enabled,
         activity_channel_id=activity_channel_id,
+        activity_category_channel_ids=activity_category_channel_ids or {},
         activity_event_types=activity_event_types or sorted(ACTIVITY_EVENT_TYPES),
     )
 
