@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import warnings
@@ -118,6 +119,30 @@ def _append_content_block(lines: list[str], label: str, value: str) -> None:
         lines.append(f"**{label}:** unavailable")
 
 
+def _diff_lines(before: str, after: str, *, limit: int = 900) -> str:
+    before_lines = (_snippet(before, limit=limit) or "").splitlines() or [""]
+    after_lines = (_snippet(after, limit=limit) or "").splitlines() or [""]
+    diff = list(difflib.ndiff(before_lines, after_lines))
+    rendered: list[str] = []
+    for line in diff:
+        if line.startswith("- "):
+            rendered.append(f"- {line[2:]}")
+        elif line.startswith("+ "):
+            rendered.append(f"+ {line[2:]}")
+        elif line.startswith("  "):
+            rendered.append(f"  {line[2:]}")
+    output = "\n".join(rendered).strip("\n")
+    if not output:
+        output = "- unavailable\n+ unavailable"
+    if len(output) > limit:
+        output = f"{output[: limit - 4]}\n..."
+    return output
+
+
+def _append_diff_block(lines: list[str], before: str, after: str) -> None:
+    lines.append(f"**Changes:**\n```diff\n{_diff_lines(before, after)}\n```")
+
+
 def _append_fact(lines: list[str], label: str, value: str) -> None:
     clean = _snippet(value, limit=120)
     if clean:
@@ -230,8 +255,7 @@ def _message_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
         title = "Message edited"
         lines = [f"**Author:** {member}", f"**Channel:** {channel}"]
         _append_fact(lines, "Message ID", message_id)
-        _append_content_block(lines, "Before", _metadata_text(event, "before_content"))
-        _append_content_block(lines, "After", _metadata_text(event, "after_content"))
+        _append_diff_block(lines, _metadata_text(event, "before_content"), _metadata_text(event, "after_content"))
     elif event.event_type == domain.ACTIVITY_EVENT_MESSAGE_DELETE:
         title = "Message deleted"
         lines = [f"**Author:** {member}", f"**Channel:** {channel}"]

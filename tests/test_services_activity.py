@@ -105,7 +105,7 @@ def test_message_create_embed_puts_written_content_front_and_center() -> None:
     assert "https://discord.com/channels/g1/100/200" in description
 
 
-def test_message_update_embed_includes_channel_and_before_after_content_blocks() -> None:
+def test_message_update_embed_renders_styled_diff() -> None:
     event = domain.ActivityEvent(
         event_type=domain.ACTIVITY_EVENT_MESSAGE_UPDATE,
         guild_id="g1",
@@ -114,8 +114,8 @@ def test_message_update_embed_includes_channel_and_before_after_content_blocks()
         metadata={
             "channel_id": "100",
             "message_id": "200",
-            "before_content": "old text",
-            "after_content": "new text",
+            "before_content": "same line\nold text",
+            "after_content": "same line\nnew text",
         },
     )
 
@@ -123,10 +123,11 @@ def test_message_update_embed_includes_channel_and_before_after_content_blocks()
 
     assert "**Author:** Alice <@42>" in description
     assert "**Channel:** <#100>" in description
-    assert "**Before:**" in description
-    assert "old text" in description
-    assert "**After:**" in description
-    assert "new text" in description
+    assert "**Changes:**" in description
+    assert "```diff" in description
+    assert "  same line" in description
+    assert "- old text" in description
+    assert "+ new text" in description
     assert "https://discord.com/channels/g1/100/200" in description
 
 
