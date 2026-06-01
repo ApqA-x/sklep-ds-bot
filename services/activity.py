@@ -43,10 +43,14 @@ def _event_enabled(repo: Repository, guild_id: str, event_type: str) -> bool:
     return event_type in enabled
 
 
-def _activity_channel_id(repo: Repository, guild_id: str) -> str:
+def _activity_channel_id(repo: Repository, guild_id: str, event_type: str = "") -> str:
     settings = repo.get_guild_settings(None, guild_id)
     if settings is None:
         return ""
+    category = domain.activity_event_category(event_type)
+    category_channels = domain.clean_activity_category_channel_ids(getattr(settings, "activity_category_channel_ids", {}))
+    if category and category_channels.get(category, ""):
+        return category_channels[category]
     return str(getattr(settings, "activity_channel_id", "") or "").strip()
 
 
@@ -88,6 +92,13 @@ def _message_link(event: domain.ActivityEvent) -> str:
     return ""
 
 
+def _metadata_url(event: domain.ActivityEvent, key: str) -> str:
+    value = _metadata_text(event, key)
+    if value.startswith(("http://", "https://")):
+        return value
+    return ""
+
+
 def _snippet(value: str, *, limit: int = 500) -> str:
     clean = str(value or "").strip()
     clean = clean.replace("@everyone", "@ everyone").replace("@here", "@ here")
@@ -113,8 +124,95 @@ def _append_fact(lines: list[str], label: str, value: str) -> None:
         lines.append(f"**{label}:** {clean}")
 
 
+def _user_id_fact(lines: list[str], user_id: str) -> None:
+    _append_fact(lines, "User ID", user_id)
+
+
+def _voice_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
+    member = _member_label(event)
+    from_channel = _metadata_text(event, "previous_channel_id")
+    to_channel = _metadata_text(event, "channel_id")
+    if event.event_type == domain.ACTIVITY_EVENT_VOICE_JOIN:
+        title = "Voice joined"
+        lines = [f"**Member:** {member}", f"**Channel:** <#{to_channel}>" if to_channel else "**Channel:** unknown"]
+    elif event.event_type == domain.ACTIVITY_EVENT_VOICE_LEAVE:
+        title = "Voice left"
+        lines = [f"**Member:** {member}", f"**Channel:** <#{from_channel}>" if from_channel else "**Channel:** unknown"]
+    else:
+        title = "Voice moved"
+        lines = [
+            f"**Member:** {member}",
+            f"**From:** <#{from_channel}>" if from_channel else "**From:** unknown",
+            f"**To:** <#{to_channel}>" if to_channel else "**To:** unknown",
+        ]
+    _user_id_fact(lines, event.member_user_id)
+    return {"title": title, "description": "\n".join(lines), "color": 0x57F287, "footer": "Voice Log"}
+
+
+def _profile_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
+    member = _member_label(event)
+    actor_id = str(event.actor_user_id or "").strip()
+    actor = _actor_label(event) if actor_id else "unknown (audit log unavailable)"
+    lines = [f"**Member:** {member}", f"**Changed by:** {actor}"]
+    _user_id_fact(lines, event.member_user_id)
+    if event.event_type == domain.ACTIVITY_EVENT_PROFILE_NICKNAME_UPDATE:
+        title = "Nickname changed"
+        _append_fact(lines, "Before", _metadata_text(event, "before_nickname") or "none")
+        _append_fact(lines, "After", _metadata_text(event, "after_nickname") or "none")
+    elif event.event_type == domain.ACTIVITY_EVENT_PROFILE_ROLES_UPDATE:
+        title = "Roles changed"
+        added = _metadata_text(event, "added_roles")
+        removed = _metadata_text(event, "removed_roles")
+        if added:
+            lines.append(f"**Added:** {added}")
+        if removed:
+            lines.append(f"**Removed:** {removed}")
+        if not added and not removed:
+            lines.append("**Roles:** changed")
+    else:
+        return activity_unknown_event.render(payload=event.to_dict())
+    return {"title": title, "description": "\n".join(lines), "color": 0xFEE75C, "footer": "Profile Activity"}
+
+
 def _embed_description(event: domain.ActivityEvent) -> str:
     return str(_template_payload(event).get("description", ""))
+
+
+def _join_leave_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
+    if event.event_type == domain.ACTIVITY_EVENT_MEMBER_JOIN:
+        title = "Member joined"
+        lines = [f"**Member:** {_member_label(event)}"]
+        _user_id_fact(lines, event.member_user_id)
+    elif event.event_type == domain.ACTIVITY_EVENT_MEMBER_LEAVE:
+        title = "Member left"
+        lines = [f"**Member:** {_member_label(event)}"]
+        _user_id_fact(lines, event.member_user_id)
+    elif event.event_type == domain.ACTIVITY_EVENT_INVITE_USED:
+        title = "Invite used"
+        lines = [f"**Member:** {_member_label(event)}"]
+        _user_id_fact(lines, event.member_user_id)
+        if event.invite_url:
+            lines.append(f"**Invite:** {event.invite_url}")
+        _append_fact(lines, "Invite code", event.invite_code)
+        if event.attribution_status == domain.INVITE_ATTRIBUTION_STATUS_EXACT:
+            lines.append(f"**Inviter:** {_actor_label(event)}")
+        else:
+            _append_fact(lines, "Attribution", event.attribution_status or "unknown")
+    elif event.event_type == domain.ACTIVITY_EVENT_INVITE_CREATE:
+        title = "Invite created"
+        lines = [f"**Created by:** {_actor_label(event)}"]
+        if event.invite_url:
+            lines.append(f"**Invite:** {event.invite_url}")
+        _append_fact(lines, "Invite code", event.invite_code)
+    elif event.event_type == domain.ACTIVITY_EVENT_INVITE_DELETE:
+        title = "Invite deleted"
+        lines = [f"**Deleted by:** {_actor_label(event)}"]
+        if event.invite_url:
+            lines.append(f"**Invite:** {event.invite_url}")
+        _append_fact(lines, "Invite code", event.invite_code)
+    else:
+        return activity_unknown_event.render(payload=event.to_dict())
+    return {"title": title, "description": "\n".join(lines), "color": 0x5865F2, "footer": "Join Leave Activity"}
 
 
 def _message_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
@@ -165,36 +263,19 @@ def _message_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
         "title": title,
         "description": "\n".join(lines),
         "color": 0x5865F2,
-        "footer": "Voice Tracker Activity",
+        "footer": "Message Activity",
     }
 
 
 def _template_payload(event: domain.ActivityEvent) -> dict[str, object]:
-    if event.event_type == domain.ACTIVITY_EVENT_MEMBER_JOIN:
-        return activity_member_join.render(member_label=_member_label(event))
-    if event.event_type == domain.ACTIVITY_EVENT_MEMBER_LEAVE:
-        return activity_member_leave.render(member_label=_member_label(event))
-    if event.event_type == domain.ACTIVITY_EVENT_INVITE_CREATE:
-        return activity_invite_create.render(
-            invite_code=event.invite_code,
-            invite_url=event.invite_url,
-            actor_label=_actor_label(event),
-        )
-    if event.event_type == domain.ACTIVITY_EVENT_INVITE_DELETE:
-        return activity_invite_delete.render(
-            invite_code=event.invite_code,
-            invite_url=event.invite_url,
-            actor_label=_actor_label(event),
-        )
-    if event.event_type == domain.ACTIVITY_EVENT_INVITE_USED:
-        return activity_invite_used.render(
-            member_label=_member_label(event),
-            attribution_status=event.attribution_status,
-            invite_code=event.invite_code,
-            invite_url=event.invite_url,
-            actor_label=_actor_label(event),
-            exact_status_value=domain.INVITE_ATTRIBUTION_STATUS_EXACT,
-        )
+    if event.event_type in {
+        domain.ACTIVITY_EVENT_MEMBER_JOIN,
+        domain.ACTIVITY_EVENT_MEMBER_LEAVE,
+        domain.ACTIVITY_EVENT_INVITE_CREATE,
+        domain.ACTIVITY_EVENT_INVITE_DELETE,
+        domain.ACTIVITY_EVENT_INVITE_USED,
+    }:
+        return _join_leave_activity_payload(event)
     if event.event_type in {
         domain.ACTIVITY_EVENT_MESSAGE_CREATE,
         domain.ACTIVITY_EVENT_MESSAGE_UPDATE,
@@ -203,6 +284,17 @@ def _template_payload(event: domain.ActivityEvent) -> dict[str, object]:
         domain.ACTIVITY_EVENT_REACTION_REMOVE,
     }:
         return _message_activity_payload(event)
+    if event.event_type in {
+        domain.ACTIVITY_EVENT_VOICE_JOIN,
+        domain.ACTIVITY_EVENT_VOICE_LEAVE,
+        domain.ACTIVITY_EVENT_VOICE_MOVE,
+    }:
+        return _voice_activity_payload(event)
+    if event.event_type in {
+        domain.ACTIVITY_EVENT_PROFILE_NICKNAME_UPDATE,
+        domain.ACTIVITY_EVENT_PROFILE_ROLES_UPDATE,
+    }:
+        return _profile_activity_payload(event)
     return activity_unknown_event.render(payload=event.to_dict())
 
 
@@ -215,6 +307,12 @@ def _build_embed(event: domain.ActivityEvent) -> discord.Embed:
         timestamp=event.occurred_at or _utc_now(),
     )
     embed.set_footer(text=str(payload.get("footer", "Voice Tracker Activity")))
+    if event.event_type in {domain.ACTIVITY_EVENT_REACTION_ADD, domain.ACTIVITY_EVENT_REACTION_REMOVE}:
+        avatar_url = _metadata_url(event, "actor_avatar_url") or _metadata_url(event, "member_avatar_url")
+    else:
+        avatar_url = _metadata_url(event, "member_avatar_url") or _metadata_url(event, "actor_avatar_url")
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
     return embed
 
 
@@ -268,7 +366,7 @@ async def main() -> None:
             return
         if event.event_type not in domain.ACTIVITY_EVENT_TYPES:
             return
-        channel_id = _activity_channel_id(repo, event.guild_id)
+        channel_id = _activity_channel_id(repo, event.guild_id, event.event_type)
         if channel_id == "":
             return
         if not _event_enabled(repo, event.guild_id, event.event_type):

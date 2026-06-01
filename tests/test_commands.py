@@ -70,6 +70,7 @@ class FakeRepo:
             invite_userinfo_enabled=settings.invite_userinfo_enabled,
             invite_reconciliation_enabled=settings.invite_reconciliation_enabled,
             activity_channel_id=settings.activity_channel_id,
+            activity_category_channel_ids=dict(settings.activity_category_channel_ids),
             activity_event_types=list(settings.activity_event_types),
         )
 
@@ -93,6 +94,7 @@ class FakeRepo:
             invite_userinfo_enabled=settings.invite_userinfo_enabled,
             invite_reconciliation_enabled=settings.invite_reconciliation_enabled,
             activity_channel_id=settings.activity_channel_id,
+            activity_category_channel_ids=dict(settings.activity_category_channel_ids),
             activity_event_types=list(settings.activity_event_types),
         )
 
@@ -382,6 +384,14 @@ def test_voice_application_commands_have_expected_routes() -> None:
         "activity-channel-clear",
         "activity",
     ]
+    activity_channel_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "activity-channel-set")
+    assert [option.name for option in activity_channel_option.options] == ["channel", "category"]
+    assert [choice.name for choice in activity_channel_option.options[1].choices] == [
+        "join-leave",
+        "messages",
+        "voice-log",
+        "profile",
+    ]
     soundboard_option = next(option for option in commands[SETTINGS_COMMAND_NAME].options if option.name == "soundboard")
     assert len(soundboard_option.options) == 1
     assert [choice.name for choice in soundboard_option.options[0].choices] == ["on", "off"]
@@ -487,6 +497,15 @@ def test_handle_settings_commands() -> None:
 
     content = svc.handle_settings_command(None, interaction, "activity-channel-set", [option("channel", "t1")])
     assert "activity channel: <#t1>" in content
+    assert "activity messages: global <#t1>" in content
+
+    content = svc.handle_settings_command(
+        None,
+        interaction,
+        "activity-channel-set",
+        [option("channel", "t1"), option("category", domain.ACTIVITY_CATEGORY_MESSAGES)],
+    )
+    assert "activity messages: <#t1>" in content
 
     content = svc.handle_settings_command(None, interaction, "activity", [option("mode", "minimal")])
     assert "activity mode: minimal" in content
@@ -496,6 +515,16 @@ def test_legacy_full_activity_event_set_expands_to_current_full_mode() -> None:
     settings = domain.GuildSettings(
         guild_id="g1",
         activity_event_types=sorted(domain.LEGACY_FULL_ACTIVITY_EVENT_TYPES),
+    )
+
+    assert set(settings.activity_event_types) == set(domain.ACTIVITY_EVENT_TYPES)
+    assert commands_module.activity_mode_from_event_types(settings.activity_event_types) == domain.ACTIVITY_MODE_FULL
+
+
+def test_previous_full_activity_event_set_expands_to_current_full_mode() -> None:
+    settings = domain.GuildSettings(
+        guild_id="g1",
+        activity_event_types=sorted(domain.PRE_CATEGORY_FULL_ACTIVITY_EVENT_TYPES),
     )
 
     assert set(settings.activity_event_types) == set(domain.ACTIVITY_EVENT_TYPES)

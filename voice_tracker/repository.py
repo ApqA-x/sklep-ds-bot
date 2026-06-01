@@ -189,6 +189,7 @@ class Repository:
                     "inviteUserinfoEnabled": settings.invite_userinfo_enabled,
                     "inviteReconciliationEnabled": settings.invite_reconciliation_enabled,
                     "activityChannelId": settings.activity_channel_id,
+                    "activityCategoryChannelIds": dict(settings.activity_category_channel_ids),
                     "activityEventTypes": list(settings.activity_event_types),
                     "updatedAt": settings.updated_at,
                 },
