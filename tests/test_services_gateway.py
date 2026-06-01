@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 
 import services.gateway as gateway
@@ -75,12 +76,88 @@ async def _noop(*_args, **_kwargs) -> None:
     return None
 
 
+def _async_entries(entries: list[object]):
+    async def _iterator():
+        for entry in entries:
+            yield entry
+
+    return _iterator()
+
+
 def test_member_role_ids_skips_default_role() -> None:
     default_role = SimpleNamespace(id="1", is_default=lambda: True)
     helper_role = SimpleNamespace(id="2", is_default=lambda: False)
     member = SimpleNamespace(roles=[default_role, helper_role])
 
     assert gateway._member_role_ids(member) == ["2"]
+
+
+def test_member_role_labels_skip_default_role() -> None:
+    default_role = SimpleNamespace(id="1", name="@everyone", is_default=lambda: True)
+    helper_role = SimpleNamespace(id="2", name="Staff", is_default=lambda: False)
+    member = SimpleNamespace(roles=[default_role, helper_role])
+
+    assert gateway._member_role_labels(member) == ["Staff <@&2>"]
+
+
+async def test_audit_member_remove_details_detects_kick(monkeypatch) -> None:
+    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    now = gateway._utc_now()
+    actor = SimpleNamespace(id="7", name="Mod", display_avatar=SimpleNamespace(url="https://example.com/mod.png"))
+    entry = SimpleNamespace(created_at=now, target=SimpleNamespace(id="42"), user=actor)
+
+    def audit_logs(*, limit: int, action):
+        assert limit == 8
+        if action == gateway.discord.AuditLogAction.kick:
+            return _async_entries([entry])
+        return _async_entries([])
+
+    guild = SimpleNamespace(audit_logs=audit_logs)
+
+    assert await gateway._audit_member_remove_details(guild, "42") == (
+        "kicked",
+        "7",
+        "Mod",
+        "https://example.com/mod.png",
+    )
+
+
+async def test_audit_member_remove_details_defaults_to_leaved(monkeypatch) -> None:
+    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    guild = SimpleNamespace(audit_logs=lambda **_kwargs: _async_entries([]))
+
+    assert await gateway._audit_member_remove_details(guild, "42") == ("leaved", "", "", "")
+
+
+async def test_audit_actor_for_voice_move_uses_recent_member_move(monkeypatch) -> None:
+    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    actor = SimpleNamespace(id="7", name="Mover", display_avatar=SimpleNamespace(url="https://example.com/mover.png"))
+    entry = SimpleNamespace(
+        created_at=gateway._utc_now(),
+        target=SimpleNamespace(id="301"),
+        extra=SimpleNamespace(channel=SimpleNamespace(id="301")),
+        user=actor,
+    )
+    guild = SimpleNamespace(audit_logs=lambda **_kwargs: _async_entries([entry]))
+
+    assert await gateway._audit_actor_for_voice_move(guild, "42", "301") == (
+        "7",
+        "Mover",
+        "https://example.com/mover.png",
+    )
+
+
+async def test_audit_actor_for_voice_move_ignores_stale_entries(monkeypatch) -> None:
+    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    entry = SimpleNamespace(
+        created_at=gateway._utc_now() - timedelta(minutes=1),
+        target=SimpleNamespace(id="301"),
+        extra=SimpleNamespace(channel=SimpleNamespace(id="301")),
+        user=SimpleNamespace(id="7", name="Mover"),
+    )
+    guild = SimpleNamespace(audit_logs=lambda **_kwargs: _async_entries([entry]))
+
+    assert await gateway._audit_actor_for_voice_move(guild, "42", "301") == ("", "", "")
 
 
 def test_save_member_role_snapshot_persists_normalized_ids() -> None:

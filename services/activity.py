@@ -27,6 +27,7 @@ from voice_tracker import domain
 from voice_tracker.bus import Bus
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
+from voice_tracker.timeutil import discord_timestamp, go_duration, parse_datetime, positive_delta
 
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,19 @@ def _metadata_url(event: domain.ActivityEvent, key: str) -> str:
     return ""
 
 
+def _metadata_datetime(event: domain.ActivityEvent, key: str) -> datetime | None:
+    try:
+        return parse_datetime(event.metadata.get(key))
+    except (TypeError, ValueError):
+        return None
+
+
+def _server_age_text(joined_at: datetime | None, left_at: datetime | None) -> str:
+    if joined_at is None or left_at is None:
+        return ""
+    return go_duration(positive_delta(left_at - joined_at), round_seconds=True)
+
+
 def _snippet(value: str, *, limit: int = 500) -> str:
     clean = str(value or "").strip()
     clean = clean.replace("@everyone", "@ everyone").replace("@here", "@ here")
@@ -170,6 +184,9 @@ def _voice_activity_payload(event: domain.ActivityEvent) -> dict[str, object]:
             f"**From:** <#{from_channel}>" if from_channel else "**From:** unknown",
             f"**To:** <#{to_channel}>" if to_channel else "**To:** unknown",
         ]
+        actor_id = str(event.actor_user_id or "").strip()
+        actor = _actor_label(event) if actor_id else "unknown (audit log unavailable)"
+        lines.append(f"**Moved by:** {actor}")
     _user_id_fact(lines, event.member_user_id)
     return {"title": title, "description": "\n".join(lines), "color": 0x57F287, "footer": "Voice Log"}
 
@@ -209,8 +226,23 @@ def _join_leave_activity_payload(event: domain.ActivityEvent) -> dict[str, objec
         lines = [f"**Member:** {_member_label(event)}"]
         _user_id_fact(lines, event.member_user_id)
     elif event.event_type == domain.ACTIVITY_EVENT_MEMBER_LEAVE:
-        title = "Member left"
+        leave_reason = _metadata_text(event, "leave_reason") or "leaved"
+        title = f"Member {leave_reason}"
         lines = [f"**Member:** {_member_label(event)}"]
+        lines.append(f"**Result:** {leave_reason}")
+        if leave_reason in {"banned", "kicked"}:
+            actor_id = str(event.actor_user_id or "").strip()
+            actor = _actor_label(event) if actor_id else "unknown (audit log unavailable)"
+            label = "Banned by" if leave_reason == "banned" else "Kicked by"
+            lines.append(f"**{label}:** {actor}")
+        joined_at = _metadata_datetime(event, "joined_at")
+        if joined_at is not None:
+            lines.append(f"**Joined:** {discord_timestamp(joined_at)}")
+        server_age = _server_age_text(joined_at, event.occurred_at)
+        if server_age:
+            lines.append(f"**Time on server:** {server_age}")
+        roles = _metadata_text(event, "roles")
+        lines.append(f"**Roles:** {roles or 'none'}")
         _user_id_fact(lines, event.member_user_id)
     elif event.event_type == domain.ACTIVITY_EVENT_INVITE_USED:
         title = "Invite used"
