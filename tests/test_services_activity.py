@@ -182,6 +182,81 @@ def test_voice_join_embed_includes_member_channel_and_user_id() -> None:
     assert "**User ID:** 42" in description
 
 
+def test_voice_move_embed_includes_actor_when_available() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_VOICE_MOVE,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        actor_user_id="7",
+        actor_name="Mod",
+        metadata={"previous_channel_id": "300", "channel_id": "301"},
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Member:** Alice <@42>" in description
+    assert "**From:** <#300>" in description
+    assert "**To:** <#301>" in description
+    assert "**Moved by:** Mod <@7>" in description
+
+
+def test_voice_move_embed_marks_unknown_actor_when_audit_log_unavailable() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_VOICE_MOVE,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        metadata={"previous_channel_id": "300", "channel_id": "301"},
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Moved by:** unknown (audit log unavailable)" in description
+
+
+def test_member_leave_embed_includes_leave_context_roles_and_server_age() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_MEMBER_LEAVE,
+        guild_id="g1",
+        occurred_at=datetime(2026, 1, 3, 12, 0, tzinfo=UTC),
+        member_user_id="42",
+        member_name="Alice",
+        actor_user_id="7",
+        actor_name="Mod",
+        metadata={
+            "leave_reason": "kicked",
+            "joined_at": "2026-01-01T12:00:00Z",
+            "roles": "Staff <@&9>, Muted <@&8>",
+        },
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Member:** Alice <@42>" in description
+    assert "**Result:** kicked" in description
+    assert "**Kicked by:** Mod <@7>" in description
+    assert "**Time on server:** 48h0m0s" in description
+    assert "**Roles:** Staff <@&9>, Muted <@&8>" in description
+
+
+def test_member_leave_embed_does_not_show_actor_for_plain_leave() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_MEMBER_LEAVE,
+        guild_id="g1",
+        occurred_at=datetime(2026, 1, 3, 12, 0, tzinfo=UTC),
+        member_user_id="42",
+        member_name="Alice",
+        metadata={"leave_reason": "leaved", "joined_at": "2026-01-01T12:00:00Z", "roles": ""},
+    )
+
+    description = activity._embed_description(event)
+
+    assert "**Result:** leaved" in description
+    assert "by:**" not in description
+    assert "**Roles:** none" in description
+
+
 def test_profile_role_embed_includes_actor_and_role_changes() -> None:
     event = domain.ActivityEvent(
         event_type=domain.ACTIVITY_EVENT_PROFILE_ROLES_UPDATE,

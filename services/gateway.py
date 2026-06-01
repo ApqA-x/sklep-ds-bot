@@ -23,6 +23,7 @@ from voice_tracker import domain
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
+from voice_tracker.timeutil import datetime_to_json
 
 
 SUMMARY_EMBED_COLOR = 0x5865F2
@@ -249,6 +250,18 @@ def _role_labels_by_id(member: object | None) -> dict[str, str]:
     return labels
 
 
+def _member_role_labels(member: object | None) -> list[str]:
+    labels: list[str] = []
+    for role in list(getattr(member, "roles", []) or []):
+        is_default = getattr(role, "is_default", None)
+        if callable(is_default) and bool(is_default()):
+            continue
+        label = _role_label(role)
+        if label:
+            labels.append(label)
+    return labels
+
+
 def _message_author_id(message: object | None) -> str:
     return str(getattr(_message_author(message), "id", "") or "").strip()
 
@@ -381,6 +394,57 @@ async def _audit_actor_for_member_change(guild: discord.Guild, member_id: str, a
                 continue
             created_at = _ensure_utc(getattr(entry, "created_at", None))
             if created_at is not None and created_at < newest_allowed:
+                continue
+            user = getattr(entry, "user", None)
+            return str(getattr(user, "id", "") or ""), _user_display_name(user), _avatar_url(user)
+    except Exception:
+        return "", "", ""
+    return "", "", ""
+
+
+async def _audit_member_remove_details(guild: discord.Guild, member_id: str) -> tuple[str, str, str, str]:
+    actions = [
+        ("banned", getattr(discord.AuditLogAction, "ban", None)),
+        ("kicked", getattr(discord.AuditLogAction, "kick", None)),
+    ]
+    try:
+        await asyncio.sleep(1.0)
+        newest_allowed = _utc_now() - timedelta(seconds=30)
+        for leave_reason, action in actions:
+            if action is None:
+                continue
+            async for entry in guild.audit_logs(limit=8, action=action):
+                target = getattr(entry, "target", None)
+                if str(getattr(target, "id", "") or "") != str(member_id or ""):
+                    continue
+                created_at = _ensure_utc(getattr(entry, "created_at", None))
+                if created_at is not None and created_at < newest_allowed:
+                    continue
+                user = getattr(entry, "user", None)
+                return leave_reason, str(getattr(user, "id", "") or ""), _user_display_name(user), _avatar_url(user)
+    except Exception:
+        return "leaved", "", "", ""
+    return "leaved", "", "", ""
+
+
+async def _audit_actor_for_voice_move(guild: discord.Guild, member_id: str, to_channel_id: str) -> tuple[str, str, str]:
+    action = getattr(discord.AuditLogAction, "member_move", None)
+    if action is None:
+        return "", "", ""
+    try:
+        await asyncio.sleep(1.0)
+        newest_allowed = _utc_now() - timedelta(seconds=15)
+        async for entry in guild.audit_logs(limit=8, action=action):
+            created_at = _ensure_utc(getattr(entry, "created_at", None))
+            if created_at is not None and created_at < newest_allowed:
+                continue
+            target = getattr(entry, "target", None)
+            extra = getattr(entry, "extra", None)
+            target_id = str(getattr(target, "id", "") or "")
+            extra_channel_id = str(getattr(getattr(extra, "channel", None), "id", "") or "")
+            if target_id not in {"", str(member_id or ""), str(to_channel_id or "")}:
+                continue
+            if extra_channel_id and extra_channel_id != str(to_channel_id or ""):
                 continue
             user = getattr(entry, "user", None)
             return str(getattr(user, "id", "") or ""), _user_display_name(user), _avatar_url(user)
@@ -2010,6 +2074,7 @@ async def main() -> None:
         if getattr(member, "bot", False):
             return
         try:
+            leave_reason, actor_id, actor_name, actor_avatar_url = await _audit_member_remove_details(member.guild, str(member.id))
             await publish_activity_event(
                 _activity_event(
                     event_type=domain.ACTIVITY_EVENT_MEMBER_LEAVE,
@@ -2017,7 +2082,15 @@ async def main() -> None:
                     occurred_at=_utc_now(),
                     member_user_id=str(member.id),
                     member_name=_member_display_name(member),
-                    metadata={"member_avatar_url": _member_avatar_url(member)},
+                    actor_user_id=actor_id,
+                    actor_name=actor_name,
+                    metadata={
+                        "leave_reason": leave_reason,
+                        "joined_at": datetime_to_json(_ensure_utc(getattr(member, "joined_at", None))),
+                        "roles": ", ".join(_member_role_labels(member)),
+                        "member_avatar_url": _member_avatar_url(member),
+                        "actor_avatar_url": actor_avatar_url,
+                    },
                 )
             )
         except Exception:
@@ -2327,6 +2400,13 @@ async def main() -> None:
         else:
             event_type = domain.ACTIVITY_EVENT_VOICE_MOVE
         try:
+            actor_id = ""
+            actor_name = ""
+            actor_avatar_url = ""
+            if event_type == domain.ACTIVITY_EVENT_VOICE_MOVE:
+                actor_id, actor_name, actor_avatar_url = await _audit_actor_for_voice_move(
+                    member.guild, str(member.id), after_channel_id
+                )
             await publish_activity_event(
                 _activity_event(
                     event_type=event_type,
@@ -2334,10 +2414,13 @@ async def main() -> None:
                     occurred_at=_utc_now(),
                     member_user_id=str(member.id),
                     member_name=_member_display_name(member),
+                    actor_user_id=actor_id,
+                    actor_name=actor_name,
                     metadata={
                         "previous_channel_id": before_channel_id,
                         "channel_id": after_channel_id,
                         "member_avatar_url": _member_avatar_url(member),
+                        "actor_avatar_url": actor_avatar_url,
                     },
                 )
             )
