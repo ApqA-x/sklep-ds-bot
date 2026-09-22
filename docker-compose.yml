@@ -77,5 +77,16 @@ services:
       - mongo
       - nats
 
+  controlplane:
+    build:
+      context: .
+      args:
+        SERVICE: controlplane
+    env_file:
+      - .env
+    depends_on:
+      - mongo
+      - nats
+
 volumes:
   mongo-data:
