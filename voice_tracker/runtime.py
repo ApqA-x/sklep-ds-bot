@@ -135,7 +135,11 @@ def wait_for_bot_user_id(ready: Any, timeout: float) -> str:
 async def register_commands_http(token: str, app_id: str, guild_id: str, command_payloads: list[dict[str, Any]]) -> None:
     import aiohttp
 
-    url = f"https://discord.com/api/v10/applications/{app_id}/guilds/{guild_id}/commands"
+    guild_id = _clean(guild_id)
+    if guild_id:
+        url = f"https://discord.com/api/v10/applications/{app_id}/guilds/{guild_id}/commands"
+    else:
+        url = f"https://discord.com/api/v10/applications/{app_id}/commands"
     headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.put(url, json=command_payloads) as response:
