@@ -310,6 +310,7 @@ class Repository:
                     "activityChannelId": settings.activity_channel_id,
                     "activityCategoryChannelIds": dict(settings.activity_category_channel_ids),
                     "activityEventTypes": list(settings.activity_event_types),
+                    "commandAccess": dict(settings.command_access),
                     "updatedAt": settings.updated_at,
                 },
                 "$setOnInsert": {"createdAt": settings.created_at},

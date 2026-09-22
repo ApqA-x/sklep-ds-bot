@@ -325,6 +325,41 @@ def _channel_type(value: object) -> str:
     return str(value)
 
 
+# Roots that require the ADMINISTRATOR permission unless guild_settings.commandAccess
+# relaxes them ("all"). commandAccess can also tighten any open root ("admin").
+ADMIN_BY_DEFAULT_ROOTS = {
+    "connect",
+    "disconnect",
+    STATUS_COMMAND_NAME,
+    "autorole",
+    "unmute",
+    "trusted",
+}
+
+
+def _command_access_map(service: VoiceService, guild_id: str) -> dict[str, str]:
+    if not guild_id:
+        return {}
+    try:
+        settings = service.get_guild_settings(None, guild_id)
+    except Exception:
+        logger.exception("command access lookup failed guild=%s", guild_id)
+        return {}
+    raw = getattr(settings, "command_access", None)
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _route_access_ok(model: InteractionCreate, access: dict[str, str], root: str) -> bool:
+    override = access.get(root, "")
+    if override == "all":
+        return True
+    if override == "admin":
+        return _is_admin_only(model)
+    if root in ADMIN_BY_DEFAULT_ROOTS:
+        return _is_admin_only(model)
+    return True
+
+
 async def _dispatch_command(
     client: discord.Client,
     service: VoiceService,
@@ -336,31 +371,22 @@ async def _dispatch_command(
     bot_admin_user_ids: list[str],
 ) -> str | discord.Embed | InteractionMessage:
     options = _normalize_snowflake_options(options)
+    access = _command_access_map(service, model.guild_id)
+    if not _route_access_ok(model, access, root):
+        return "Insufficient permissions."
     if root == "jump":
         return await _dispatch_jump_command(client, interaction, model, options)
     if root == "connect":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return await _dispatch_connect_command(client, service, interaction, model, options)
     if root == "disconnect":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return await _dispatch_disconnect_command(service, model)
     if root == STATUS_COMMAND_NAME:
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return await _dispatch_status_command(client, options)
     if root == "autorole":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return await _dispatch_autorole_command(service, interaction, model, options)
     if root == "unmute":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return _dispatch_unmute_command(service, model, command, options)
     if root == "trusted":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return _dispatch_trusted_command(service, model, command, options)
     if root == "dashboard":
         return await _dispatch_dashboard_command(client, service, model, interaction)
@@ -375,7 +401,7 @@ async def _dispatch_command(
     if root == "stalker":
         return _dispatch_stalker_command(service, model, command, options)
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
-        if not _is_admin_only(model):
+        if access.get(root) != "all" and not _is_admin_only(model):
             return "Insufficient permissions."
         return _dispatch_inspect_channel_command(service, model, options)
     if root in {"settings", "inspect"}:
@@ -388,6 +414,7 @@ async def _dispatch_command(
             options,
             bot_admin_user_ids,
             remember_fallback=remember_fallback,
+            allow_all=access.get(root) == "all",
         )
     logger.warning("unknown command route %s", _command_context(interaction, root, command, options))
     return "Unknown command."
@@ -401,8 +428,9 @@ def _dispatch_legacy_voice_command(
     options: list[ApplicationCommandInteractionDataOption],
     bot_admin_user_ids: list[str],
     remember_fallback: bool = False,
+    allow_all: bool = False,
 ) -> str:
-    if not can_use_voice_command(model, bot_admin_user_ids, root, command):
+    if not allow_all and not can_use_voice_command(model, bot_admin_user_ids, root, command):
         return "Insufficient permissions."
     if remember_fallback and model.channel_id:
         service.remember_fallback_summary_channel(None, model.guild_id, model.channel_id)
