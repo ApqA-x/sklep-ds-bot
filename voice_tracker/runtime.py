@@ -74,6 +74,7 @@ class Config:
     discord_guild_id: str = ""
     bot_admin_user_ids: list[str] = field(default_factory=list)
     event_signing_secret: str = ""
+    media_dir: str = ""
     tracking_mode: str = "all"
     tracked_channel_ids: list[str] = field(default_factory=list)
 
@@ -89,6 +90,7 @@ def load_config(env: Any = None) -> Config:
         discord_application_id=_clean(source.get("DISCORD_APPLICATION_ID", "")),
         discord_guild_id=_clean(source.get("DISCORD_GUILD_ID", "")),
         event_signing_secret=_clean(source.get("EVENT_SIGNING_SECRET", "")),
+        media_dir=_clean(source.get("MEDIA_DIR", "")),
     )
     cfg.bot_admin_user_ids = parse_user_ids(source.get("BOT_ADMIN_USER_IDS", ""))
     # Tracking defaults are canonicalized to all-channel mode at runtime.

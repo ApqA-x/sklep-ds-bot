@@ -21,6 +21,7 @@ from services.chat_templates import voice_session_summary
 from voice_tracker.bus import Bus
 from voice_tracker import domain
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
+from voice_tracker.media import store_attachments
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
 from voice_tracker.timeutil import datetime_to_json
