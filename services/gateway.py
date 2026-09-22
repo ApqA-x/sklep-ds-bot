@@ -2249,6 +2249,28 @@ async def main() -> None:
         if not _guild_allowed(cfg.discord_guild_id, guild_id) or _message_author_is_bot(message):
             return
         snapshot = remember_message_for_activity(message)
+        sent_at = _ensure_utc(getattr(message, "created_at", None))
+        try:
+            attachments_meta = await store_attachments(
+                cfg.media_dir, guild_id, list(getattr(message, "attachments", []) or []), sent_at
+            )
+        except Exception:
+            logger.exception("attachment store failed guild=%s message=%s", guild_id, _message_id(message))
+            attachments_meta = []
+        try:
+            repo.record_chat_message(
+                None,
+                guild_id=guild_id,
+                channel_id=snapshot.get("channel_id", ""),
+                message_id=snapshot.get("message_id", ""),
+                author_user_id=snapshot.get("author_id", ""),
+                author_name=snapshot.get("author_name", ""),
+                content=snapshot.get("content", ""),
+                sent_at=sent_at,
+                attachments=attachments_meta,
+            )
+        except Exception:
+            logger.exception("chat message record failed guild=%s message=%s", guild_id, _message_id(message))
         try:
             await publish_activity_event(
                 _activity_event(
@@ -2310,6 +2332,19 @@ async def main() -> None:
                     "content": after_content,
                 }
         try:
+            repo.mark_chat_message_edited(
+                None,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                author_user_id=user_id,
+                author_name=user_name,
+                content=after_content,
+                edited_at=_utc_now(),
+            )
+        except Exception:
+            logger.exception("chat message edit record failed guild=%s message=%s", guild_id, message_id)
+        try:
             await publish_activity_event(
                 _activity_event(
                     event_type=domain.ACTIVITY_EVENT_MESSAGE_UPDATE,
@@ -2343,6 +2378,19 @@ async def main() -> None:
         author_id = snapshot.get("author_id", "") or _message_author_id(cached)
         author_name = snapshot.get("author_name", "") or _message_author_name(cached)
         content = snapshot.get("content", "") or _message_content(cached)
+        try:
+            repo.mark_chat_message_deleted(
+                None,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                author_user_id=author_id,
+                author_name=author_name,
+                content=content,
+                deleted_at=_utc_now(),
+            )
+        except Exception:
+            logger.exception("chat message delete record failed guild=%s message=%s", guild_id, message_id)
         try:
             await publish_activity_event(
                 _activity_event(

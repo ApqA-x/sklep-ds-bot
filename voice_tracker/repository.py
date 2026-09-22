@@ -87,6 +87,7 @@ class Repository:
         self.member_nickname_state = _collection(db, "member_nickname_state")
         self.member_nickname_history = _collection(db, "member_nickname_history")
         self.stalker_subscriptions = _collection(db, "stalker_subscriptions")
+        self.chat_messages = _collection(db, "chat_messages")
 
     def ensure_indexes(self, _ctx: Any = None) -> None:
         self.sessions.create_index(
@@ -142,6 +143,25 @@ class Repository:
         self.stalker_subscriptions.create_index([("guildId", 1), ("targetUserId", 1)])
         self.stalker_subscriptions.create_index([("guildId", 1), ("watcherUserId", 1), ("targetUserId", 1)], unique=True)
 
+        self.chat_messages.create_index(
+            [("guildId", 1), ("messageId", 1)], unique=True, name="chat_guildId_messageId_unique"
+        )
+        self.chat_messages.create_index(
+            [("guildId", 1), ("channelId", 1), ("sentAt", -1)], name="chat_guildId_channelId_sentAt"
+        )
+        self.chat_messages.create_index([("guildId", 1), ("sentAt", -1)], name="chat_guildId_sentAt")
+
+    def _snowflake_created_at(self, message_id: str) -> datetime:
+        # DISCORD_EPOCH: время зашито в snowflake — спасает, если событие прилетело без created_at
+        try:
+            raw = int(str(message_id).strip())
+        except (TypeError, ValueError):
+            return _utc_now()
+        try:
+            return datetime.fromtimestamp(((raw >> 22) + 1420070400000) / 1000, UTC)
+        except (OverflowError, OSError, ValueError):
+            return _utc_now()
+
     def claim_message(self, _ctx: Any, subject: str, message_id: str, issuer: str, issued_at: int) -> bool:
         try:
             self.messages.insert_one(
@@ -157,6 +177,105 @@ class Repository:
             if _is_duplicate_key_error(err):
                 return False
             raise
+        return True
+
+    def record_chat_message(
+        self,
+        _ctx: Any,
+        *,
+        guild_id: str,
+        channel_id: str,
+        message_id: str,
+        author_user_id: str,
+        author_name: str,
+        content: str,
+        sent_at: datetime | None = None,
+        attachments: list[dict] | None = None,
+    ) -> bool:
+        guild_id = str(guild_id or "").strip()
+        message_id = str(message_id or "").strip()
+        if guild_id == "" or message_id == "":
+            return False
+        payload: dict[str, Any] = {
+            "channelId": str(channel_id or "").strip(),
+            "authorUserId": str(author_user_id or "").strip(),
+            "authorName": str(author_name or ""),
+            "content": str(content or ""),
+            "sentAt": sent_at or self._snowflake_created_at(message_id),
+        }
+        if attachments:
+            payload["attachments"] = attachments
+        self.chat_messages.update_one(
+            {"guildId": guild_id, "messageId": message_id},
+            {"$set": payload, "$setOnInsert": {"editedAt": None, "deletedAt": None}},
+            upsert=True,
+        )
+        return True
+
+    def mark_chat_message_edited(
+        self,
+        _ctx: Any,
+        *,
+        guild_id: str,
+        channel_id: str,
+        message_id: str,
+        author_user_id: str,
+        author_name: str,
+        content: str,
+        edited_at: datetime | None = None,
+    ) -> bool:
+        guild_id = str(guild_id or "").strip()
+        message_id = str(message_id or "").strip()
+        if guild_id == "" or message_id == "":
+            return False
+        now = edited_at or _utc_now()
+        self.chat_messages.update_one(
+            {"guildId": guild_id, "messageId": message_id},
+            {
+                "$set": {"content": str(content or ""), "editedAt": now},
+                "$setOnInsert": {
+                    "channelId": str(channel_id or "").strip(),
+                    "authorUserId": str(author_user_id or "").strip(),
+                    "authorName": str(author_name or ""),
+                    "sentAt": self._snowflake_created_at(message_id),
+                    "deletedAt": None,
+                },
+            },
+            upsert=True,
+        )
+        return True
+
+    def mark_chat_message_deleted(
+        self,
+        _ctx: Any,
+        *,
+        guild_id: str,
+        channel_id: str,
+        message_id: str,
+        author_user_id: str = "",
+        author_name: str = "",
+        content: str = "",
+        deleted_at: datetime | None = None,
+    ) -> bool:
+        guild_id = str(guild_id or "").strip()
+        message_id = str(message_id or "").strip()
+        if guild_id == "" or message_id == "":
+            return False
+        self.chat_messages.update_one(
+            {"guildId": guild_id, "messageId": message_id},
+            {
+                "$set": {"deletedAt": deleted_at or _utc_now()},
+                "$setOnInsert": {
+                    "channelId": str(channel_id or "").strip(),
+                    "authorUserId": str(author_user_id or "").strip(),
+                    "authorName": str(author_name or ""),
+                    "content": str(content or ""),
+                    "sentAt": self._snowflake_created_at(message_id),
+                    "editedAt": None,
+                },
+            },
+            upsert=True,
+        )
         return True
 
     def get_guild_settings(self, _ctx: Any, guild_id: str) -> GuildSettings | None:
