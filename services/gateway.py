@@ -2672,8 +2672,64 @@ async def main() -> None:
             except Exception:
                 logger.exception("member role reconciliation iteration failed guild=%s", cfg.discord_guild_id)
 
+    async def _reap_orphan_voice_sessions() -> None:
+        # сироты = активные сессии, которых нет в живом кэше голосовых состояний
+        # (ивент leave теряется при пересоздании контейнеров/простоях)
+        live: dict[tuple[str, str], set[str]] = {}
+        ready_guilds: set[str] = set()
+        for guild in client.guilds:
+            if getattr(guild, "unavailable", False):
+                continue
+            ready_guilds.add(str(guild.id))
+            states = getattr(guild, "voice_states", None) or getattr(guild, "_voice_states", {}) or {}
+            for user_key, voice_state in states.items():
+                channel = getattr(voice_state, "channel", None)
+                if channel is None:
+                    continue
+                live.setdefault((str(guild.id), str(channel.id)), set()).add(str(getattr(user_key, "id", user_key)))
+        now = datetime.now(UTC)
+        for session in repo.ListActiveSessions():
+            if cfg.discord_guild_id and session.guild_id != cfg.discord_guild_id:
+                continue
+            if session.guild_id not in ready_guilds:
+                continue  # гильдия ещё не в кэше — суждаться не по чему, пропускаем раунд
+            members = live.get((session.guild_id, session.channel_id), set())
+            for participant in repo.ListActiveParticipants(session.id):
+                if participant.user_id in members:
+                    continue
+                joined_at = participant.joined_at or now
+                duration_ms = max(0, int((now - joined_at).total_seconds() * 1000))
+                repo.CloseParticipant(participant.id, now, duration_ms)
+            if repo.ListActiveParticipants(session.id):
+                continue
+            repo.CloseSession(session.id, now, "")
+            closed = domain.SessionClosedEvent(
+                session_id=session.id,
+                guild_id=session.guild_id,
+                channel_id=session.channel_id,
+                started_at=session.started_at,
+                ended_at=now,
+                ended_by_user_id="",
+            )
+            try:
+                await bus.publish_json(None, domain.SUBJECT_SESSION_CLOSED, closed.to_dict())
+                repo.MarkSessionClosedEventPublished(session.id, now)
+                logger.info("reaped orphan voice session id=%s guild=%s channel=%s", session.id, session.guild_id, session.channel_id)
+            except Exception:
+                logger.exception("publish reaped session close failed id=%s", session.id)
+
+    async def reconcile_voice_sessions() -> None:
+        await asyncio.sleep(90)  # кэш голосовых состояний наполняется сразу после READY
+        while True:
+            try:
+                await _reap_orphan_voice_sessions()
+            except Exception:
+                logger.exception("voice session orphan reconciliation failed")
+            await asyncio.sleep(120)
+
     sweep = asyncio.create_task(sweep_pending())
     reconcile = asyncio.create_task(reconcile_managed_voice())
+    voice_reap = asyncio.create_task(reconcile_voice_sessions())
     invite_refresh = asyncio.create_task(refresh_invite_snapshots())
     invite_reconcile = asyncio.create_task(reconcile_invite_metadata())
     role_reconcile = asyncio.create_task(reconcile_member_roles())
@@ -2682,6 +2738,7 @@ async def main() -> None:
     finally:
         sweep.cancel()
         reconcile.cancel()
+        voice_reap.cancel()
         invite_refresh.cancel()
         invite_reconcile.cancel()
         role_reconcile.cancel()
