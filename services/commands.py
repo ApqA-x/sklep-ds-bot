@@ -66,6 +66,32 @@ SUPPORTED_COMMAND_NAMES = (VOICE_COMMAND_NAMES | TARGET_COMMAND_NAMES) - LEGACY_
 DASHBOARD_PAGE_SIZE = 10
 
 
+def _guild_allowed(configured_guild_id: str, event_guild_id: object) -> bool:
+    configured = str(configured_guild_id or "").strip()
+    event = str(event_guild_id or "").strip()
+    return event != "" and (configured == "" or event == configured)
+
+
+def _command_enabled(repo: Repository, guild_id: str, command_name: str) -> bool:
+    try:
+        doc = repo.db.web_module_configs.find_one(
+            {"guild_id": int(guild_id), "module_key": "commands/internal"},
+            {"_id": 0},
+        )
+    except Exception:
+        logger.exception("command enabled lookup failed guild=%s command=%s", guild_id, command_name)
+        return True
+    items = (doc or {}).get("config", {}).get("items", [])
+    if not isinstance(items, list) or len(items) == 0:
+        return True
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("key") or "").strip() == command_name:
+            return bool(item.get("enabled", True))
+    return True
+
+
 @dataclass(slots=True)
 class InteractionMessage:
     embed: discord.Embed | None = None
@@ -167,10 +193,8 @@ async def main() -> None:
         raise SystemExit("DISCORD_TOKEN is required")
     if cfg.discord_application_id == "":
         raise SystemExit("DISCORD_APPLICATION_ID is required")
-    if cfg.discord_guild_id == "":
-        raise SystemExit("DISCORD_GUILD_ID is required")
 
-    logger.info("commands service starting guild=%s", cfg.discord_guild_id)
+    logger.info("commands service starting guild=%s", cfg.discord_guild_id or "global")
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
     repo.ensure_indexes(None)
@@ -184,7 +208,10 @@ async def main() -> None:
         data = getattr(interaction, "data", None)
         if not isinstance(data, dict) or data.get("name") not in SUPPORTED_COMMAND_NAMES:
             return
-        if str(getattr(interaction, "guild_id", "") or "") != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, getattr(interaction, "guild_id", "")):
+            return
+        if not _command_enabled(repo, str(getattr(interaction, "guild_id", "") or ""), str(data.get("name") or "")):
+            await interaction.response.send_message("This command is disabled in the dashboard.", ephemeral=True)
             return
         model = _interaction_model(interaction)
         root, command, options = parse_voice_route(model.application_command_data())
@@ -239,7 +266,7 @@ async def main() -> None:
         logger.info(
             "application commands registered count=%s guild=%s",
             len(registered_commands),
-            cfg.discord_guild_id,
+            cfg.discord_guild_id or "global",
         )
         await client.connect()
     finally:

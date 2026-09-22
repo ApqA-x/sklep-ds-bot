@@ -26,6 +26,12 @@ from voice_tracker.runtime import configure_logging, load_config, require_event_
 logger = logging.getLogger(__name__)
 
 
+def _guild_allowed(configured_guild_id: str, event_guild_id: object) -> bool:
+    configured = str(configured_guild_id or "").strip()
+    event = str(event_guild_id or "").strip()
+    return event != "" and (configured == "" or event == configured)
+
+
 class _ServiceDeduper:
     def __init__(self, repo: Repository, namespace: str) -> None:
         self.repo = repo
@@ -158,10 +164,8 @@ async def main() -> None:
     cfg = load_config()
     if cfg.discord_token == "":
         raise SystemExit("DISCORD_TOKEN is required")
-    if cfg.discord_guild_id == "":
-        raise SystemExit("DISCORD_GUILD_ID is required")
     require_event_signing_secret(cfg.event_signing_secret)
-    logger.info("stalker service starting guild=%s", cfg.discord_guild_id)
+    logger.info("stalker service starting guild=%s", cfg.discord_guild_id or "all")
 
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
@@ -188,7 +192,7 @@ async def main() -> None:
         except Exception:
             logger.exception("invalid voice payload")
             return
-        if event.guild_id != cfg.discord_guild_id or event.user_id == "" or event.is_bot:
+        if not _guild_allowed(cfg.discord_guild_id, event.guild_id) or event.user_id == "" or event.is_bot:
             return
         if event.previous_channel_id == event.channel_id:
             return
@@ -213,7 +217,7 @@ async def main() -> None:
         except Exception:
             logger.exception("invalid activity payload")
             return
-        if event.guild_id != cfg.discord_guild_id or event.member_user_id == "":
+        if not _guild_allowed(cfg.discord_guild_id, event.guild_id) or event.member_user_id == "":
             return
         if event.event_type not in {domain.ACTIVITY_EVENT_MEMBER_JOIN, domain.ACTIVITY_EVENT_MEMBER_LEAVE}:
             return
