@@ -66,6 +66,32 @@ SUPPORTED_COMMAND_NAMES = (VOICE_COMMAND_NAMES | TARGET_COMMAND_NAMES) - LEGACY_
 DASHBOARD_PAGE_SIZE = 10
 
 
+def _guild_allowed(configured_guild_id: str, event_guild_id: object) -> bool:
+    configured = str(configured_guild_id or "").strip()
+    event = str(event_guild_id or "").strip()
+    return event != "" and (configured == "" or event == configured)
+
+
+def _command_enabled(repo: Repository, guild_id: str, command_name: str) -> bool:
+    try:
+        doc = repo.db.web_module_configs.find_one(
+            {"guild_id": int(guild_id), "module_key": "commands/internal"},
+            {"_id": 0},
+        )
+    except Exception:
+        logger.exception("command enabled lookup failed guild=%s command=%s", guild_id, command_name)
+        return True
+    items = (doc or {}).get("config", {}).get("items", [])
+    if not isinstance(items, list) or len(items) == 0:
+        return True
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("key") or "").strip() == command_name:
+            return bool(item.get("enabled", True))
+    return True
+
+
 @dataclass(slots=True)
 class InteractionMessage:
     embed: discord.Embed | None = None
@@ -167,10 +193,8 @@ async def main() -> None:
         raise SystemExit("DISCORD_TOKEN is required")
     if cfg.discord_application_id == "":
         raise SystemExit("DISCORD_APPLICATION_ID is required")
-    if cfg.discord_guild_id == "":
-        raise SystemExit("DISCORD_GUILD_ID is required")
 
-    logger.info("commands service starting guild=%s", cfg.discord_guild_id)
+    logger.info("commands service starting guild=%s", cfg.discord_guild_id or "global")
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
     repo.ensure_indexes(None)
@@ -184,7 +208,10 @@ async def main() -> None:
         data = getattr(interaction, "data", None)
         if not isinstance(data, dict) or data.get("name") not in SUPPORTED_COMMAND_NAMES:
             return
-        if str(getattr(interaction, "guild_id", "") or "") != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, getattr(interaction, "guild_id", "")):
+            return
+        if not _command_enabled(repo, str(getattr(interaction, "guild_id", "") or ""), str(data.get("name") or "")):
+            await interaction.response.send_message("This command is disabled in the dashboard.", ephemeral=True)
             return
         model = _interaction_model(interaction)
         root, command, options = parse_voice_route(model.application_command_data())
@@ -239,7 +266,7 @@ async def main() -> None:
         logger.info(
             "application commands registered count=%s guild=%s",
             len(registered_commands),
-            cfg.discord_guild_id,
+            cfg.discord_guild_id or "global",
         )
         await client.connect()
     finally:
@@ -298,6 +325,41 @@ def _channel_type(value: object) -> str:
     return str(value)
 
 
+# Roots that require the ADMINISTRATOR permission unless guild_settings.commandAccess
+# relaxes them ("all"). commandAccess can also tighten any open root ("admin").
+ADMIN_BY_DEFAULT_ROOTS = {
+    "connect",
+    "disconnect",
+    STATUS_COMMAND_NAME,
+    "autorole",
+    "unmute",
+    "trusted",
+}
+
+
+def _command_access_map(service: VoiceService, guild_id: str) -> dict[str, str]:
+    if not guild_id:
+        return {}
+    try:
+        settings = service.get_guild_settings(None, guild_id)
+    except Exception:
+        logger.exception("command access lookup failed guild=%s", guild_id)
+        return {}
+    raw = getattr(settings, "command_access", None)
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _route_access_ok(model: InteractionCreate, access: dict[str, str], root: str) -> bool:
+    override = access.get(root, "")
+    if override == "all":
+        return True
+    if override == "admin":
+        return _is_admin_only(model)
+    if root in ADMIN_BY_DEFAULT_ROOTS:
+        return _is_admin_only(model)
+    return True
+
+
 async def _dispatch_command(
     client: discord.Client,
     service: VoiceService,
@@ -309,31 +371,22 @@ async def _dispatch_command(
     bot_admin_user_ids: list[str],
 ) -> str | discord.Embed | InteractionMessage:
     options = _normalize_snowflake_options(options)
+    access = _command_access_map(service, model.guild_id)
+    if not _route_access_ok(model, access, root):
+        return "Insufficient permissions."
     if root == "jump":
         return await _dispatch_jump_command(client, interaction, model, options)
     if root == "connect":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return await _dispatch_connect_command(client, service, interaction, model, options)
     if root == "disconnect":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return await _dispatch_disconnect_command(service, model)
     if root == STATUS_COMMAND_NAME:
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return await _dispatch_status_command(client, options)
     if root == "autorole":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return await _dispatch_autorole_command(service, interaction, model, options)
     if root == "unmute":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return _dispatch_unmute_command(service, model, command, options)
     if root == "trusted":
-        if not _is_admin_only(model):
-            return "Insufficient permissions."
         return _dispatch_trusted_command(service, model, command, options)
     if root == "dashboard":
         return await _dispatch_dashboard_command(client, service, model, interaction)
@@ -348,7 +401,7 @@ async def _dispatch_command(
     if root == "stalker":
         return _dispatch_stalker_command(service, model, command, options)
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
-        if not _is_admin_only(model):
+        if access.get(root) != "all" and not _is_admin_only(model):
             return "Insufficient permissions."
         return _dispatch_inspect_channel_command(service, model, options)
     if root in {"settings", "inspect"}:
@@ -361,6 +414,7 @@ async def _dispatch_command(
             options,
             bot_admin_user_ids,
             remember_fallback=remember_fallback,
+            allow_all=access.get(root) == "all",
         )
     logger.warning("unknown command route %s", _command_context(interaction, root, command, options))
     return "Unknown command."
@@ -374,8 +428,9 @@ def _dispatch_legacy_voice_command(
     options: list[ApplicationCommandInteractionDataOption],
     bot_admin_user_ids: list[str],
     remember_fallback: bool = False,
+    allow_all: bool = False,
 ) -> str:
-    if not can_use_voice_command(model, bot_admin_user_ids, root, command):
+    if not allow_all and not can_use_voice_command(model, bot_admin_user_ids, root, command):
         return "Insufficient permissions."
     if remember_fallback and model.channel_id:
         service.remember_fallback_summary_channel(None, model.guild_id, model.channel_id)

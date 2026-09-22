@@ -166,6 +166,19 @@ def clean_activity_category_channel_ids(values: dict[str, Any] | None) -> dict[s
     return cleaned
 
 
+COMMAND_ACCESS_CLASSES = {"all", "admin"}
+
+
+def clean_command_access(values: dict[str, Any] | None) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for raw_name, raw_access in (values or {}).items():
+        name = _clean(str(raw_name)).lower()
+        access = _clean(str(raw_access)).lower()
+        if name and access in COMMAND_ACCESS_CLASSES:
+            cleaned[name] = access
+    return cleaned
+
+
 def activity_event_category(event_type: str) -> str:
     event_type = _clean(event_type).lower()
     if event_type in {
@@ -279,6 +292,8 @@ class GuildSettings:
     activity_channel_id: str = ""
     activity_category_channel_ids: dict[str, str] = field(default_factory=dict)
     activity_event_types: list[str] = field(default_factory=lambda: sorted(ACTIVITY_EVENT_TYPES))
+    # имя команды -> "all" | "admin": какие слэш-команды разрешены всем, какие только админам
+    command_access: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.guild_id = _clean(self.guild_id)
@@ -299,6 +314,7 @@ class GuildSettings:
         self.activity_channel_id = _clean(self.activity_channel_id)
         self.activity_category_channel_ids = clean_activity_category_channel_ids(self.activity_category_channel_ids)
         self.activity_event_types = clean_activity_event_types(self.activity_event_types)
+        self.command_access = clean_command_access(self.command_access)
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
 
@@ -346,6 +362,7 @@ class GuildSettings:
             activity_channel_id=data.get("activityChannelId", ""),
             activity_category_channel_ids=dict(data.get("activityCategoryChannelIds") or {}),
             activity_event_types=list(data.get("activityEventTypes") or sorted(ACTIVITY_EVENT_TYPES)),
+            command_access=dict(data.get("commandAccess") or {}),
             created_at=parse_datetime(data.get("createdAt")),
             updated_at=parse_datetime(data.get("updatedAt")),
         )

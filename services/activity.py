@@ -33,6 +33,12 @@ from voice_tracker.timeutil import discord_timestamp, go_duration, parse_datetim
 logger = logging.getLogger(__name__)
 
 
+def _guild_allowed(configured_guild_id: str, event_guild_id: object) -> bool:
+    configured = str(configured_guild_id or "").strip()
+    event = str(event_guild_id or "").strip()
+    return event != "" and (configured == "" or event == configured)
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -395,10 +401,8 @@ async def main() -> None:
     cfg = load_config()
     if cfg.discord_token == "":
         raise SystemExit("DISCORD_TOKEN is required")
-    if cfg.discord_guild_id == "":
-        raise SystemExit("DISCORD_GUILD_ID is required")
     require_event_signing_secret(cfg.event_signing_secret)
-    logger.info("activity service starting guild=%s", cfg.discord_guild_id)
+    logger.info("activity service starting guild=%s", cfg.discord_guild_id or "all")
 
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
@@ -418,7 +422,7 @@ async def main() -> None:
         except Exception:
             logger.exception("invalid activity payload")
             return
-        if event.guild_id != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, event.guild_id):
             return
         if event.event_type not in domain.ACTIVITY_EVENT_TYPES:
             return

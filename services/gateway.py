@@ -21,6 +21,7 @@ from services.chat_templates import voice_session_summary
 from voice_tracker.bus import Bus
 from voice_tracker import domain
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
+from voice_tracker.media import store_attachments
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
 from voice_tracker.timeutil import datetime_to_json
@@ -81,6 +82,23 @@ def _guild_id(source: object | None) -> str:
         if guild_id:
             return guild_id
     return str(getattr(source, "guild_id", "") or "")
+
+
+def _guild_allowed(configured_guild_id: str, event_guild_id: object) -> bool:
+    configured = str(configured_guild_id or "").strip()
+    event = str(event_guild_id or "").strip()
+    return event != "" and (configured == "" or event == configured)
+
+
+def _configured_guild_ids(client: discord.Client, configured_guild_id: str) -> list[str]:
+    configured = str(configured_guild_id or "").strip()
+    if configured:
+        return [configured]
+    guild_ids = [
+        str(getattr(guild, "id", "") or "").strip()
+        for guild in list(getattr(client, "guilds", []) or [])
+    ]
+    return [guild_id for guild_id in guild_ids if guild_id]
 
 
 def _invite_code(invite: object | None) -> str:
@@ -1263,31 +1281,32 @@ class InviteAttributionController:
     _ready: dict[str, bool] = field(default_factory=dict)
 
     async def seed_on_ready(self) -> None:
-        snapshot_sync_enabled, _, _ = self._effective_feature_flags()
-        if not snapshot_sync_enabled:
-            self._ready[self.guild_id] = False
-            return
-        guild = _guild_from_client(self.client, self.guild_id)
-        if guild is None:
-            self._ready[self.guild_id] = False
-            return
-        self._ready[self.guild_id] = await self._seed_guild(guild)
+        for guild_id in _configured_guild_ids(self.client, self.guild_id):
+            snapshot_sync_enabled, _, _ = self._effective_feature_flags(guild_id)
+            if not snapshot_sync_enabled:
+                self._ready[guild_id] = False
+                continue
+            guild = _guild_from_client(self.client, guild_id)
+            if guild is None:
+                self._ready[guild_id] = False
+                continue
+            self._ready[guild_id] = await self._seed_guild(guild)
 
     async def refresh_snapshot(self) -> None:
-        snapshot_sync_enabled, _, _ = self._effective_feature_flags()
-        if not snapshot_sync_enabled:
-            return
-        guild = _guild_from_client(self.client, self.guild_id)
-        if guild is None:
-            return
-        await self._seed_guild(guild)
+        for guild_id in _configured_guild_ids(self.client, self.guild_id):
+            snapshot_sync_enabled, _, _ = self._effective_feature_flags(guild_id)
+            if not snapshot_sync_enabled:
+                continue
+            guild = _guild_from_client(self.client, guild_id)
+            if guild is not None:
+                await self._seed_guild(guild)
 
     async def on_invite_create(self, invite: object) -> None:
-        snapshot_sync_enabled, _, _ = self._effective_feature_flags()
-        if not snapshot_sync_enabled:
-            return
         guild_id = _guild_id(invite)
-        if guild_id != self.guild_id:
+        if not _guild_allowed(self.guild_id, guild_id):
+            return
+        snapshot_sync_enabled, _, _ = self._effective_feature_flags(guild_id)
+        if not snapshot_sync_enabled:
             return
         captured_at = _utc_now()
         entry = self._catalog_entry_from_invite(
@@ -1301,11 +1320,11 @@ class InviteAttributionController:
         await self.refresh_snapshot()
 
     async def on_invite_delete(self, invite: object) -> None:
-        snapshot_sync_enabled, _, _ = self._effective_feature_flags()
-        if not snapshot_sync_enabled:
-            return
         guild_id = _guild_id(invite)
-        if guild_id != self.guild_id:
+        if not _guild_allowed(self.guild_id, guild_id):
+            return
+        snapshot_sync_enabled, _, _ = self._effective_feature_flags(guild_id)
+        if not snapshot_sync_enabled:
             return
         code = _invite_code(invite)
         if code != "":
@@ -1315,21 +1334,25 @@ class InviteAttributionController:
         await self.refresh_snapshot()
 
     async def on_member_join(self, member: discord.Member) -> None:
-        _, live_attribution_enabled, _ = self._effective_feature_flags()
-        if not live_attribution_enabled:
-            return
         guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
-        if guild_id != self.guild_id or getattr(member, "bot", False):
+        if not _guild_allowed(self.guild_id, guild_id) or getattr(member, "bot", False):
+            return
+        _, live_attribution_enabled, _ = self._effective_feature_flags(guild_id)
+        if not live_attribution_enabled:
             return
         lock = self._join_locks.setdefault(guild_id, asyncio.Lock())
         async with lock:
             await self._attribute_join_locked(member)
 
     async def reconcile_metadata(self) -> None:
-        _, _, reconciliation_enabled = self._effective_feature_flags()
+        for guild_id in _configured_guild_ids(self.client, self.guild_id):
+            await self._reconcile_metadata_guild(guild_id)
+
+    async def _reconcile_metadata_guild(self, guild_id: str) -> None:
+        _, _, reconciliation_enabled = self._effective_feature_flags(guild_id)
         if not reconciliation_enabled:
             return
-        guild = _guild_from_client(self.client, self.guild_id)
+        guild = _guild_from_client(self.client, guild_id)
         if guild is None:
             return
         cutoff = _utc_now() - timedelta(days=max(1, self.reconciliation_max_age_days))
@@ -1347,7 +1370,7 @@ class InviteAttributionController:
             try:
                 iterator = audit_logs(limit=100, action=action)
             except Exception:
-                logger.exception("invite reconciliation failed guild=%s action=%s", self.guild_id, action)
+                logger.exception("invite reconciliation failed guild=%s action=%s", guild_id, action)
                 continue
             try:
                 async for entry in iterator:
@@ -1360,12 +1383,12 @@ class InviteAttributionController:
                     if action == getattr(discord.AuditLogAction, "invite_delete", object()):
                         marker = getattr(self.repo, "mark_invite_catalog_deleted", None) or getattr(self.repo, "mark_invite_deleted", None)
                         if callable(marker):
-                            marker(None, self.guild_id, code, created_at, INVITE_CATALOG_SOURCE_RECONCILIATION)
+                            marker(None, guild_id, code, created_at, INVITE_CATALOG_SOURCE_RECONCILIATION)
                         continue
                     inviter = getattr(entry, "user", None)
                     entry_obj = _domain_object(
                         "InviteCatalogEntry",
-                        guild_id=self.guild_id,
+                        guild_id=guild_id,
                         code=code,
                         url=_invite_url(getattr(entry, "target", None), code),
                         channel_id=_invite_target_channel_id(getattr(entry, "target", None)),
@@ -1378,16 +1401,16 @@ class InviteAttributionController:
                     )
                     self._upsert_catalog_entry(entry_obj)
             except Exception:
-                logger.exception("invite reconciliation iteration failed guild=%s action=%s", self.guild_id, action)
+                logger.exception("invite reconciliation iteration failed guild=%s action=%s", guild_id, action)
 
     async def _seed_guild(self, guild: discord.Guild) -> bool:
         snapshot = await self._fetch_current_snapshot(guild)
         if snapshot is None:
-            self._ready[self.guild_id] = False
+            self._ready[str(guild.id)] = False
             return False
         self._upsert_snapshot(snapshot)
         self._sync_catalog_from_snapshot(snapshot)
-        self._ready[self.guild_id] = True
+        self._ready[str(guild.id)] = True
         return True
 
     async def _attribute_join_locked(self, member: discord.Member) -> None:
@@ -1651,8 +1674,8 @@ class InviteAttributionController:
         if asyncio.iscoroutine(result):
             await result
 
-    def _effective_feature_flags(self) -> tuple[bool, bool, bool]:
-        settings = self.repo.get_guild_settings(None, self.guild_id)
+    def _effective_feature_flags(self, guild_id: str | None = None) -> tuple[bool, bool, bool]:
+        settings = self.repo.get_guild_settings(None, str(guild_id or self.guild_id))
         snapshot_enabled = bool(getattr(settings, "invite_snapshot_sync_enabled", self.snapshot_sync_default))
         live_enabled = bool(getattr(settings, "invite_live_attribution_enabled", self.live_attribution_default))
         reconcile_enabled = bool(getattr(settings, "invite_reconciliation_enabled", self.reconciliation_default))
@@ -1671,11 +1694,12 @@ class ManagedVoiceController:
     _retry_after: dict[str, datetime] = field(default_factory=dict)
 
     async def reconcile(self) -> None:
-        await self.reconcile_guild(self.guild_id)
+        for guild_id in _configured_guild_ids(self.client, self.guild_id):
+            await self.reconcile_guild(guild_id)
 
     async def reconcile_guild(self, guild_id: str) -> None:
         guild_id = str(guild_id or "").strip()
-        if guild_id == "" or guild_id != self.guild_id:
+        if guild_id == "" or not _guild_allowed(self.guild_id, guild_id):
             return
         now = datetime.now(UTC)
         retry_after = self._retry_after.get(guild_id)
@@ -1755,7 +1779,7 @@ class ManagedVoiceController:
 
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
         guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
-        if guild_id != self.guild_id:
+        if not _guild_allowed(self.guild_id, guild_id):
             return
         bot_user = getattr(self.client, "user", None)
         bot_user_id = str(getattr(bot_user, "id", "") or "")
@@ -1787,11 +1811,11 @@ class SoundboardEnforcement:
             effect_user_id or "-",
             effect_sound_id or "-",
         )
-        if guild_id != self.guild_id:
+        if not _guild_allowed(self.guild_id, guild_id):
             logger.info(
                 "soundboard enforcement skipped reason=guild_mismatch event_guild=%s expected_guild=%s",
                 guild_id or "-",
-                self.guild_id,
+                self.guild_id or "all",
             )
             return
         if not _is_soundboard_effect(effect):
@@ -1890,7 +1914,7 @@ async def main() -> None:
     if cfg.discord_token == "":
         raise SystemExit("DISCORD_TOKEN is required")
     require_event_signing_secret(cfg.event_signing_secret)
-    logger.info("gateway service starting guild=%s", cfg.discord_guild_id)
+    logger.info("gateway service starting guild=%s", cfg.discord_guild_id or "all")
 
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
@@ -1935,7 +1959,7 @@ async def main() -> None:
     )
 
     async def publish_activity_event(event: domain.ActivityEvent) -> None:
-        if event.guild_id != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, event.guild_id):
             return
         await bus.publish_json(None, domain.SUBJECT_ACTIVITY_EVENT, event.to_dict())
 
@@ -1994,18 +2018,22 @@ async def main() -> None:
 
     invite_attribution.on_attribution = publish_invite_used_activity
 
+    async def reconcile_member_state_once() -> None:
+        for guild_id in _configured_guild_ids(client, cfg.discord_guild_id):
+            await _reconcile_member_roles(client, repo, guild_id)
+            await _reconcile_member_nicknames(client, repo, guild_id)
+            await _sync_current_guild_member_roles(client, repo, guild_id)
+            await _sync_current_guild_member_nicknames(client, repo, guild_id)
+
     @client.event
     async def on_ready() -> None:
         await invite_attribution.seed_on_ready()
         await voice_controller.reconcile()
-        await _reconcile_member_roles(client, repo, cfg.discord_guild_id)
-        await _reconcile_member_nicknames(client, repo, cfg.discord_guild_id)
-        await _sync_current_guild_member_roles(client, repo, cfg.discord_guild_id)
-        await _sync_current_guild_member_nicknames(client, repo, cfg.discord_guild_id)
+        await reconcile_member_state_once()
 
     @client.event
     async def on_member_join(member: discord.Member) -> None:
-        if str(getattr(member.guild, "id", "") or "") != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, str(getattr(member.guild, "id", "") or "")):
             return
         if getattr(member, "bot", False):
             return
@@ -2069,7 +2097,7 @@ async def main() -> None:
 
     @client.event
     async def on_member_remove(member: discord.Member) -> None:
-        if str(getattr(member.guild, "id", "") or "") != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, str(getattr(member.guild, "id", "") or "")):
             return
         if getattr(member, "bot", False):
             return
@@ -2110,7 +2138,7 @@ async def main() -> None:
 
     @client.event
     async def on_member_update(before: discord.Member, after: discord.Member) -> None:
-        if str(getattr(getattr(after, "guild", None), "id", "") or "") != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, str(getattr(getattr(after, "guild", None), "id", "") or "")):
             return
         if getattr(after, "bot", False):
             return
@@ -2218,9 +2246,31 @@ async def main() -> None:
     @client.event
     async def on_message(message: discord.Message) -> None:
         guild_id = _message_guild_id(message)
-        if guild_id != cfg.discord_guild_id or _message_author_is_bot(message):
+        if not _guild_allowed(cfg.discord_guild_id, guild_id) or _message_author_is_bot(message):
             return
         snapshot = remember_message_for_activity(message)
+        sent_at = _ensure_utc(getattr(message, "created_at", None))
+        try:
+            attachments_meta = await store_attachments(
+                cfg.media_dir, guild_id, list(getattr(message, "attachments", []) or []), sent_at
+            )
+        except Exception:
+            logger.exception("attachment store failed guild=%s message=%s", guild_id, _message_id(message))
+            attachments_meta = []
+        try:
+            repo.record_chat_message(
+                None,
+                guild_id=guild_id,
+                channel_id=snapshot.get("channel_id", ""),
+                message_id=snapshot.get("message_id", ""),
+                author_user_id=snapshot.get("author_id", ""),
+                author_name=snapshot.get("author_name", ""),
+                content=snapshot.get("content", ""),
+                sent_at=sent_at,
+                attachments=attachments_meta,
+            )
+        except Exception:
+            logger.exception("chat message record failed guild=%s message=%s", guild_id, _message_id(message))
         try:
             await publish_activity_event(
                 _activity_event(
@@ -2243,7 +2293,7 @@ async def main() -> None:
     @client.event
     async def on_raw_message_edit(payload: object) -> None:
         guild_id = _raw_payload_guild_id(payload)
-        if guild_id != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, guild_id):
             return
         cached = getattr(payload, "cached_message", None)
         data = getattr(payload, "data", {}) if isinstance(getattr(payload, "data", {}), dict) else {}
@@ -2282,6 +2332,19 @@ async def main() -> None:
                     "content": after_content,
                 }
         try:
+            repo.mark_chat_message_edited(
+                None,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                author_user_id=user_id,
+                author_name=user_name,
+                content=after_content,
+                edited_at=_utc_now(),
+            )
+        except Exception:
+            logger.exception("chat message edit record failed guild=%s message=%s", guild_id, message_id)
+        try:
             await publish_activity_event(
                 _activity_event(
                     event_type=domain.ACTIVITY_EVENT_MESSAGE_UPDATE,
@@ -2304,7 +2367,7 @@ async def main() -> None:
     @client.event
     async def on_raw_message_delete(payload: object) -> None:
         guild_id = _raw_payload_guild_id(payload)
-        if guild_id != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, guild_id):
             return
         cached = getattr(payload, "cached_message", None)
         if _message_author_is_bot(cached):
@@ -2315,6 +2378,19 @@ async def main() -> None:
         author_id = snapshot.get("author_id", "") or _message_author_id(cached)
         author_name = snapshot.get("author_name", "") or _message_author_name(cached)
         content = snapshot.get("content", "") or _message_content(cached)
+        try:
+            repo.mark_chat_message_deleted(
+                None,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                author_user_id=author_id,
+                author_name=author_name,
+                content=content,
+                deleted_at=_utc_now(),
+            )
+        except Exception:
+            logger.exception("chat message delete record failed guild=%s message=%s", guild_id, message_id)
         try:
             await publish_activity_event(
                 _activity_event(
@@ -2336,7 +2412,7 @@ async def main() -> None:
 
     async def _publish_reaction_activity(payload: object, event_type: str) -> None:
         guild_id = _raw_payload_guild_id(payload)
-        if guild_id != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, guild_id):
             return
         actor_user_id = _raw_payload_user_id(payload)
         bot_user_id = str(getattr(getattr(client, "user", None), "id", "") or "")
@@ -2383,7 +2459,7 @@ async def main() -> None:
     async def _on_voice_state_update_activity(
         member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
     ) -> None:
-        if str(getattr(member.guild, "id", "") or "") != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, str(getattr(member.guild, "id", "") or "")):
             return
         if getattr(member, "bot", False):
             return
@@ -2430,7 +2506,7 @@ async def main() -> None:
     async def _on_voice_state_update_unmute(
         member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
     ) -> None:
-        if str(getattr(member.guild, "id", "") or "") != cfg.discord_guild_id:
+        if not _guild_allowed(cfg.discord_guild_id, str(getattr(member.guild, "id", "") or "")):
             return
         if getattr(member, "bot", False):
             return
@@ -2592,15 +2668,68 @@ async def main() -> None:
         while True:
             await asyncio.sleep(300)
             try:
-                await _reconcile_member_roles(client, repo, cfg.discord_guild_id)
-                await _reconcile_member_nicknames(client, repo, cfg.discord_guild_id)
-                await _sync_current_guild_member_roles(client, repo, cfg.discord_guild_id)
-                await _sync_current_guild_member_nicknames(client, repo, cfg.discord_guild_id)
+                await reconcile_member_state_once()
             except Exception:
                 logger.exception("member role reconciliation iteration failed guild=%s", cfg.discord_guild_id)
 
+    async def _reap_orphan_voice_sessions() -> None:
+        # сироты = активные сессии, которых нет в живом кэше голосовых состояний
+        # (ивент leave теряется при пересоздании контейнеров/простоях)
+        live: dict[tuple[str, str], set[str]] = {}
+        ready_guilds: set[str] = set()
+        for guild in client.guilds:
+            if getattr(guild, "unavailable", False):
+                continue
+            ready_guilds.add(str(guild.id))
+            states = getattr(guild, "voice_states", None) or getattr(guild, "_voice_states", {}) or {}
+            for user_key, voice_state in states.items():
+                channel = getattr(voice_state, "channel", None)
+                if channel is None:
+                    continue
+                live.setdefault((str(guild.id), str(channel.id)), set()).add(str(getattr(user_key, "id", user_key)))
+        now = datetime.now(UTC)
+        for session in repo.ListActiveSessions():
+            if cfg.discord_guild_id and session.guild_id != cfg.discord_guild_id:
+                continue
+            if session.guild_id not in ready_guilds:
+                continue  # гильдия ещё не в кэше — суждаться не по чему, пропускаем раунд
+            members = live.get((session.guild_id, session.channel_id), set())
+            for participant in repo.ListActiveParticipants(session.id):
+                if participant.user_id in members:
+                    continue
+                joined_at = participant.joined_at or now
+                duration_ms = max(0, int((now - joined_at).total_seconds() * 1000))
+                repo.CloseParticipant(participant.id, now, duration_ms)
+            if repo.ListActiveParticipants(session.id):
+                continue
+            repo.CloseSession(session.id, now, "")
+            closed = domain.SessionClosedEvent(
+                session_id=session.id,
+                guild_id=session.guild_id,
+                channel_id=session.channel_id,
+                started_at=session.started_at,
+                ended_at=now,
+                ended_by_user_id="",
+            )
+            try:
+                await bus.publish_json(None, domain.SUBJECT_SESSION_CLOSED, closed.to_dict())
+                repo.MarkSessionClosedEventPublished(session.id, now)
+                logger.info("reaped orphan voice session id=%s guild=%s channel=%s", session.id, session.guild_id, session.channel_id)
+            except Exception:
+                logger.exception("publish reaped session close failed id=%s", session.id)
+
+    async def reconcile_voice_sessions() -> None:
+        await asyncio.sleep(90)  # кэш голосовых состояний наполняется сразу после READY
+        while True:
+            try:
+                await _reap_orphan_voice_sessions()
+            except Exception:
+                logger.exception("voice session orphan reconciliation failed")
+            await asyncio.sleep(120)
+
     sweep = asyncio.create_task(sweep_pending())
     reconcile = asyncio.create_task(reconcile_managed_voice())
+    voice_reap = asyncio.create_task(reconcile_voice_sessions())
     invite_refresh = asyncio.create_task(refresh_invite_snapshots())
     invite_reconcile = asyncio.create_task(reconcile_invite_metadata())
     role_reconcile = asyncio.create_task(reconcile_member_roles())
@@ -2609,6 +2738,7 @@ async def main() -> None:
     finally:
         sweep.cancel()
         reconcile.cancel()
+        voice_reap.cancel()
         invite_refresh.cancel()
         invite_reconcile.cancel()
         role_reconcile.cancel()
