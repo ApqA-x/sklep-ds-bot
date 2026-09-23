@@ -527,6 +527,21 @@ def _autorole_id_for_guild(repo: Repository, guild_id: str) -> str:
     return str(document.get("autoRoleId") or document.get("auto_role_id") or "").strip()
 
 
+def _restore_flag_enabled(repo: Repository, guild_id: str, camel: str, snake: str) -> bool:
+    """Чекбокс из настроек гильдии (пишет дашборд). Нет поля — включено (как раньше)."""
+    collection = getattr(repo, "guild_settings", None)
+    if collection is None:
+        return True
+    try:
+        document = collection.find_one({"_id": guild_id}) or {}
+    except Exception:
+        return True
+    value = document.get(camel)
+    if value is None:
+        value = document.get(snake)
+    return True if value is None else bool(value)
+
+
 def _normalize_ids(values: object) -> list[str]:
     seen: set[str] = set()
     ids: list[str] = []
@@ -806,6 +821,9 @@ async def _restore_member_roles(
     user_id = str(getattr(member, "id", "") or "")
     if guild_id == "" or user_id == "":
         return True
+    if not _restore_flag_enabled(repo, guild_id, "autoRestoreRoles", "auto_restore_roles"):
+        logger.info("role restore disabled by settings guild=%s member=%s source=%s", guild_id, user_id, source)
+        return True
     getter = getattr(repo, "get_member_role_state", None)
     if not callable(getter):
         return True
@@ -914,6 +932,9 @@ async def _restore_member_nickname(
     guild_id = str(getattr(getattr(member, "guild", None), "id", "") or "")
     user_id = str(getattr(member, "id", "") or "")
     if guild_id == "" or user_id == "":
+        return True
+    if not _restore_flag_enabled(repo, guild_id, "autoRestoreNicknames", "auto_restore_nicknames"):
+        logger.info("nickname restore disabled by settings guild=%s member=%s source=%s", guild_id, user_id, source)
         return True
     getter = getattr(repo, "get_member_nickname_state", None)
     if not callable(getter):
