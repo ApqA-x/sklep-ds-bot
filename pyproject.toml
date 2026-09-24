@@ -25,6 +25,13 @@ test = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# T01.5: unit-прогон не ходит в сеть; интеграционные тесты — отдельным запуском:
+#   unit:          python -B -m pytest tests -q
+#   integration:   python -B -m pytest tests -q -m integration   (нужен стенд docker-compose.test.yml)
+addopts = ["-m", "not integration"]
+markers = [
+    "integration: требует реального стенда (Mongo 127.0.0.1:27099 и т.п.), не запускается в unit-suite",
+]
 
 [tool.setuptools.packages.find]
 include = ["voice_tracker*", "services*"]

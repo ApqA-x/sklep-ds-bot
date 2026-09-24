@@ -19,6 +19,9 @@ from pymongo import MongoClient  # noqa: E402
 
 from voice_tracker import domain  # noqa: E402
 from voice_tracker.repository import Repository, SettingsConflict  # noqa: E402
+from stand_guard import guard_db_name, guard_mongo_uri  # noqa: E402
+
+pytestmark = pytest.mark.integration
 
 TEST_MONGO_URI = os.environ.get("TEST_MONGO_URI", "mongodb://127.0.0.1:27099")
 
@@ -35,10 +38,13 @@ def _server_up() -> bool:
 
 @pytest.fixture()
 def repo():
+    # guard: fail-closed на прод-ресурсы (порт/имя БД), до первого обращения к сети
+    guard_mongo_uri(TEST_MONGO_URI)
     if not _server_up():
         pytest.skip("test mongod is not running on %s" % TEST_MONGO_URI)
     client = MongoClient(TEST_MONGO_URI, serverSelectionTimeoutMS=3000)
     name = f"voice_tracker_t06bot_{uuid.uuid4().hex[:10]}"
+    guard_db_name(name)
     db = client[name]
     yield Repository(db)
     client.drop_database(name)
