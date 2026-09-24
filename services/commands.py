@@ -38,6 +38,14 @@ from voice_tracker.discord_models import (
 )
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, register_commands_http
+from voice_tracker.site_audit import (
+    REASON_DISABLED,
+    REASON_ERROR,
+    REASON_PERMISSIONS,
+    REASON_REJECTED,
+    REASON_UNKNOWN,
+    safe_record_command_audit,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +72,11 @@ TARGET_COMMAND_NAMES = {
 
 SUPPORTED_COMMAND_NAMES = (VOICE_COMMAND_NAMES | TARGET_COMMAND_NAMES) - LEGACY_ROOT_COMMAND_NAMES
 DASHBOARD_PAGE_SIZE = 10
+
+_REJECTED_RESULT_REASONS = {
+    "Insufficient permissions.": REASON_PERMISSIONS,
+    "Unknown command.": REASON_UNKNOWN,
+}
 
 
 def _guild_allowed(configured_guild_id: str, event_guild_id: object) -> bool:
@@ -197,11 +210,36 @@ async def main() -> None:
     logger.info("commands service starting guild=%s", cfg.discord_guild_id or "global")
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
+    site_audit_db = mongo_client[cfg.mongo_db]
     repo.ensure_indexes(None)
     service = VoiceService(repo)
     registered_commands = _public_command_payloads()
 
     client = _build_client(cfg.discord_token)
+
+    def _audit_command(
+        interaction: discord.Interaction,
+        root: str,
+        command: str,
+        options: list[ApplicationCommandInteractionDataOption],
+        *,
+        ok: bool,
+        reason: str = "",
+    ) -> None:
+        user = getattr(interaction, "user", None)
+        user_id = str(getattr(user, "id", "") or "")
+        safe_record_command_audit(
+            site_audit_db,
+            guild_id=str(getattr(interaction, "guild_id", "") or ""),
+            actor_user_id=user_id,
+            actor_name=str(getattr(user, "display_name", "") or getattr(user, "name", "") or user_id),
+            root=root,
+            command=command,
+            options=options,
+            channel_id=str(getattr(interaction, "channel_id", "") or ""),
+            reason=reason,
+            ok=ok,
+        )
 
     @client.event
     async def on_interaction(interaction: discord.Interaction) -> None:
@@ -211,12 +249,15 @@ async def main() -> None:
         if not _guild_allowed(cfg.discord_guild_id, getattr(interaction, "guild_id", "")):
             return
         if not _command_enabled(repo, str(getattr(interaction, "guild_id", "") or ""), str(data.get("name") or "")):
+            _audit_command(interaction, str(data.get("name") or ""), "", [], ok=False, reason=REASON_DISABLED)
             await interaction.response.send_message("This command is disabled in the dashboard.", ephemeral=True)
             return
         model = _interaction_model(interaction)
         root, command, options = parse_voice_route(model.application_command_data())
         context = _command_context(interaction, root, command, options)
         logger.info("command received %s", context)
+        ok = True
+        reason = ""
         try:
             result = await _dispatch_command(
                 client,
@@ -231,9 +272,13 @@ async def main() -> None:
         except ValueError as exc:
             logger.warning("command rejected %s error=%s", context, exc)
             result = str(exc)
+            ok = False
+            reason = REASON_REJECTED
         except Exception:
             logger.exception("command failed %s", context)
             result = "Command failed. Check service logs."
+            ok = False
+            reason = REASON_ERROR
         else:
             if isinstance(result, InteractionMessage):
                 logger.info("command completed %s response=interaction_message", context)
@@ -241,6 +286,12 @@ async def main() -> None:
                 logger.info("command completed %s response=embed", context)
             else:
                 logger.info("command completed %s response=text", context)
+        if ok and isinstance(result, str):
+            rejection = _REJECTED_RESULT_REASONS.get(result)
+            if rejection is not None:
+                ok = False
+                reason = rejection
+        _audit_command(interaction, root, command, options, ok=ok, reason=reason)
         if isinstance(result, InteractionMessage):
             kwargs: dict[str, object] = {"ephemeral": result.ephemeral}
             if result.content is not None:
