@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20 МБ
+DOWNLOAD_TIMEOUT_S = 60.0  # L03: потолок на одно скачивание
 DOWNLOAD_KINDS = {"image"}  # что реально храним на диске
 _MAX_CONCURRENT_DOWNLOADS = 4
 _SAFE_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
@@ -96,7 +99,10 @@ async def store_attachments(media_dir: str, guild_id: str, attachments: Any, sen
             continue
         try:
             async with _download_semaphore():
-                data = await attachment.read(use_cached=False)
+                # L03: одно медленное скачивание не держит весь gateway
+                data = await asyncio.wait_for(
+                    attachment.read(use_cached=False), timeout=DOWNLOAD_TIMEOUT_S
+                )
         except Exception:
             logger.warning("attachment download failed id=%s guild=%s", meta["id"], safe_guild, exc_info=True)
             continue
@@ -108,11 +114,17 @@ async def store_attachments(media_dir: str, guild_id: str, attachments: Any, sen
         try:
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
-                tmp = target.with_suffix(target.suffix + ".part")
-                tmp.write_bytes(data)
-                tmp.replace(target)
+                # M08: временный файл уникален на скачивание — два параллельных
+                # save одного digest не пишут в общий .part; os.replace атомарен.
+                tmp = target.with_name(f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}.part")
+                await asyncio.to_thread(tmp.write_bytes, data)
+                await asyncio.to_thread(os.replace, tmp, target)
         except OSError:
             logger.warning("attachment save failed path=%s", rel, exc_info=True)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
             continue
         meta["path"] = rel
         meta["stored"] = True
