@@ -169,6 +169,50 @@ def clean_activity_category_channel_ids(values: dict[str, Any] | None) -> dict[s
 COMMAND_ACCESS_CLASSES = {"all", "admin"}
 
 
+# цвет полоски activity-карточки по умолчанию, если в настройках гильдии не задан свой
+ACTIVITY_EVENT_DEFAULT_COLORS: dict[str, int] = {
+    ACTIVITY_EVENT_MEMBER_JOIN: 0x57F287,
+    ACTIVITY_EVENT_MEMBER_LEAVE: 0xED4245,
+    ACTIVITY_EVENT_INVITE_CREATE: 0x5865F2,
+    ACTIVITY_EVENT_INVITE_DELETE: 0x95A5A6,
+    ACTIVITY_EVENT_INVITE_USED: 0x57F287,
+    ACTIVITY_EVENT_MESSAGE_CREATE: 0x3498DB,
+    ACTIVITY_EVENT_MESSAGE_UPDATE: 0x3498DB,
+    ACTIVITY_EVENT_MESSAGE_DELETE: 0x3498DB,
+    ACTIVITY_EVENT_REACTION_ADD: 0xFEE75C,
+    ACTIVITY_EVENT_REACTION_REMOVE: 0xFEE75C,
+    ACTIVITY_EVENT_VOICE_JOIN: 0x57F287,
+    ACTIVITY_EVENT_VOICE_LEAVE: 0x57F287,
+    ACTIVITY_EVENT_VOICE_MOVE: 0x57F287,
+    ACTIVITY_EVENT_PROFILE_NICKNAME_UPDATE: 0xE67E22,
+    ACTIVITY_EVENT_PROFILE_ROLES_UPDATE: 0xE67E22,
+}
+ACTIVITY_EMBED_FALLBACK_COLOR = 0x5865F2
+
+
+def clean_activity_event_colors(values: dict[str, Any] | None) -> dict[str, int]:
+    cleaned: dict[str, int] = {}
+    for raw_type, raw_color in (values or {}).items():
+        event_type = _clean(str(raw_type)).lower()
+        if event_type not in ACTIVITY_EVENT_TYPES:
+            continue
+        try:
+            color = int(raw_color)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= color <= 0xFFFFFF:
+            cleaned[event_type] = color
+    return cleaned
+
+
+def activity_embed_color(settings: "GuildSettings | None", event_type: str) -> int:
+    event_type = _clean(event_type).lower()
+    custom = settings.activity_event_colors.get(event_type) if settings is not None else None
+    if custom is not None:
+        return custom
+    return ACTIVITY_EVENT_DEFAULT_COLORS.get(event_type, ACTIVITY_EMBED_FALLBACK_COLOR)
+
+
 def clean_command_access(values: dict[str, Any] | None) -> dict[str, str]:
     cleaned: dict[str, str] = {}
     for raw_name, raw_access in (values or {}).items():
@@ -292,6 +336,8 @@ class GuildSettings:
     activity_channel_id: str = ""
     activity_category_channel_ids: dict[str, str] = field(default_factory=dict)
     activity_event_types: list[str] = field(default_factory=lambda: sorted(ACTIVITY_EVENT_TYPES))
+    # тип события -> цвет полоски карточки (RGB int); отсутствие ключа = дефолт бота
+    activity_event_colors: dict[str, int] = field(default_factory=dict)
     # имя команды -> "all" | "admin": какие слэш-команды разрешены всем, какие только админам
     command_access: dict[str, str] = field(default_factory=dict)
 
@@ -314,6 +360,7 @@ class GuildSettings:
         self.activity_channel_id = _clean(self.activity_channel_id)
         self.activity_category_channel_ids = clean_activity_category_channel_ids(self.activity_category_channel_ids)
         self.activity_event_types = clean_activity_event_types(self.activity_event_types)
+        self.activity_event_colors = clean_activity_event_colors(self.activity_event_colors)
         self.command_access = clean_command_access(self.command_access)
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
@@ -362,6 +409,7 @@ class GuildSettings:
             activity_channel_id=data.get("activityChannelId", ""),
             activity_category_channel_ids=dict(data.get("activityCategoryChannelIds") or {}),
             activity_event_types=list(data.get("activityEventTypes") or sorted(ACTIVITY_EVENT_TYPES)),
+            activity_event_colors=dict(data.get("activityEventColors") or {}),
             command_access=dict(data.get("commandAccess") or {}),
             created_at=parse_datetime(data.get("createdAt")),
             updated_at=parse_datetime(data.get("updatedAt")),

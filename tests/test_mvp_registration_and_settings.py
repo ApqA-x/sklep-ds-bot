@@ -119,3 +119,32 @@ def test_autorole_replacement_keeps_only_the_new_safe_setting() -> None:
     setter(None, "g1", "role-new")
 
     assert getter(None, "g1") == "role-new"
+
+
+def test_activity_event_color_resolution() -> None:
+    assert domain.activity_embed_color(None, domain.ACTIVITY_EVENT_MEMBER_JOIN) == 0x57F287
+    assert domain.activity_embed_color(None, domain.ACTIVITY_EVENT_MEMBER_LEAVE) == 0xED4245
+    assert domain.activity_embed_color(None, "no_such_event") == domain.ACTIVITY_EMBED_FALLBACK_COLOR
+
+    settings = domain.GuildSettings(
+        guild_id="g1",
+        activity_event_colors={"member_join": 0x010203, "bogus": 0x00FF00, "member_leave": 99999999},
+    )
+    # чистка отбрасывает неизвестные типы и цвета вне диапазона -> дефолт типа
+    assert domain.activity_embed_color(settings, domain.ACTIVITY_EVENT_MEMBER_JOIN) == 0x010203
+    assert domain.activity_embed_color(settings, domain.ACTIVITY_EVENT_MEMBER_LEAVE) == 0xED4245
+
+
+def test_activity_event_colors_mongo_roundtrip() -> None:
+    settings = domain.GuildSettings.from_mongo(
+        {"_id": "g1", "activityEventColors": {"voice_join": 255, "unknown_type": 1}}
+    )
+    assert settings is not None
+    assert settings.activity_event_colors == {"voice_join": 255}
+
+    db = _FakeDb()
+    repo = Repository(db)
+    repo.upsert_guild_settings(None, settings)
+    assert db.collections["guild_settings"].update_calls[-1]["update"]["$set"]["activityEventColors"] == {
+        "voice_join": 255
+    }

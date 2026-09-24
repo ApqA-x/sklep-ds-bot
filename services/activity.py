@@ -360,12 +360,12 @@ def _template_payload(event: domain.ActivityEvent) -> dict[str, object]:
     return activity_unknown_event.render(payload=event.to_dict())
 
 
-def _build_embed(event: domain.ActivityEvent) -> discord.Embed:
+def _build_embed(event: domain.ActivityEvent, color: int | None = None) -> discord.Embed:
     payload = _template_payload(event)
     embed = discord.Embed(
         title=str(payload.get("title", "Activity Event")),
         description=str(payload.get("description", "")),
-        color=int(payload.get("color", 0x5865F2)),
+        color=int(color if color is not None else payload.get("color", 0x5865F2)),
         timestamp=event.occurred_at or _utc_now(),
     )
     embed.set_footer(text=str(payload.get("footer", "Voice Tracker Activity")))
@@ -426,12 +426,13 @@ async def main() -> None:
             return
         if event.event_type not in domain.ACTIVITY_EVENT_TYPES:
             return
+        settings = repo.get_guild_settings(None, event.guild_id)
         channel_id = _activity_channel_id(repo, event.guild_id, event.event_type)
         if channel_id == "":
             return
         if not _event_enabled(repo, event.guild_id, event.event_type):
             return
-        embed = _build_embed(event)
+        embed = _build_embed(event, domain.activity_embed_color(settings, event.event_type))
         last_error: Exception | None = None
         for attempt in range(3):
             try:
