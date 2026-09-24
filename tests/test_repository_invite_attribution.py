@@ -9,11 +9,23 @@ from voice_tracker.repository import Repository
 
 def _matches(doc: dict[str, Any], query: dict[str, Any]) -> bool:
     for key, value in query.items():
+        if key == "$or":
+            if not any(_matches(doc, branch) for branch in value):
+                return False
+            continue
+        if key == "$and":
+            if not all(_matches(doc, branch) for branch in value):
+                return False
+            continue
         if isinstance(value, dict):
             actual = doc.get(key)
             for op, expected in value.items():
                 if op == "$in":
                     if actual not in set(expected):
+                        return False
+                    continue
+                if op == "$exists":
+                    if bool(expected) != (key in doc):
                         return False
                     continue
                 raise AssertionError(f"unsupported query op: {op}")
@@ -28,8 +40,9 @@ class _DuplicateKeyError(Exception):
 
 
 class _UpdateResult:
-    def __init__(self, matched_count: int) -> None:
+    def __init__(self, matched_count: int, upserted_id: Any = None) -> None:
         self.matched_count = matched_count
+        self.upserted_id = upserted_id
 
 
 class _Cursor:
@@ -72,15 +85,34 @@ class _Collection:
                 continue
             updated = dict(current)
             updated.update(update.get("$set", {}))
+            for key, value in update.get("$inc", {}).items():
+                updated[key] = int(updated.get(key, 0) or 0) + value
             self.documents[idx] = updated
             return _UpdateResult(1)
         if not upsert:
             return _UpdateResult(0)
         created = {"_id": query.get("_id")}
+        if any(existing.get("_id") == created["_id"] for existing in self.documents):
+            raise _DuplicateKeyError("duplicate key")
         created.update(update.get("$setOnInsert", {}))
         created.update(update.get("$set", {}))
+        for key, value in update.get("$inc", {}).items():
+            created[key] = int(created.get(key, 0) or 0) + value
         self.documents.append(created)
-        return _UpdateResult(0)
+        return _UpdateResult(0, created["_id"])
+
+    def update_many(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False) -> _UpdateResult:
+        modified = 0
+        for idx, current in enumerate(self.documents):
+            if not _matches(current, query):
+                continue
+            updated = dict(current)
+            updated.update(update.get("$set", {}))
+            for key, value in update.get("$inc", {}).items():
+                updated[key] = int(updated.get(key, 0) or 0) + value
+            self.documents[idx] = updated
+            modified += 1
+        return _UpdateResult(modified)
 
 
 class _FakeDb:

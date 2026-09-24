@@ -74,6 +74,14 @@ class FakeRepo:
             activity_event_types=list(settings.activity_event_types),
         )
 
+    def mutate_guild_settings(self, _ctx, guild_id: str, apply, attempts: int = 3):
+        # T06: имитация CAS-петли репозитория: перечитать → применить намерение → записать
+        settings = self.get_guild_settings(_ctx, guild_id) or domain.GuildSettings(guild_id=guild_id)
+        if apply(settings) is False:
+            return settings
+        self.upsert_guild_settings(_ctx, settings)
+        return settings
+
     def upsert_guild_settings(self, _ctx, settings: domain.GuildSettings) -> None:
         self.settings[settings.guild_id] = domain.GuildSettings(
             settings.guild_id,

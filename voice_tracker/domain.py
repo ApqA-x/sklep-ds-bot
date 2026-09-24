@@ -340,6 +340,8 @@ class GuildSettings:
     activity_event_colors: dict[str, int] = field(default_factory=dict)
     # имя команды -> "all" | "admin": какие слэш-команды разрешены всем, какие только админам
     command_access: dict[str, str] = field(default_factory=dict)
+    # T06: счётчик версий для CAS-записей; читается из Mongo, инкрементируется атомарно при каждой записи
+    revision: int = 0
 
     def __post_init__(self) -> None:
         self.guild_id = _clean(self.guild_id)
@@ -362,6 +364,7 @@ class GuildSettings:
         self.activity_event_types = clean_activity_event_types(self.activity_event_types)
         self.activity_event_colors = clean_activity_event_colors(self.activity_event_colors)
         self.command_access = clean_command_access(self.command_access)
+        self.revision = max(0, int(self.revision or 0))
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
 
@@ -411,6 +414,7 @@ class GuildSettings:
             activity_event_types=list(data.get("activityEventTypes") or sorted(ACTIVITY_EVENT_TYPES)),
             activity_event_colors=dict(data.get("activityEventColors") or {}),
             command_access=dict(data.get("commandAccess") or {}),
+            revision=int(data.get("revision") or 0),
             created_at=parse_datetime(data.get("createdAt")),
             updated_at=parse_datetime(data.get("updatedAt")),
         )

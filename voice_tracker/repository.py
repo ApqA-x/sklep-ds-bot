@@ -72,6 +72,14 @@ def _time_or_min(value: datetime | None) -> datetime:
     return value
 
 
+class SettingsConflict(Exception):
+    """T06: параллельный писатель изменил guild_settings (revision не совпала)."""
+
+    def __init__(self, guild_id: str) -> None:
+        super().__init__(f"guild_settings revision conflict for {guild_id}")
+        self.guild_id = guild_id
+
+
 class Repository:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -150,6 +158,9 @@ class Repository:
             [("guildId", 1), ("channelId", 1), ("sentAt", -1)], name="chat_guildId_channelId_sentAt"
         )
         self.chat_messages.create_index([("guildId", 1), ("sentAt", -1)], name="chat_guildId_sentAt")
+
+        # T06: идемпотентный backfill revision для старых документов (существующих не трогает)
+        self.guild_settings.update_many({"revision": {"$exists": False}}, {"$set": {"revision": 0}})
 
     def _snowflake_created_at(self, message_id: str) -> datetime:
         # DISCORD_EPOCH: время зашито в snowflake — спасает, если событие прилетело без created_at
@@ -285,39 +296,81 @@ class Repository:
     def upsert_guild_settings(self, _ctx: Any, settings: GuildSettings | None) -> None:
         if settings is None or settings.guild_id == "":
             return
+        if not self._cas_write_guild_settings(settings):
+            raise SettingsConflict(settings.guild_id)
+
+    def mutate_guild_settings(self, ctx: Any, guild_id: str, apply: Any, attempts: int = 3) -> GuildSettings:
+        # T06: перечитать свежий документ → повторно применить намерение → CAS-запись; при конфликте —
+        # ограниченный повтор (устаревший объект не переотправляем). apply(settings) со значением False
+        # означает "писать не нужно" — возвращаем свежий документ без записи.
+        guild_id = str(guild_id or "").strip()
+        if guild_id == "":
+            raise SettingsConflict(guild_id)
+        last_error: SettingsConflict | None = None
+        for _ in range(max(1, attempts)):
+            settings = self.get_guild_settings(ctx, guild_id) or GuildSettings(guild_id=guild_id)
+            if apply(settings) is False:
+                return settings
+            try:
+                self.upsert_guild_settings(ctx, settings)
+                return settings
+            except SettingsConflict as err:
+                last_error = err
+        raise last_error or SettingsConflict(guild_id)
+
+    def _cas_write_guild_settings(self, settings: GuildSettings) -> bool:
+        # T06: единственная атомарная whole-doc запись с проверкой revision; ноль совпадений —
+        # конфликт, а не слепой upsert. $inc поднимает revision и на вставке нового документа (=1).
         now = _utc_now()
         if settings.created_at is None:
             settings.created_at = now
         settings.updated_at = now
-        self.guild_settings.update_one(
-            {"_id": settings.guild_id},
-            {
-                "$set": {
-                    "trackingMode": settings.tracking_mode,
-                    "trackedChannelIds": settings.tracked_channel_ids,
-                    "summaryChannelId": settings.summary_channel_id,
-                    "fallbackSummaryChannelId": settings.fallback_summary_channel_id,
-                    "autoRoleId": settings.auto_role_id,
-                    "autoUnmuteUserIds": settings.auto_unmute_user_ids,
-                    "trustedUserIds": settings.trusted_user_ids,
-                    "soundboardEnforcementEnabled": settings.soundboard_enforcement_enabled,
-                    "managedVoiceChannelId": settings.managed_voice_channel_id,
-                    "managedVoiceConnectedAt": settings.managed_voice_connected_at,
-                    "inviteSnapshotSyncEnabled": settings.invite_snapshot_sync_enabled,
-                    "inviteLiveAttributionEnabled": settings.invite_live_attribution_enabled,
-                    "inviteUserinfoEnabled": settings.invite_userinfo_enabled,
-                    "inviteReconciliationEnabled": settings.invite_reconciliation_enabled,
-                    "activityChannelId": settings.activity_channel_id,
-                    "activityCategoryChannelIds": dict(settings.activity_category_channel_ids),
-                    "activityEventTypes": list(settings.activity_event_types),
-                    "activityEventColors": dict(settings.activity_event_colors),
-                    "commandAccess": dict(settings.command_access),
-                    "updatedAt": settings.updated_at,
-                },
-                "$setOnInsert": {"createdAt": settings.created_at},
+        update = {
+            "$set": {
+                "trackingMode": settings.tracking_mode,
+                "trackedChannelIds": settings.tracked_channel_ids,
+                "summaryChannelId": settings.summary_channel_id,
+                "fallbackSummaryChannelId": settings.fallback_summary_channel_id,
+                "autoRoleId": settings.auto_role_id,
+                "autoUnmuteUserIds": settings.auto_unmute_user_ids,
+                "trustedUserIds": settings.trusted_user_ids,
+                "soundboardEnforcementEnabled": settings.soundboard_enforcement_enabled,
+                "managedVoiceChannelId": settings.managed_voice_channel_id,
+                "managedVoiceConnectedAt": settings.managed_voice_connected_at,
+                "inviteSnapshotSyncEnabled": settings.invite_snapshot_sync_enabled,
+                "inviteLiveAttributionEnabled": settings.invite_live_attribution_enabled,
+                "inviteUserinfoEnabled": settings.invite_userinfo_enabled,
+                "inviteReconciliationEnabled": settings.invite_reconciliation_enabled,
+                "activityChannelId": settings.activity_channel_id,
+                "activityCategoryChannelIds": dict(settings.activity_category_channel_ids),
+                "activityEventTypes": list(settings.activity_event_types),
+                "activityEventColors": dict(settings.activity_event_colors),
+                "commandAccess": dict(settings.command_access),
+                "updatedAt": settings.updated_at,
             },
-            upsert=True,
-        )
+            "$inc": {"revision": 1},
+            "$setOnInsert": {"createdAt": settings.created_at},
+        }
+        if settings.revision == 0:
+            # создание нового документа либо запись старого документа без revision (миграция);
+            # документ с уже проставленной revision > 0 этому фильтру не совпадает → конфликт
+            flt = {"_id": settings.guild_id, "$or": [{"revision": 0}, {"revision": {"$exists": False}}]}
+            try:
+                result = self.guild_settings.update_one(flt, update, upsert=True)
+            except Exception as err:
+                if _is_duplicate_key_error(err):
+                    return False
+                raise
+            if result.upserted_id is not None or result.matched_count == 1:
+                settings.revision += 1
+                return True
+            return False
+        flt = {"_id": settings.guild_id, "revision": settings.revision}
+        result = self.guild_settings.update_one(flt, update, upsert=False)
+        if result.matched_count == 1:
+            settings.revision += 1
+            return True
+        return False
 
     def get_autorole(self, ctx: Any, guild_id: str) -> str:
         settings = self.get_guild_settings(ctx, guild_id)
@@ -326,11 +379,8 @@ class Repository:
         return settings.auto_role_id
 
     def set_autorole(self, ctx: Any, guild_id: str, role_id: str) -> str:
-        settings = self.get_guild_settings(ctx, guild_id)
-        if settings is None:
-            settings = GuildSettings(guild_id=guild_id)
-        settings.auto_role_id = str(role_id or "").strip()
-        self.upsert_guild_settings(ctx, settings)
+        role = str(role_id or "").strip()
+        settings = self.mutate_guild_settings(ctx, guild_id, lambda s: setattr(s, "auto_role_id", role))
         return settings.auto_role_id
 
     def get_auto_unmute_user_ids(self, ctx: Any, guild_id: str) -> list[str]:
@@ -340,22 +390,22 @@ class Repository:
         return list(settings.auto_unmute_user_ids)
 
     def add_auto_unmute_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]:
-        settings = self.get_guild_settings(ctx, guild_id)
-        if settings is None:
-            settings = GuildSettings(guild_id=guild_id)
-        user_id = str(user_id or "").strip()
-        if user_id and user_id not in settings.auto_unmute_user_ids:
-            settings.auto_unmute_user_ids = sorted({*settings.auto_unmute_user_ids, user_id})
-        self.upsert_guild_settings(ctx, settings)
+        user = str(user_id or "").strip()
+
+        def apply(settings: GuildSettings) -> None:
+            if user and user not in settings.auto_unmute_user_ids:
+                settings.auto_unmute_user_ids = sorted({*settings.auto_unmute_user_ids, user})
+
+        settings = self.mutate_guild_settings(ctx, guild_id, apply)
         return list(settings.auto_unmute_user_ids)
 
     def remove_auto_unmute_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]:
-        settings = self.get_guild_settings(ctx, guild_id)
-        if settings is None:
-            settings = GuildSettings(guild_id=guild_id)
-        user_id = str(user_id or "").strip()
-        settings.auto_unmute_user_ids = [uid for uid in settings.auto_unmute_user_ids if uid != user_id]
-        self.upsert_guild_settings(ctx, settings)
+        user = str(user_id or "").strip()
+
+        def apply(settings: GuildSettings) -> None:
+            settings.auto_unmute_user_ids = [uid for uid in settings.auto_unmute_user_ids if uid != user]
+
+        settings = self.mutate_guild_settings(ctx, guild_id, apply)
         return list(settings.auto_unmute_user_ids)
 
     def get_trusted_user_ids(self, ctx: Any, guild_id: str) -> list[str]:
@@ -365,22 +415,22 @@ class Repository:
         return list(settings.trusted_user_ids)
 
     def add_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]:
-        settings = self.get_guild_settings(ctx, guild_id)
-        if settings is None:
-            settings = GuildSettings(guild_id=guild_id)
-        user_id = str(user_id or "").strip()
-        if user_id and user_id not in settings.trusted_user_ids:
-            settings.trusted_user_ids = sorted({*settings.trusted_user_ids, user_id})
-        self.upsert_guild_settings(ctx, settings)
+        user = str(user_id or "").strip()
+
+        def apply(settings: GuildSettings) -> None:
+            if user and user not in settings.trusted_user_ids:
+                settings.trusted_user_ids = sorted({*settings.trusted_user_ids, user})
+
+        settings = self.mutate_guild_settings(ctx, guild_id, apply)
         return list(settings.trusted_user_ids)
 
     def remove_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]:
-        settings = self.get_guild_settings(ctx, guild_id)
-        if settings is None:
-            settings = GuildSettings(guild_id=guild_id)
-        user_id = str(user_id or "").strip()
-        settings.trusted_user_ids = [uid for uid in settings.trusted_user_ids if uid != user_id]
-        self.upsert_guild_settings(ctx, settings)
+        user = str(user_id or "").strip()
+
+        def apply(settings: GuildSettings) -> None:
+            settings.trusted_user_ids = [uid for uid in settings.trusted_user_ids if uid != user]
+
+        settings = self.mutate_guild_settings(ctx, guild_id, apply)
         return list(settings.trusted_user_ids)
 
     def upsert_stalker_subscription(self, _ctx: Any, subscription: StalkerSubscription | None) -> StalkerSubscription | None:

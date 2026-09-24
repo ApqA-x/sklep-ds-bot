@@ -23,6 +23,14 @@ class FakeRepo:
     def upsert_guild_settings(self, _ctx, settings: domain.GuildSettings) -> None:
         return None
 
+    def mutate_guild_settings(self, _ctx, guild_id: str, apply, attempts: int = 3):
+        # T06: имитация CAS-петли репозитория: перечитать → применить намерение → записать
+        settings = self.get_guild_settings(_ctx, guild_id)
+        if apply(settings) is False:
+            return settings
+        self.upsert_guild_settings(_ctx, settings)
+        return settings
+
 
 class FakeMongoClient:
     def __init__(self, _uri: str) -> None:
@@ -977,6 +985,14 @@ class _ManagedRepo:
 
     def upsert_guild_settings(self, _ctx, settings: domain.GuildSettings) -> None:
         self.settings = settings
+
+    def mutate_guild_settings(self, _ctx, guild_id: str, apply, attempts: int = 3):
+        # T06: имитация CAS-петли репозитория: перечитать → применить намерение → записать
+        settings = self.get_guild_settings(_ctx, guild_id)
+        if apply(settings) is False:
+            return settings
+        self.upsert_guild_settings(_ctx, settings)
+        return settings
 
 
 class _ManagedVoiceClient:

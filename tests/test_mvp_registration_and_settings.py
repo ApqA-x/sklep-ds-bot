@@ -24,14 +24,27 @@ class _FakeCollection:
         if query.get("_id"):
             current = dict(self.find_one_result or {"_id": query["_id"]})
             current.update(update.get("$set", {}))
+            for key, value in update.get("$inc", {}).items():
+                current[key] = int(current.get(key, 0) or 0) + value
             for key, value in update.get("$setOnInsert", {}).items():
                 current.setdefault(key, value)
             self.find_one_result = current
 
         class _Result:
             matched_count = 1
+            upserted_id = None
 
         return _Result()
+
+    def update_many(self, query: dict[str, object], update: dict[str, object], upsert: bool = False):
+        self.update_calls.append({"query": query, "update": update, "upsert": upsert})
+        current = self.find_one_result
+        if current is not None:
+            updated = dict(current)
+            updated.update(update.get("$set", {}))
+            for key, value in update.get("$inc", {}).items():
+                updated[key] = int(updated.get(key, 0) or 0) + value
+            self.find_one_result = updated
 
 
 class _FakeDb:
