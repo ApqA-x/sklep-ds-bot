@@ -310,6 +310,7 @@ class Repository:
                     "activityChannelId": settings.activity_channel_id,
                     "activityCategoryChannelIds": dict(settings.activity_category_channel_ids),
                     "activityEventTypes": list(settings.activity_event_types),
+                    "activityEventColors": dict(settings.activity_event_colors),
                     "commandAccess": dict(settings.command_access),
                     "updatedAt": settings.updated_at,
                 },

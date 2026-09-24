@@ -312,5 +312,36 @@ def test_reaction_embed_prefers_actor_avatar_thumbnail() -> None:
     assert embed.thumbnail.url == "https://example.com/actor.png"
 
 
+def test_build_embed_uses_resolved_color_over_payload_default() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_MEMBER_LEAVE,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        metadata={},
+    )
+
+    default_embed = activity._build_embed(event, domain.activity_embed_color(None, event.event_type))
+    custom_embed = activity._build_embed(event, domain.activity_embed_color(
+        domain.GuildSettings(guild_id="g1", activity_event_colors={"member_leave": 0x123456}),
+        event.event_type,
+    ))
+
+    assert default_embed.color.value == domain.ACTIVITY_EVENT_DEFAULT_COLORS[domain.ACTIVITY_EVENT_MEMBER_LEAVE]
+    assert custom_embed.color.value == 0x123456
+
+
+def test_build_embed_without_color_keeps_payload_color() -> None:
+    event = domain.ActivityEvent(
+        event_type=domain.ACTIVITY_EVENT_VOICE_JOIN,
+        guild_id="g1",
+        member_user_id="42",
+        member_name="Alice",
+        metadata={"channel_id": "100", "channel_name": "voice"},
+    )
+
+    assert activity._build_embed(event).color.value == 0x57F287
+
+
 def json_bytes(payload: dict[str, object]) -> bytes:
     return json.dumps(payload).encode("utf-8")
