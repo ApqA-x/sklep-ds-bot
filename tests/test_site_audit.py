@@ -120,3 +120,29 @@ def test_safe_record_writes_reason_on_failure():
     assert doc["ok"] is False
     assert doc["after"]["reason"] == "permissions"
     assert doc["after"]["options"] == {"user": "42"}
+
+
+def test_stage_distinguishes_invocation_rejection_effect():
+    # O10/T08.11: вызов, отказ и подтверждённый эффект — разные факты журнала
+    assert site_audit.classify_stage(True, "trusted", "add") == site_audit.STAGE_EFFECT
+    assert site_audit.classify_stage(True, "trusted", "list") == site_audit.STAGE_INVOCATION
+    assert site_audit.classify_stage(False, "trusted", "add") == site_audit.STAGE_REJECTED
+    assert site_audit.classify_stage(False, "jump", "") == site_audit.STAGE_REJECTED
+
+    db = _FakeDb()
+    site_audit.safe_record_command_audit(
+        db, guild_id="g", actor_user_id="u", actor_name="n",
+        root="settings", command="summary-set", options=[],
+    )
+    assert db.audit.docs[0]["stage"] == "effect"
+    site_audit.safe_record_command_audit(
+        db, guild_id="g", actor_user_id="u", actor_name="n",
+        root="jump", command="", options=[], ok=False, reason=site_audit.REASON_PERMISSIONS,
+    )
+    assert db.audit.docs[1]["stage"] == "rejected"
+    # явная запись без stage — обратно совместимый invocation
+    site_audit.record_command_audit(
+        db, guild_id="g", actor_user_id="u", actor_name="n",
+        root="dashboard", command="", after={"command": "/dashboard"}, ok=True,
+    )
+    assert db.audit.docs[2]["stage"] == "invocation"
