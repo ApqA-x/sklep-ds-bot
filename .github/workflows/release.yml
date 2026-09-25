@@ -77,6 +77,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: SERVICE=${{ matrix.service }}
+          # T13/п.8: deploy-манифест резолвит git SHA по метке образа (по digest)
+          labels: |
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
             ghcr.io/${{ steps.repo.outputs.name }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha }}
             ghcr.io/${{ steps.repo.outputs.name }}/${{ matrix.service }}:v${{ needs.version.outputs.new_version }}

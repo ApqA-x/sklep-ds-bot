@@ -1,0 +1,242 @@
+# dsbot STAGING (T13, проверка на текущем Windows-хосте перед Linux-переносом).
+#
+# Отличия от production профиля — только изоляция идентичностей:
+#   - отдельный compose-проект (dsbot-staging), СВОИ named volumes (имена задаются
+#     в env-файле staging и не должны совпадать с прод), СВОЯ internal-сеть;
+#   - приложение пишет в mongo-контейнер этого проекта, база voice_tracker_staging
+#     (validate_env.py отказывает staging на прод-имени БД);
+#   - web слушает другой loopback-порт;
+#   - image references — ТЕ ЖЕ переменные и те же самые images, что и production
+#     (тест того артефакта, что пойдёт на Linux).
+#
+# Успех на NTFS НЕ подтверждает Linux-права (UID/GID, case sensitivity, atomic
+# rename) — эти проверки отдельные, на Linux-стенде (см. runbook раздел Linux).
+
+name: dsbot-staging
+
+x-defaults: &app-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "3"
+  networks:
+    - dsbot-data
+  user: "${DSBOT_UID:?set in staging env}:${DSBOT_GID:?set in staging env}"
+
+x-bot-env: &bot-env
+  MONGO_URI: mongodb://mongo:27017
+  NATS_URL: nats://nats:4222
+  MEDIA_DIR: /data/media
+
+services:
+  mongo:
+    image: ${MONGO_IMAGE:?pin mongo:7 by digest in env file}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - dsbot-data
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  nats:
+    image: ${NATS_IMAGE:?pin nats:2.10-alpine by digest in env file}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - dsbot-data
+    command: ["-m", "8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  gateway:
+    <<: *app-defaults
+    image: ${BOT_GATEWAY_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: gateway
+    volumes:
+      - media:/data/media
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  tracker:
+    <<: *app-defaults
+    image: ${BOT_TRACKER_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: tracker
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  writer:
+    <<: *app-defaults
+    image: ${BOT_WRITER_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: writer
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  commands:
+    <<: *app-defaults
+    image: ${BOT_COMMANDS_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: commands
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  activity:
+    <<: *app-defaults
+    image: ${BOT_ACTIVITY_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: activity
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  stalker:
+    <<: *app-defaults
+    image: ${BOT_STALKER_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: stalker
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # как в production: по умолчанию НЕ запускается (ADR-0004)
+  controlplane:
+    <<: *app-defaults
+    profiles: ["controlplane"]
+    image: ${BOT_CONTROLPLANE_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: controlplane
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  web:
+    <<: *app-defaults
+    image: ${WEB_IMAGE:?}
+    env_file: .env
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      MEDIA_DIR: /data/media
+      # staging гоняет ТЕ ЖЕ production-гарды (T02 fail-closed), отличается только
+      # изоляцией данных (свои volumes/DB/сеть) и тестовыми Discord-идентичностями
+      WEB_ENV: production
+    ports:
+      - "${WEB_INGRESS_BIND:-127.0.0.1}:${WEB_HOST_PORT:-8090}:8000"
+    volumes:
+      - media:/data/media:ro
+    depends_on:
+      mongo:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+volumes:
+  mongo-data:
+    name: ${MONGO_VOLUME:?staging must name its own mongo volume (not the prod one)}
+  media:
+    name: ${MEDIA_VOLUME:?staging must name its own media volume (not the prod one)}
+
+networks:
+  dsbot-data:
+    internal: true
