@@ -75,6 +75,9 @@ class Config:
     bot_admin_user_ids: list[str] = field(default_factory=list)
     event_signing_secret: str = ""
     media_dir: str = ""
+    # T16 (L05): порог свободного места для НОВЫХ вложений; 0 = проверка выключена.
+    # Существующий архив при любом значении не удаляется (решение владельца — D07).
+    media_min_free_bytes: int = 2 * 1024 * 1024 * 1024
     tracking_mode: str = "all"
     tracked_channel_ids: list[str] = field(default_factory=list)
     # T09: envelope freshness (wire), период догрузки из журнала, потолок попыток deliver
@@ -105,12 +108,15 @@ def load_config(env: Any = None) -> Config:
         source, "EVENT_SWEEP_INTERVAL_SECONDS", cfg.event_sweep_interval_seconds
     )
     cfg.event_max_deliver = _getenv_int(source, "EVENT_MAX_DELIVER", cfg.event_max_deliver)
+    cfg.media_min_free_bytes = _getenv_int(
+        source, "MEDIA_MIN_FREE_BYTES", cfg.media_min_free_bytes, allow_zero=True
+    )
     if cfg.mongo_uri == "" or cfg.mongo_db == "" or cfg.nats_url == "":
         raise ValueError("missing required configuration")
     return cfg
 
 
-def _getenv_int(source: Any, key: str, fallback: int) -> int:
+def _getenv_int(source: Any, key: str, fallback: int, *, allow_zero: bool = False) -> int:
     raw = _clean(source.get(key, ""))
     if raw == "":
         return fallback
@@ -118,7 +124,9 @@ def _getenv_int(source: Any, key: str, fallback: int) -> int:
         value = int(raw)
     except ValueError:
         return fallback
-    return value if value > 0 else fallback
+    if value < 0:
+        return fallback
+    return value if (value > 0 or allow_zero) else fallback
 
 
 def _getenv(source: Any, key: str, fallback: str) -> str:

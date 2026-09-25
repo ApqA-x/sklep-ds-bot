@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,6 +87,52 @@ def test_store_attachments_concurrent_same_digest(tmp_path):
     assert (tmp_path / meta_a[0]["path"]).read_bytes() == b"DUEL"
     # мусорных .part файлов не остаётся
     assert not list(tmp_path.rglob("*.part"))
+
+
+# L05: при нехватке места новые вложения не качаются и не пишутся; метаданные
+# честно несут причину; существующий архив остаётся нетронутым.
+def test_store_attachments_disk_quota_stops_new_uploads(tmp_path, monkeypatch):
+    # уже сохранённый файл архива
+    old = tmp_path / "170000000000000000" / "2026-09" / "old.png"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"KEEP")
+
+    class NoRead(FakeAttachment):
+        async def read(self, use_cached=False):
+            raise AssertionError("при низкой квоте скачивание начинаться не должно")
+
+    monkeypatch.setattr(media_module.shutil, "disk_usage",
+                        lambda _p: SimpleNamespace(free=1024, total=1 << 30, used=0))
+    meta = asyncio.run(store_attachments(str(tmp_path), "170000000000000000",
+                                         [NoRead(att_id="7", filename="n.png", content_type="image/png", size=4, data=b"N")],
+                                         min_free_bytes=4096))
+    assert meta[0]["stored"] is False
+    assert meta[0]["storeSkipReason"] == "disk-quota-low"
+    assert meta[0]["url"]  # ссылка Discord остаётся запасным путём
+    assert old.read_bytes() == b"KEEP"  # архив не тронут
+    assert not list(tmp_path.rglob("*.part"))
+
+
+# L05: min_free_bytes=0 — проверка выключена (вообще не дёргаем statfs).
+def test_store_attachments_disk_quota_disabled(tmp_path, monkeypatch):
+    def boom(_p):
+        raise AssertionError("при min_free_bytes=0 диск проверять не нужно")
+
+    monkeypatch.setattr(media_module.shutil, "disk_usage", boom)
+    png = FakeAttachment(att_id="8", filename="ok.png", content_type="image/png", size=2, data=b"OK")
+    meta = asyncio.run(store_attachments(str(tmp_path), "170000000000000000", [png], min_free_bytes=0))
+    assert meta[0]["stored"] is True
+    assert "storeSkipReason" not in meta[0]
+
+
+# L05: места достаточно — обычной записи ничего не мешает, причина не проставляется.
+def test_store_attachments_disk_room_ok_no_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(media_module.shutil, "disk_usage",
+                        lambda _p: SimpleNamespace(free=10 * 4096, total=1 << 30, used=0))
+    png = FakeAttachment(att_id="6", filename="fine.png", content_type="image/png", size=3, data=b"FIN")
+    meta = asyncio.run(store_attachments(str(tmp_path), "170000000000000000", [png], min_free_bytes=4096))
+    assert meta[0]["stored"] is True
+    assert "storeSkipReason" not in meta[0]
 
 
 # L03: зависшее скачивание прерывается таймаутом — мета остаётся без файла, gateway не блокируется.
