@@ -7,7 +7,7 @@ from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
 from voice_tracker.bus import Bus
-from voice_tracker import domain
+from voice_tracker import domain, eventlog
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
 from voice_tracker.summary import Service
@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 
 STARTUP_BACKOFF_INITIAL_SECONDS = 1.0
 STARTUP_BACKOFF_MAX_SECONDS = 30.0
+
+
+def _session_closed_handler(service: Service):
+    async def handle(payload: bytes) -> None:
+        await service.HandleSessionClosed(payload)
+
+    return handle
 
 
 def _startup_backoff_seconds(attempt: int) -> float:
@@ -27,8 +34,8 @@ async def _start_with_retry(cfg, repo: Repository) -> tuple[Bus, Service]:
     while True:
         attempt += 1
         nats = NATS()
-        bus = Bus(nats, cfg.event_signing_secret, "writer")
-        service = Service(repo, bus)
+        bus = Bus(nats, cfg.event_signing_secret, "writer", max_age_seconds=cfg.event_max_age_seconds)
+        service = Service(repo, eventlog.DurablePublisher(bus, repo.db, issuer="writer"))
 
         async def _handle_session_closed(payload: bytes) -> None:
             try:
@@ -41,7 +48,14 @@ async def _start_with_retry(cfg, repo: Repository) -> tuple[Bus, Service]:
 
         try:
             await nats.connect(cfg.nats_url)
-            await bus.subscribe(None, domain.SUBJECT_SESSION_CLOSED, repo, _handle_session_closed)
+            await bus.subscribe(
+                None,
+                domain.SUBJECT_SESSION_CLOSED,
+                None,
+                _handle_session_closed,
+                consumer="writer",
+                db=repo.db,
+            )
             await service.Start()
             logger.info("writer startup dependencies ready attempts=%s", attempt)
             return bus, service
@@ -82,6 +96,18 @@ async def main() -> None:
             await asyncio.sleep(60)
             logger.info("writer pending summary sweep starting")
             await service.Start()
+            # T09: republish summary.ready, записанных в журнал, но не доставленных
+            # на транспорт (E02), и догрузка session.closed, пропущенной по wire (E01).
+            republished = await eventlog.republish_pending(bus, repo.db, domain.SUBJECT_SUMMARY_READY)
+            delivered = await eventlog.sweep_pending(
+                repo.db,
+                "writer",
+                [domain.SUBJECT_SESSION_CLOSED],
+                _session_closed_handler(service),
+                max_deliver=cfg.event_max_deliver,
+            )
+            if republished or delivered:
+                logger.info("writer event journal republished=%s delivered=%s", republished, delivered)
             logger.info("writer pending summary sweep finished")
 
     sweep = asyncio.create_task(sweep_pending())

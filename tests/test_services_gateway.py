@@ -7,9 +7,52 @@ import services.gateway as gateway
 from voice_tracker import domain
 
 
+class _JournalCollection:
+    """Минимальная коллекция для outbox/inbox (T09): хватает на insert/update/find_one."""
+
+    def __init__(self) -> None:
+        self.docs: dict[str, dict] = {}
+
+    def insert_one(self, doc: dict) -> None:
+        self.docs[doc["_id"]] = dict(doc)
+
+    def update_one(self, flt: dict, update: dict) -> None:
+        doc = self.docs.get(flt.get("_id"))
+        if doc is not None:
+            doc.update(update.get("$set", {}))
+
+    def find_one(self, flt: dict):
+        return self.docs.get(flt.get("_id"))
+
+    def find(self, _flt: dict | None = None):
+        class _Cursor:
+            def sort(self, *_a, **_k):
+                return self
+
+            def limit(self, _n):
+                return self
+
+            def __iter__(self):
+                return iter([])
+
+        return _Cursor()
+
+    def count_documents(self, _flt: dict) -> int:
+        return 0
+
+
+class _JournalDb:
+    def __init__(self) -> None:
+        self._collections: dict[str, _JournalCollection] = {}
+
+    def __getitem__(self, name: str) -> _JournalCollection:
+        return self._collections.setdefault(name, _JournalCollection())
+
+
 class FakeRepo:
     def __init__(self, auto_unmute_ids: dict[str, list[str]]) -> None:
         self.auto_unmute_ids = auto_unmute_ids
+        self.db = _JournalDb()
 
     def ensure_indexes(self, _ctx) -> None:
         return None
@@ -49,13 +92,13 @@ class FakeNATS:
 
 
 class FakeBus:
-    def __init__(self, _nats, _secret: str, _name: str) -> None:
+    def __init__(self, _nats, _secret: str, _name: str, *_args, **_kwargs) -> None:
         self.closed = False
 
-    async def publish_json(self, _ctx, _subject: str, _value) -> None:
+    async def publish_json(self, *args, message_id=None) -> None:
         return None
 
-    async def subscribe(self, _ctx, _subject: str, _repo, _handler) -> None:
+    async def subscribe(self, _ctx, _subject: str, _repo, _handler, *, consumer=None, db=None) -> None:
         return None
 
     async def aclose(self) -> None:
@@ -757,6 +800,9 @@ async def _boot_gateway(monkeypatch, fake_repo: FakeRepo) -> object:
         mongo_uri="mongodb://example",
         mongo_db="db",
         nats_url="nats://example",
+        event_max_age_seconds=3600,
+        event_sweep_interval_seconds=15,
+        event_max_deliver=8,
     ))
     monkeypatch.setattr(gateway, "require_event_signing_secret", lambda _secret: None)
     monkeypatch.setattr(gateway, "MongoClient", lambda _uri: fake_mongo)

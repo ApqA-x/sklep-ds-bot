@@ -139,6 +139,8 @@ class _FakeDb:
             "member_role_state": _Collection(),
             "member_nickname_state": _Collection(),
             "member_nickname_history": _Collection(),
+            "event_log": _Collection(),
+            "event_inbox": _Collection(),
         }
 
     def __getitem__(self, name: str) -> _Collection:

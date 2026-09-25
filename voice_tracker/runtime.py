@@ -77,6 +77,10 @@ class Config:
     media_dir: str = ""
     tracking_mode: str = "all"
     tracked_channel_ids: list[str] = field(default_factory=list)
+    # T09: envelope freshness (wire), период догрузки из журнала, потолок попыток deliver
+    event_max_age_seconds: int = 3600
+    event_sweep_interval_seconds: int = 15
+    event_max_deliver: int = 8
 
 
 def load_config(env: Any = None) -> Config:
@@ -96,9 +100,25 @@ def load_config(env: Any = None) -> Config:
     # Tracking defaults are canonicalized to all-channel mode at runtime.
     cfg.tracking_mode = "all"
     cfg.tracked_channel_ids = []
+    cfg.event_max_age_seconds = _getenv_int(source, "EVENT_MAX_AGE_SECONDS", cfg.event_max_age_seconds)
+    cfg.event_sweep_interval_seconds = _getenv_int(
+        source, "EVENT_SWEEP_INTERVAL_SECONDS", cfg.event_sweep_interval_seconds
+    )
+    cfg.event_max_deliver = _getenv_int(source, "EVENT_MAX_DELIVER", cfg.event_max_deliver)
     if cfg.mongo_uri == "" or cfg.mongo_db == "" or cfg.nats_url == "":
         raise ValueError("missing required configuration")
     return cfg
+
+
+def _getenv_int(source: Any, key: str, fallback: int) -> int:
+    raw = _clean(source.get(key, ""))
+    if raw == "":
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
 
 
 def _getenv(source: Any, key: str, fallback: str) -> str:

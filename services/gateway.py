@@ -19,7 +19,7 @@ from pymongo import MongoClient
 
 from services.chat_templates import voice_session_summary
 from voice_tracker.bus import Bus
-from voice_tracker import domain
+from voice_tracker import domain, eventlog
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.media import store_attachments
 from voice_tracker.repository import Repository
@@ -1943,7 +1943,8 @@ async def main() -> None:
 
     nats = NATS()
     await nats.connect(cfg.nats_url)
-    bus = Bus(nats, cfg.event_signing_secret, "gateway")
+    bus = Bus(nats, cfg.event_signing_secret, "gateway", max_age_seconds=cfg.event_max_age_seconds)
+    durable_bus = eventlog.DurablePublisher(bus, repo.db, issuer="gateway")
     settings = repo.get_guild_settings(None, cfg.discord_guild_id) or domain.GuildSettings(guild_id=cfg.discord_guild_id)
     logger.info(
         "invite feature defaults guild=%s snapshot=%s live=%s reconciliation=%s userinfo=%s",
@@ -1962,7 +1963,7 @@ async def main() -> None:
     intents.reactions = True
     intents.message_content = True
     client = discord.Client(intents=intents)
-    GatewayService(client, bus).install()
+    GatewayService(client, durable_bus).install()
     invite_attribution = InviteAttributionController(
         client=client,
         repo=repo,
@@ -1982,7 +1983,7 @@ async def main() -> None:
     async def publish_activity_event(event: domain.ActivityEvent) -> None:
         if not _guild_allowed(cfg.discord_guild_id, event.guild_id):
             return
-        await bus.publish_json(None, domain.SUBJECT_ACTIVITY_EVENT, event.to_dict())
+        await durable_bus.publish_json(domain.SUBJECT_ACTIVITY_EVENT, event.to_dict())
 
     message_cache: dict[str, dict[str, str]] = {}
     message_cache_order: list[str] = []
@@ -2648,7 +2649,9 @@ async def main() -> None:
             )
             raise last_error
 
-    await bus.subscribe(None, domain.SUBJECT_SUMMARY_READY, repo, handle_summary)
+    await bus.subscribe(
+        None, domain.SUBJECT_SUMMARY_READY, None, handle_summary, consumer="gateway", db=repo.db
+    )
 
     await client.login(cfg.discord_token)
     await _deliver_pending(client, repo)
@@ -2660,6 +2663,26 @@ async def main() -> None:
                 await _deliver_pending(client, repo)
             except Exception:
                 logger.exception("pending summary sweep failed")
+            # T09: журнал — republish непринятых транспортом событий gateway и
+            # догрузка summary.ready, пропущенных по wire (E01/E02)
+            try:
+                for subject in (
+                    domain.SUBJECT_VOICE_EVENT,
+                    domain.SUBJECT_ACTIVITY_EVENT,
+                    domain.SUBJECT_SESSION_CLOSED,
+                ):
+                    await eventlog.republish_pending(bus, repo.db, subject)
+                n = await eventlog.sweep_pending(
+                    repo.db,
+                    "gateway",
+                    [domain.SUBJECT_SUMMARY_READY],
+                    handle_summary,
+                    max_deliver=cfg.event_max_deliver,
+                )
+                if n:
+                    logger.info("gateway event sweep delivered=%s", n)
+            except Exception:
+                logger.exception("gateway event journal sweep failed")
 
     async def reconcile_managed_voice() -> None:
         while True:
@@ -2733,7 +2756,7 @@ async def main() -> None:
                 ended_by_user_id="",
             )
             try:
-                await bus.publish_json(None, domain.SUBJECT_SESSION_CLOSED, closed.to_dict())
+                await durable_bus.publish_json(domain.SUBJECT_SESSION_CLOSED, closed.to_dict())
                 repo.MarkSessionClosedEventPublished(session.id, now)
                 logger.info("reaped orphan voice session id=%s guild=%s channel=%s", session.id, session.guild_id, session.channel_id)
             except Exception:

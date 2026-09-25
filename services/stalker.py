@@ -17,7 +17,7 @@ from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
 from services.chat_templates import stalker_update
-from voice_tracker import domain
+from voice_tracker import domain, eventlog
 from voice_tracker.bus import Bus
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
@@ -33,6 +33,9 @@ def _guild_allowed(configured_guild_id: str, event_guild_id: object) -> bool:
 
 
 class _ServiceDeduper:
+    """T09: заменён per-consumer inbox (eventlog + bus.subscribe(consumer=...));
+    оставлен как совместимый deduper для legacy-пути subscribe(deduper=...)."""
+
     def __init__(self, repo: Repository, namespace: str) -> None:
         self.repo = repo
         self.namespace = namespace.strip() or "stalker"
@@ -170,11 +173,10 @@ async def main() -> None:
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
     repo.ensure_indexes(None)
-    deduper = _ServiceDeduper(repo, "stalker")
 
     nats = NATS()
     await nats.connect(cfg.nats_url)
-    bus = Bus(nats, cfg.event_signing_secret, "stalker")
+    bus = Bus(nats, cfg.event_signing_secret, "stalker", max_age_seconds=cfg.event_max_age_seconds)
 
     intents = discord.Intents.none()
     intents.guilds = True
@@ -237,12 +239,39 @@ async def main() -> None:
             embed,
         )
 
-    await bus.subscribe(None, domain.SUBJECT_VOICE_EVENT, deduper, handle_voice)
-    await bus.subscribe(None, domain.SUBJECT_ACTIVITY_EVENT, deduper, handle_activity)
+    await bus.subscribe(
+        None, domain.SUBJECT_VOICE_EVENT, None, handle_voice, consumer="stalker", db=repo.db
+    )
+    await bus.subscribe(
+        None, domain.SUBJECT_ACTIVITY_EVENT, None, handle_activity, consumer="stalker", db=repo.db
+    )
+
+    async def event_sweep() -> None:
+        # T09/E01: догрузка пропущенных событий из журнала; отдельный sweep на
+        # subject — хендлер всегда получает payload своего типа, без диспетчера.
+        while True:
+            await asyncio.sleep(cfg.event_sweep_interval_seconds)
+            for subject, handler in (
+                (domain.SUBJECT_VOICE_EVENT, handle_voice),
+                (domain.SUBJECT_ACTIVITY_EVENT, handle_activity),
+            ):
+                try:
+                    n = await eventlog.sweep_pending(
+                        repo.db, "stalker", [subject], handler, max_deliver=cfg.event_max_deliver
+                    )
+                    if n:
+                        logger.info("stalker event sweep subject=%s delivered=%s", subject, n)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("stalker event sweep failed subject=%s", subject)
+
+    sweep_task = asyncio.create_task(event_sweep(), name="stalker-event-sweep")
     await client.login(cfg.discord_token)
     try:
         await client.connect()
     finally:
+        sweep_task.cancel()
         await client.close()
         await bus.aclose()
         mongo_client.close()
