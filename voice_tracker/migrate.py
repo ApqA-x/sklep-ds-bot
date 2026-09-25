@@ -150,10 +150,29 @@ def _apply_operations_ttl(db: Any, dry: bool) -> dict:
     return {"index": f"{spec.collection}.{spec.name}", "ttlSeconds": spec.ttl, "dryRun": dry}
 
 
+def _apply_audit_state_index(db: Any, dry: bool) -> dict:
+    """M4 (T11): unique (guildId) на discord_audit_state — инвариант «один документ
+    состояния синхронизации аудита на гильдию». Коллекция новая, но precheck дублей
+    read-only (как в M3): конфликт → abort, слепое удаление запрещено. Additive —
+    старый код коллекцию не пишет, rollback приложения поверх M4 безопасен."""
+    spec = next(s for s in MANIFEST if s.name == "discord_audit_state_guildId_unique")
+    dups = _dup_groups(db, spec.collection, ["guildId"])
+    if dups["conflicting"]:
+        raise RuntimeError(
+            f"discord_audit_state: {dups['conflicting']} гильдий с дублями состояния — "
+            f"unique-индекс не строится, разбор вручную (ADR-0003). "
+            f"Отчёт: {json.dumps(dups['groups'][:20], ensure_ascii=False, default=str)}"
+        )
+    if not dry:
+        db[spec.collection].create_index(list(spec.keys), **spec.create_kwargs())
+    return {"index": f"{spec.collection}.{spec.name}", "duplicates": dups, "dryRun": dry}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
     Migration(3, "discord-audit-entry-unique", _apply_discord_audit_unique, backward_compatible=False),
+    Migration(4, "discord-audit-state-unique", _apply_audit_state_index, backward_compatible=True),
 )
 
 

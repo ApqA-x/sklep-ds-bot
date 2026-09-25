@@ -80,7 +80,7 @@ def test_plan_reports_would_apply_for_all_pending_migrations() -> None:
     result = migrate.plan_and_apply(db, apply=False)
     assert result["dryRun"] is True
     assert [a["action"] for a in result["actions"]] == ["would-apply"] * len(migrate.MIGRATIONS)
-    assert [a["id"] for a in result["actions"]] == [1, 2, 3]
+    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4]
     # dry-run ничего не создал
     assert db.cols.get(schema.OP) is None or db.cols[schema.OP].indexes == []
 

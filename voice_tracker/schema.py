@@ -98,6 +98,7 @@ SS = "stalker_subscriptions"
 CM = "chat_messages"
 WA = "web_audit_logs"
 DA = "discord_audit_logs"
+DAS = "discord_audit_state"
 CP = "chat_presets"
 OP = "operations"
 
@@ -166,11 +167,16 @@ MANIFEST: tuple[IndexSpec, ...] = (
     # --- operations journal (T08)
     _spec(OP, [("guildId", 1), ("batchId", 1)], owner="web", name="web_operations_guildId_batchId"),
     _spec(OP, [("guildId", 1), ("createdAt", -1)], owner="web", name="web_operations_guildId_createdAt"),
-    # --- только runner'ом (M2/M3): additive TTL и уникальный индекс поверх dedup
+    # --- только runner'ом (M2/M3/M4): additive TTL и уникальные индексы поверх dedup/состояния
     _spec(OP, [("createdAt", 1)], owner="runner", name="operations_createdAt_ttl",
           ttl=OPERATIONS_TTL_SECONDS),
     _spec(DA, [("guildId", 1), ("entryId", 1)], owner="runner", unique=True,
           name="discord_audit_guildId_entryId_unique"),
+    # T11: discord_audit_state — курсоры fresh/backfill, lease, lastError по гильдии.
+    # unique(guildId) = инвариант «один документ состояния на гильдию» (H08): без него
+    # два web-worker'а при первом insert создали бы по документу и курсоры разъехались.
+    _spec(DAS, [("guildId", 1)], owner="runner", unique=True,
+          name="discord_audit_state_guildId_unique"),
     # --- T10.1: обнаружены read-only снимком прод-Mongo 2026-09-25 и НЕ объявлены ни в
     # bot, ни в web коде. Т10.7 запрещает молча удалять «выглядящие лишними» индексы:
     # они могут держать инвариант старых версий. owner=legacy — документированы,

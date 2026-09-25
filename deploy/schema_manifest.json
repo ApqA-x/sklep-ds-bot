@@ -1016,6 +1016,21 @@
       "unique": true
     },
     {
+      "collection": "discord_audit_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ]
+      ],
+      "name": "discord_audit_state_guildId_unique",
+      "owner": "runner",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
       "collection": "voice_session_participants",
       "keys": [
         [
