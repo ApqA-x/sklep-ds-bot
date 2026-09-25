@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from . import schema
 from .domain import (
     INVITE_SOURCE_LIVE_DIFF,
     SESSION_STATUS_ACTIVE,
@@ -171,6 +173,15 @@ class Repository:
 
         # T06: идемпотентный backfill revision для старых документов (существующих не трогает)
         self.guild_settings.update_many({"revision": {"$exists": False}}, {"$set": {"revision": 0}})
+        # T10: startup проверяет контракт индексов (сверка по спецификации, без drop);
+        # несовместимость не скрывается — это материал для migration runner (DB02).
+        report = schema.verify_db(self.db, owners=("bot", "shared"))
+        if report.under_other_name:
+            logging.getLogger(__name__).info(
+                "schema: эквивалентные индексы под другими именами приняты как есть: %s",
+                ", ".join(report.under_other_name),
+            )
+        report.raise_if_incompatible()
 
     def _snowflake_created_at(self, message_id: str) -> datetime:
         # DISCORD_EPOCH: время зашито в snowflake — спасает, если событие прилетело без created_at

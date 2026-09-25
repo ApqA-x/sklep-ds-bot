@@ -1,0 +1,1062 @@
+{
+  "indexes": [
+    {
+      "collection": "voice_sessions",
+      "keys": [
+        [
+          "status",
+          1
+        ],
+        [
+          "guildId",
+          1
+        ],
+        [
+          "channelId",
+          1
+        ]
+      ],
+      "name": "status_1_guildId_1_channelId_1",
+      "owner": "bot",
+      "partial": {
+        "status": "active"
+      },
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "voice_sessions",
+      "keys": [
+        [
+          "status",
+          1
+        ],
+        [
+          "guildId",
+          1
+        ],
+        [
+          "channelId",
+          1
+        ],
+        [
+          "endedAt",
+          -1
+        ]
+      ],
+      "name": "status_1_guildId_1_channelId_1_endedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_sessions",
+      "keys": [
+        [
+          "status",
+          1
+        ],
+        [
+          "closedEventPublishedAt",
+          1
+        ]
+      ],
+      "name": "status_1_closedEventPublishedAt_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_sessions",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "status",
+          1
+        ],
+        [
+          "endedAt",
+          -1
+        ]
+      ],
+      "name": "web_guildId_status_endedAt",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "sessionId",
+          1
+        ],
+        [
+          "active",
+          1
+        ]
+      ],
+      "name": "sessionId_1_active_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "sessionId",
+          1
+        ],
+        [
+          "active",
+          1
+        ]
+      ],
+      "name": "guildId_1_sessionId_1_active_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "channelId",
+          1
+        ],
+        [
+          "sessionId",
+          1
+        ]
+      ],
+      "name": "guildId_1_channelId_1_sessionId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "userId",
+          1
+        ],
+        [
+          "sessionId",
+          1
+        ]
+      ],
+      "name": "guildId_1_userId_1_sessionId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "userId",
+          1
+        ],
+        [
+          "joinedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_userId_1_joinedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "joinedAt",
+          1
+        ]
+      ],
+      "name": "web_guildId_joinedAt",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "sessionId",
+          1
+        ],
+        [
+          "userId",
+          1
+        ],
+        [
+          "active",
+          1
+        ]
+      ],
+      "name": "sessionId_1_userId_1_active_1",
+      "owner": "bot",
+      "partial": {
+        "active": true
+      },
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "processed_messages",
+      "keys": [
+        [
+          "subject",
+          1
+        ],
+        [
+          "messageId",
+          1
+        ]
+      ],
+      "name": "subject_1_messageId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "processed_messages",
+      "keys": [
+        [
+          "createdAt",
+          1
+        ]
+      ],
+      "name": "createdAt_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": 7200,
+      "unique": false
+    },
+    {
+      "collection": "event_log",
+      "keys": [
+        [
+          "subject",
+          1
+        ],
+        [
+          "createdAt",
+          1
+        ]
+      ],
+      "name": "event_log_subject_createdAt",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "event_log",
+      "keys": [
+        [
+          "publishedAt",
+          1
+        ]
+      ],
+      "name": "event_log_unpublished",
+      "owner": "bot",
+      "partial": {
+        "publishedAt": null
+      },
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "event_inbox",
+      "keys": [
+        [
+          "consumer",
+          1
+        ],
+        [
+          "state",
+          1
+        ]
+      ],
+      "name": "event_inbox_consumer_state",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "event_inbox",
+      "keys": [
+        [
+          "eventId",
+          1
+        ]
+      ],
+      "name": "event_inbox_eventId",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "guild_invite_snapshots",
+      "keys": [
+        [
+          "guildId",
+          1
+        ]
+      ],
+      "name": "guildId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "guild_invite_snapshots",
+      "keys": [
+        [
+          "capturedAt",
+          -1
+        ]
+      ],
+      "name": "capturedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "invite_catalog",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "code",
+          1
+        ]
+      ],
+      "name": "guildId_1_code_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "invite_catalog",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "lastSeenAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_lastSeenAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "invite_catalog",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "deletedAt",
+          1
+        ]
+      ],
+      "name": "guildId_1_deletedAt_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_join_attributions",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "userId",
+          1
+        ],
+        [
+          "joinedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_userId_1_joinedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_join_attributions",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "joinedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_joinedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_join_attributions",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "attributionStatus",
+          1
+        ],
+        [
+          "joinedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_attributionStatus_1_joinedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_join_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "userId",
+          1
+        ]
+      ],
+      "name": "guildId_1_userId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "member_join_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "joinedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_joinedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_role_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "userId",
+          1
+        ]
+      ],
+      "name": "guildId_1_userId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "member_role_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "updatedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_updatedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_role_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "lastSeenAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_lastSeenAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_role_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "pendingRestore",
+          1
+        ],
+        [
+          "updatedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_pendingRestore_1_updatedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_nickname_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "userId",
+          1
+        ]
+      ],
+      "name": "guildId_1_userId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "member_nickname_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "updatedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_updatedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_nickname_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "lastSeenAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_lastSeenAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_nickname_state",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "pendingRestore",
+          1
+        ],
+        [
+          "updatedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_pendingRestore_1_updatedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_nickname_history",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "userId",
+          1
+        ],
+        [
+          "changedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_userId_1_changedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "member_nickname_history",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "changedAt",
+          -1
+        ]
+      ],
+      "name": "guildId_1_changedAt_-1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "stalker_subscriptions",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "watcherUserId",
+          1
+        ]
+      ],
+      "name": "guildId_1_watcherUserId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "stalker_subscriptions",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "targetUserId",
+          1
+        ]
+      ],
+      "name": "guildId_1_targetUserId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "stalker_subscriptions",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "watcherUserId",
+          1
+        ],
+        [
+          "targetUserId",
+          1
+        ]
+      ],
+      "name": "guildId_1_watcherUserId_1_targetUserId_1",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "chat_messages",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "messageId",
+          1
+        ]
+      ],
+      "name": "chat_guildId_messageId_unique",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "chat_messages",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "channelId",
+          1
+        ],
+        [
+          "sentAt",
+          -1
+        ]
+      ],
+      "name": "chat_guildId_channelId_sentAt",
+      "owner": "shared",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "chat_messages",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "sentAt",
+          -1
+        ]
+      ],
+      "name": "chat_guildId_sentAt",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "chat_presets",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "createdAt",
+          1
+        ]
+      ],
+      "name": "chat_presets_guildId_createdAt",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "web_audit_logs",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "at",
+          -1
+        ]
+      ],
+      "name": "web_audit_guildId_at",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "discord_audit_logs",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "at",
+          -1
+        ]
+      ],
+      "name": "web_disc_audit_guildId_at",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "discord_audit_logs",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "entryId",
+          1
+        ]
+      ],
+      "name": "web_disc_audit_guildId_entryId",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "operations",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "batchId",
+          1
+        ]
+      ],
+      "name": "web_operations_guildId_batchId",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "operations",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "createdAt",
+          -1
+        ]
+      ],
+      "name": "web_operations_guildId_createdAt",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "operations",
+      "keys": [
+        [
+          "createdAt",
+          1
+        ]
+      ],
+      "name": "operations_createdAt_ttl",
+      "owner": "runner",
+      "partial": null,
+      "sparse": false,
+      "ttl": 7776000,
+      "unique": false
+    },
+    {
+      "collection": "discord_audit_logs",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "entryId",
+          1
+        ]
+      ],
+      "name": "discord_audit_guildId_entryId_unique",
+      "owner": "runner",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": true
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "active",
+          1
+        ],
+        [
+          "userId",
+          1
+        ]
+      ],
+      "name": "web_guild_active_user",
+      "owner": "legacy",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "voice_session_participants",
+      "keys": [
+        [
+          "guildId",
+          1
+        ],
+        [
+          "joinedAt",
+          -1
+        ]
+      ],
+      "name": "web_guild_joinedAt",
+      "owner": "legacy",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    }
+  ],
+  "schemaVersion": 1
+}
