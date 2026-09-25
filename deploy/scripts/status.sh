@@ -20,5 +20,11 @@ info "heartbeat ботовых сервисов (признаки жизни; с
 for s in gateway tracker writer commands activity stalker; do
   docker compose -p "$PROJECT" exec -T "$s" python -m voice_tracker.healthcheck --service "$s" 2>&1 | sed "s/^/  [$s] /" || true
 done
+BACKUP_DIR="$(sed -n 's/^BACKUP_DIR=//p' "$ENV_FILE" 2>/dev/null | head -1 || true)"
+if [ -n "$BACKUP_DIR" ]; then
+  echo
+  info "свежесть точки восстановления (T14 B06):"
+  "$DEPLOY_DIR/backup/backup_status.sh" "$PROFILE" || info "см. docs/runbook-backup.md"
+fi
 echo
 info "логи: docker compose -p $PROJECT -f $COMPOSE_FILE logs --since 30m [--tail 200] <service>"

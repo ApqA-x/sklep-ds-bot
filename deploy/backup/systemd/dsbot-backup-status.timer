@@ -1,0 +1,10 @@
+[Unit]
+Description=dsbot backup freshness timer (T14 B06)
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=120
+Unit=dsbot-backup-status.service
+
+[Install]
+WantedBy=timers.target

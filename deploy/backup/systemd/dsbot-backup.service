@@ -1,0 +1,17 @@
+# T14 (п.8) суточный бэкап production. Канонический путь размещения deploy/ на
+# Linux-хосте — /opt/dsbot/deploy (runbook); при другом пути поправьте ExecStart.
+# Сбой виден оператору: systemd помечает failed-unit, а ежедневный
+# backup-status.timer поднимает несовежую свежесть копии в журнал (B06).
+[Unit]
+Description=dsbot daily backup (T14)
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsbot/deploy
+ExecStart=/opt/dsbot/deploy/backup/backup.sh production
+# бэкап не должен душить voice-пайплайн
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

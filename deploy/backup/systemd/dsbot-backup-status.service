@@ -1,0 +1,11 @@
+# B06: «backup age превысил предел» должен быть виден, даже когда сам
+# backup-таймер молчит (упал/не поставлен). Каждый час читаем последнюю
+# .verified_ok-точку; non-zero exit = failed-unit в journal + alert-hook
+# (systemd OnFailure) при настройке.
+[Unit]
+Description=dsbot backup freshness check (T14 B06)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsbot/deploy
+ExecStart=/opt/dsbot/deploy/backup/backup_status.sh production

@@ -13,6 +13,7 @@ deploy/
   staging/compose.staging.yml # те же образы; свои volumes/БД/порт — P03
   staging/env.staging.example
   scripts/                    # preflight / deploy / status / rollback / make_manifest / linux_init / валидаторы
+  backup/                     # T14: backup.sh / restore.sh / backup_status.sh / retention+manifest / systemd-таймеры
   manifest/                   # манифесты «что задеплоено»; current.json — указатель
 ```
 
@@ -69,6 +70,27 @@ staging-env с прод-идентичностями (P03).
 более новую схему данных** (миграции additive, но старое приложение не
 обязано понимать новые структуры). Откат ПОСЛЕ первой записи в новой схеме —
 это backup/restore (T14), а не смена образов.
+
+## Backup / Restore (T14)
+Полный runbook — `docs/runbook-backup.md` (решения D06/D09, инвентарь, перенос
+Windows→Linux с порядком «сначала consumers, потом gateway», обработка
+активной voice-сессии на границе переноса).
+- `backup/backup.sh <profile>` — writers замораживаются (`compose stop` с
+  корректным drain из T12), снимаются Mongo (`mongodump` внутри mongo-контейнера)
+  + media volume, шифруются `age` (симметричный ключ-файл, chmod 600), финализуются
+  атомарно: временный каталог `.incomplete` → манифест (counts/размеры/checksums/
+  версии инструментов, секрет-гард) → проверка чтения → `.verified_ok` sidecar.
+  Сбой не трогает предыдущую проверенную точку (B02).
+- `backup/restore.sh <profile>` — только в **новую пустую** БД/volume (живой
+  destination структурно запрещён), checksums до любой записи (B04), затем
+  verify против манифеста: counts, индексы (каноническая сверка схемы T10),
+  revision, соответствие attachments.path файлов media (B03/B06-механика).
+- `backup/backup_status.sh <profile>` — возраст последней проверенной точки
+  против лимита (B06); встроен в `scripts/status.sh`, на хосте — hourly-таймер
+  `backup/systemd/`; суточный запуск — `dsbot-backup.timer`.
+- Ретенция GFS 7 дневных + 4 недельных: удаляются только проверенные точки,
+  последняя проверенная защищена всегда; незавершённые запуски остаются видны
+  оператору, но не считаются recovery point и не удаляются автоматически.
 
 ## Чего здесь сознательно нет
 - Legacy BFF/UI/workers из dashboard-mvp — не мигрируют (старая инсталляция,
