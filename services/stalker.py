@@ -17,7 +17,7 @@ from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
 from services.chat_templates import stalker_update
-from voice_tracker import domain, eventlog
+from voice_tracker import domain, eventlog, supervise
 from voice_tracker.bus import Bus
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
@@ -266,12 +266,25 @@ async def main() -> None:
                 except Exception:
                     logger.exception("stalker event sweep failed subject=%s", subject)
 
-    sweep_task = asyncio.create_task(event_sweep(), name="stalker-event-sweep")
+    # T12: цикл догрузки под надзором + heartbeat; shutdown — drain, затем
+    # закрытие Discord/NATS/Mongo клиентов.
+    supervisor = supervise.Supervisor()
+    supervisor.spawn("stalker-event-sweep", event_sweep, critical=True)
+    heartbeat = supervise.Heartbeat(
+        repo.db,
+        "stalker",
+        supervisor,
+        state_fn=lambda: {
+            "nats": supervise.nats_state(bus.conn),
+            "discord": supervise.discord_state(client),
+        },
+    )
+    supervise.attach(supervisor, heartbeat)
     await client.login(cfg.discord_token)
     try:
         await client.connect()
     finally:
-        sweep_task.cancel()
+        await supervisor.shutdown()
         await client.close()
         await bus.aclose()
         mongo_client.close()

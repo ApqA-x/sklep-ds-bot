@@ -6,6 +6,7 @@ import logging
 from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
+from voice_tracker import supervise
 from voice_tracker.bus import Bus
 from voice_tracker import domain, eventlog
 from voice_tracker.repository import Repository
@@ -80,20 +81,29 @@ async def main() -> None:
                 stats = eventlog.pending_stats(repo.db, "tracker", [domain.SUBJECT_VOICE_EVENT])
                 if n or stats["backlog"] or stats["quarantined"]:
                     logger.info("tracker event sweep delivered=%s %s", n, stats)
+                supervisor.beat("tracker-event-sweep")
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("tracker event sweep failed")
 
-    sweep_task = asyncio.create_task(sweep(), name="tracker-event-sweep")
+    supervisor = supervise.Supervisor()
     await service.Start()
     logger.info("tracker startup replay complete")
     startup_ready.set()
 
+    supervisor.spawn("tracker-event-sweep", sweep, critical=True)
+    heartbeat = supervise.Heartbeat(
+        repo.db,
+        "tracker",
+        supervisor,
+        state_fn=lambda: {"nats": supervise.nats_state(bus.conn)},
+    )
+    supervise.attach(supervisor, heartbeat)
     try:
         await asyncio.Event().wait()
     finally:
-        sweep_task.cancel()
+        await supervisor.shutdown()
         await bus.aclose()
         mongo_client.close()
 

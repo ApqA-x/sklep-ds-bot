@@ -20,7 +20,7 @@ from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
 from voice_tracker.bus import decode_envelope, sign_envelope
-from voice_tracker import domain
+from voice_tracker import domain, supervise
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
 
@@ -120,11 +120,6 @@ class ControlPlane:
         await self.nats.subscribe(self.ops_subject, cb=self._handle_ops_msg)
         await self._heartbeat_loop_once()
         logger.info("controlplane subscribed apply=%s ops=%s", self.apply_subject, self.ops_subject)
-
-    async def heartbeat_loop(self) -> None:
-        while True:
-            await self._heartbeat_loop_once()
-            await asyncio.sleep(15)
 
     async def _heartbeat_loop_once(self) -> None:
         self.db.bot_runtime_heartbeats.replace_one(
@@ -412,11 +407,23 @@ async def main() -> None:
         logger.info("controlplane discord ready guilds=%s", len(getattr(client, "guilds", []) or []))
 
     await controlplane.start()
-    heartbeat = asyncio.create_task(controlplane.heartbeat_loop(), name="controlplane-heartbeat")
+    # T12: прежний heartbeat_loop умирал от первой же ошибки Mongo (без respawn и
+    # без наблюдаемости) — теперь под общим Supervisor с backoff+jitter.
+    supervisor = supervise.Supervisor()
+    heartbeat = supervise.Heartbeat(
+        controlplane.db,
+        "dsbot-controlplane",
+        supervisor,
+        state_fn=lambda: {
+            "nats": supervise.nats_state(nats),
+            "discord": supervise.discord_state(client),
+        },
+    )
+    supervise.attach(supervisor, heartbeat)
     try:
         await client.start(cfg.discord_token)
     finally:
-        heartbeat.cancel()
+        await supervisor.shutdown()
         await nats.drain()
         mongo_client.close()
 

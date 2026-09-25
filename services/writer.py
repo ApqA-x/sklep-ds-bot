@@ -6,6 +6,7 @@ import logging
 from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
+from voice_tracker import supervise
 from voice_tracker.bus import Bus
 from voice_tracker import domain, eventlog
 from voice_tracker.repository import Repository
@@ -26,7 +27,13 @@ def _session_closed_handler(service: Service):
 
 
 def _startup_backoff_seconds(attempt: int) -> float:
-    return min(STARTUP_BACKOFF_INITIAL_SECONDS * (2 ** max(attempt - 1, 0)), STARTUP_BACKOFF_MAX_SECONDS)
+    # T12: полный джиттер — несколько сервисов, стартовавших синхронно после
+    # отвала Mongo/NATS, не должны долбить зависимость одним гребнем.
+    return supervise.backoff_seconds(
+        attempt,
+        initial=STARTUP_BACKOFF_INITIAL_SECONDS,
+        cap=STARTUP_BACKOFF_MAX_SECONDS,
+    )
 
 
 async def _start_with_retry(cfg, repo: Repository) -> tuple[Bus, Service]:
@@ -91,30 +98,56 @@ async def main() -> None:
 
     bus, service = await _start_with_retry(cfg, repo)
 
+    async def sweep_once() -> None:
+        await service.Start()
+        # T09: republish summary.ready, записанных в журнал, но не доставленных
+        # на транспорт (E02), и догрузка session.closed, пропущенной по wire (E01).
+        republished = await eventlog.republish_pending(bus, repo.db, domain.SUBJECT_SUMMARY_READY)
+        delivered = await eventlog.sweep_pending(
+            repo.db,
+            "writer",
+            [domain.SUBJECT_SESSION_CLOSED],
+            _session_closed_handler(service),
+            max_deliver=cfg.event_max_deliver,
+        )
+        stats = eventlog.pending_stats(repo.db, "writer", [domain.SUBJECT_SESSION_CLOSED])
+        logger.info(
+            "writer sweep republished=%s delivered=%s backlog=%s oldestPendingAgeSeconds=%.0f quarantined=%s",
+            republished,
+            delivered,
+            stats["backlog"],
+            stats["oldestPendingAgeSeconds"],
+            stats["quarantined"],
+        )
+
     async def sweep_pending() -> None:
+        # T12: отказ итерации наблюдаем и переживаем (retry через следующий тик +
+        # supervisor-respawn при гибели цикла); тишина событий — не ошибка.
         while True:
             await asyncio.sleep(60)
-            logger.info("writer pending summary sweep starting")
-            await service.Start()
-            # T09: republish summary.ready, записанных в журнал, но не доставленных
-            # на транспорт (E02), и догрузка session.closed, пропущенной по wire (E01).
-            republished = await eventlog.republish_pending(bus, repo.db, domain.SUBJECT_SUMMARY_READY)
-            delivered = await eventlog.sweep_pending(
-                repo.db,
-                "writer",
-                [domain.SUBJECT_SESSION_CLOSED],
-                _session_closed_handler(service),
-                max_deliver=cfg.event_max_deliver,
-            )
-            if republished or delivered:
-                logger.info("writer event journal republished=%s delivered=%s", republished, delivered)
-            logger.info("writer pending summary sweep finished")
+            try:
+                await sweep_once()
+                supervisor.beat("writer-event-sweep")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("writer pending summary sweep failed")
 
-    sweep = asyncio.create_task(sweep_pending())
+    supervisor = supervise.Supervisor()
+    supervisor.spawn("writer-event-sweep", sweep_pending, critical=True)
+    heartbeat = supervise.Heartbeat(
+        repo.db,
+        "writer",
+        supervisor,
+        state_fn=lambda: {"nats": supervise.nats_state(bus.conn)},
+    )
+    supervise.attach(supervisor, heartbeat)
+    logger.info("writer service ready")
     try:
         await asyncio.Event().wait()
     finally:
-        sweep.cancel()
+        # T12/R05: drain — cancel+await фоновых задач, потом закрываем транспорты.
+        await supervisor.shutdown()
         await bus.aclose()
         mongo_client.close()
 
