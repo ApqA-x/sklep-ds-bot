@@ -1044,18 +1044,8 @@ def _persist_autorole(repo: Repository | None, guild_id: str, role_id: str) -> N
     role_id = (role_id or "").strip()
     if guild_id == "" or role_id == "":
         return
-    now = datetime.now(UTC)
-    repo.guild_settings.update_one(
-        {"_id": guild_id},
-        {
-            "$set": {
-                "autoRoleId": role_id,
-                "updatedAt": now,
-            },
-            "$setOnInsert": {"createdAt": now},
-        },
-        upsert=True,
-    )
+    # T06: запись через CAS-mutate (перечитать свежий документ), а не слепой upsert в обход revision
+    repo.set_autorole(None, guild_id, role_id)
 
 
 async def _resolve_role(guild: discord.Guild, role_id: str) -> discord.Role | None:

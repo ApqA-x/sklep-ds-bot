@@ -1272,19 +1272,19 @@ def _voice_effect_sound_id(effect: object) -> str:
 
 
 def _set_managed_connected_at(repo: Repository, guild_id: str, connected_at: datetime | None) -> None:
-    settings = repo.get_guild_settings(None, guild_id)
-    if connected_at is None:
-        if settings is None or settings.managed_voice_connected_at is None:
-            return
-        settings.managed_voice_connected_at = None
-        repo.upsert_guild_settings(None, settings)
-        return
-    if settings is None:
-        settings = domain.GuildSettings(guild_id=guild_id)
-    if settings.managed_voice_connected_at is not None:
-        return
-    settings.managed_voice_connected_at = connected_at
-    repo.upsert_guild_settings(None, settings)
+    # T06: условие «писать или нет» пересматривается на СВЕЖЕМ документе при каждой попытке CAS-повтора
+    def apply(settings: domain.GuildSettings) -> bool:
+        if connected_at is None:
+            if settings.managed_voice_connected_at is None:
+                return False
+            settings.managed_voice_connected_at = None
+            return True
+        if settings.managed_voice_connected_at is not None:
+            return False
+        settings.managed_voice_connected_at = connected_at
+        return True
+
+    repo.mutate_guild_settings(None, guild_id, apply)
 
 
 @dataclass(slots=True)

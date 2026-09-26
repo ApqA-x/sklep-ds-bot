@@ -202,25 +202,27 @@ class ControlPlane:
             raise
 
     def _apply_voice_config(self, guild_id: str, config: dict[str, Any]) -> None:
-        settings = self.repo.get_guild_settings(None, guild_id) or domain.GuildSettings(guild_id=guild_id)
         summary_channel_id = _clean(config.get("summaryChannelId"))
         activity_channel_id = _clean(config.get("activityChannelId"))
         auto_role_id = _clean(config.get("autoRoleId") or config.get("startRoleId"))
         managed_voice_channel_id = _clean(config.get("managedVoiceChannelId"))
 
-        settings.summary_channel_id = summary_channel_id
-        settings.activity_channel_id = activity_channel_id
-        settings.auto_role_id = auto_role_id
-        settings.auto_unmute_user_ids = _clean_list(config.get("autoUnmuteUserIds"))
-        settings.trusted_user_ids = _clean_list(config.get("trustedUserIds"))
-        settings.soundboard_enforcement_enabled = bool(config.get("soundboardEnforcementEnabled", False))
-        settings.managed_voice_channel_id = managed_voice_channel_id
-        settings.invite_snapshot_sync_enabled = bool(config.get("inviteSnapshotSyncEnabled", True))
-        settings.invite_live_attribution_enabled = bool(config.get("inviteLiveAttributionEnabled", True))
-        settings.invite_userinfo_enabled = bool(config.get("inviteUserinfoEnabled", True))
-        settings.invite_reconciliation_enabled = bool(config.get("inviteReconciliationEnabled", False))
-        settings.activity_event_types = _activity_events(config)
-        self.repo.upsert_guild_settings(None, settings)
+        def apply(settings: domain.GuildSettings) -> None:
+            settings.summary_channel_id = summary_channel_id
+            settings.activity_channel_id = activity_channel_id
+            settings.auto_role_id = auto_role_id
+            settings.auto_unmute_user_ids = _clean_list(config.get("autoUnmuteUserIds"))
+            settings.trusted_user_ids = _clean_list(config.get("trustedUserIds"))
+            settings.soundboard_enforcement_enabled = bool(config.get("soundboardEnforcementEnabled", False))
+            settings.managed_voice_channel_id = managed_voice_channel_id
+            settings.invite_snapshot_sync_enabled = bool(config.get("inviteSnapshotSyncEnabled", True))
+            settings.invite_live_attribution_enabled = bool(config.get("inviteLiveAttributionEnabled", True))
+            settings.invite_userinfo_enabled = bool(config.get("inviteUserinfoEnabled", True))
+            settings.invite_reconciliation_enabled = bool(config.get("inviteReconciliationEnabled", False))
+            settings.activity_event_types = _activity_events(config)
+
+        # T06: перечитать свежий документ и повторно применить конфиг-намерение под CAS (см. repository).
+        self.repo.mutate_guild_settings(None, guild_id, apply)
 
     async def _execute_operation(self, guild_id: int, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         guild_key = str(guild_id)
@@ -230,15 +232,16 @@ class ControlPlane:
             channel_id = _clean(payload.get("channel_id"))
             if not channel_id:
                 raise ValueError("channel_id is required")
-            settings = self.repo.get_guild_settings(None, guild_key) or domain.GuildSettings(guild_id=guild_key)
-            settings.managed_voice_channel_id = channel_id
-            self.repo.upsert_guild_settings(None, settings)
+            self.repo.mutate_guild_settings(
+                None, guild_key, lambda s: setattr(s, "managed_voice_channel_id", channel_id)
+            )
             return {"managedVoiceChannelId": channel_id}
         if operation == "disconnect":
-            settings = self.repo.get_guild_settings(None, guild_key) or domain.GuildSettings(guild_id=guild_key)
-            settings.managed_voice_channel_id = ""
-            settings.managed_voice_connected_at = None
-            self.repo.upsert_guild_settings(None, settings)
+            def disconnect(settings: domain.GuildSettings) -> None:
+                settings.managed_voice_channel_id = ""
+                settings.managed_voice_connected_at = None
+
+            self.repo.mutate_guild_settings(None, guild_key, disconnect)
             return {"managedVoiceChannelId": None}
         if operation == "trusted":
             member_id = _clean(payload.get("member_id"))
@@ -268,9 +271,7 @@ class ControlPlane:
             member_id = _clean(payload.get("member_id"))
             if not role_id:
                 raise ValueError("role_id is required")
-            settings = self.repo.get_guild_settings(None, guild_key) or domain.GuildSettings(guild_id=guild_key)
-            settings.auto_role_id = role_id
-            self.repo.upsert_guild_settings(None, settings)
+            self.repo.mutate_guild_settings(None, guild_key, lambda s: setattr(s, "auto_role_id", role_id))
             if member_id:
                 await self._add_member_role(guild_id, member_id, role_id)
             self._runtime_flag(guild_id, "autorole", True, {"member_id": member_id, "role_id": role_id})

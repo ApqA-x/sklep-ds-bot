@@ -149,6 +149,9 @@ class Repository(Protocol):
 
     def upsert_guild_settings(self, ctx: Any, settings: domain.GuildSettings) -> None: ...
 
+    # T06: CAS-mутация с перечитом (apply намерения на свежем документе); apply вернёт False — писать не нужно
+    def mutate_guild_settings(self, ctx: Any, guild_id: str, apply: Any, attempts: int = 3) -> domain.GuildSettings: ...
+
     def add_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]: ...
 
     def remove_trusted_user(self, ctx: Any, guild_id: str, user_id: str) -> list[str]: ...
@@ -233,86 +236,99 @@ class Service:
             return domain.new_guild_settings(guild_id, domain.GUILD_TRACKING_MODE_ALL, None, "")
         return settings
 
-    def set_tracking_mode(self, ctx: Any, guild_id: str, mode: str) -> domain.GuildSettings:
+    def _mutate(self, ctx: Any, guild_id: str, apply: Any) -> domain.GuildSettings:
+        # T06: все писатели настроек идут через атомарный перечит-намерение-CAS с ограниченным повтором.
+        # apply получает СВЕЖИЙ документ и меняет нужные поля (или возвращает False — писать не нужно).
+        mutate = getattr(self.repo, "mutate_guild_settings", None)
+        if self.repo is not None and callable(mutate):
+            def intent(settings: domain.GuildSettings) -> bool:
+                if apply(settings) is False:
+                    return False
+                self._prepare_for_save(settings)
+                return True
+
+            return mutate(ctx, guild_id, intent)
+        # репозиторий-заглушка без CAS (тесты): перечитать → применить → _save
         settings = self.get_guild_settings(ctx, guild_id)
-        settings.tracking_mode = domain.normalize_tracking_mode(mode)
-        self._save(ctx, settings)
+        if apply(settings) is not False:
+            self._save(ctx, settings)
         return settings
+
+    def set_tracking_mode(self, ctx: Any, guild_id: str, mode: str) -> domain.GuildSettings:
+        mode = domain.normalize_tracking_mode(mode)
+        return self._mutate(ctx, guild_id, lambda s: setattr(s, "tracking_mode", mode))
 
     def set_tracked_channel_ids(self, ctx: Any, guild_id: str, ids: list[str]) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.tracked_channel_ids = domain.clean_channel_ids(ids)
-        settings.tracking_mode = (
-            domain.GUILD_TRACKING_MODE_NONE
-            if len(settings.tracked_channel_ids) == 0
-            else domain.GUILD_TRACKING_MODE_SPECIFIC
-        )
-        self._save(ctx, settings)
-        return settings
-
-    def add_tracked_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        current_mode = domain.normalize_tracking_mode(settings.tracking_mode)
-        channel_id = (channel_id or "").strip()
-        if not channel_id:
-            raise ValueError("channel id is required")
-        settings.tracked_channel_ids = domain.clean_channel_ids([*settings.tracked_channel_ids, channel_id])
-        if current_mode == domain.GUILD_TRACKING_MODE_ALL:
-            settings.tracking_mode = domain.GUILD_TRACKING_MODE_ALL
-        elif len(settings.tracked_channel_ids) == 0:
-            settings.tracking_mode = domain.GUILD_TRACKING_MODE_NONE
-        else:
-            settings.tracking_mode = domain.GUILD_TRACKING_MODE_SPECIFIC
-        self._save(ctx, settings)
-        return settings
-
-    def remove_tracked_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        channel_id = (channel_id or "").strip()
-        if not channel_id:
-            raise ValueError("channel id is required")
-        settings.tracked_channel_ids = _remove_channel_id(settings.tracked_channel_ids, channel_id)
-        if domain.normalize_tracking_mode(settings.tracking_mode) != domain.GUILD_TRACKING_MODE_ALL:
+        def apply(settings: domain.GuildSettings) -> None:
+            settings.tracked_channel_ids = domain.clean_channel_ids(ids)
             settings.tracking_mode = (
                 domain.GUILD_TRACKING_MODE_NONE
                 if len(settings.tracked_channel_ids) == 0
                 else domain.GUILD_TRACKING_MODE_SPECIFIC
             )
-        self._save(ctx, settings)
-        return settings
+
+        return self._mutate(ctx, guild_id, apply)
+
+    def add_tracked_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
+        channel_id = (channel_id or "").strip()
+        if not channel_id:
+            raise ValueError("channel id is required")
+
+        def apply(settings: domain.GuildSettings) -> None:
+            current_mode = domain.normalize_tracking_mode(settings.tracking_mode)
+            settings.tracked_channel_ids = domain.clean_channel_ids([*settings.tracked_channel_ids, channel_id])
+            if current_mode == domain.GUILD_TRACKING_MODE_ALL:
+                settings.tracking_mode = domain.GUILD_TRACKING_MODE_ALL
+            elif len(settings.tracked_channel_ids) == 0:
+                settings.tracking_mode = domain.GUILD_TRACKING_MODE_NONE
+            else:
+                settings.tracking_mode = domain.GUILD_TRACKING_MODE_SPECIFIC
+
+        return self._mutate(ctx, guild_id, apply)
+
+    def remove_tracked_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
+        channel_id = (channel_id or "").strip()
+        if not channel_id:
+            raise ValueError("channel id is required")
+
+        def apply(settings: domain.GuildSettings) -> None:
+            settings.tracked_channel_ids = _remove_channel_id(settings.tracked_channel_ids, channel_id)
+            if domain.normalize_tracking_mode(settings.tracking_mode) != domain.GUILD_TRACKING_MODE_ALL:
+                settings.tracking_mode = (
+                    domain.GUILD_TRACKING_MODE_NONE
+                    if len(settings.tracked_channel_ids) == 0
+                    else domain.GUILD_TRACKING_MODE_SPECIFIC
+                )
+
+        return self._mutate(ctx, guild_id, apply)
 
     def clear_tracked_channels(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        current_mode = domain.normalize_tracking_mode(settings.tracking_mode)
-        settings.tracked_channel_ids = []
-        if current_mode != domain.GUILD_TRACKING_MODE_ALL:
-            settings.tracking_mode = domain.GUILD_TRACKING_MODE_NONE
-        self._save(ctx, settings)
-        return settings
+        def apply(settings: domain.GuildSettings) -> None:
+            current_mode = domain.normalize_tracking_mode(settings.tracking_mode)
+            settings.tracked_channel_ids = []
+            if current_mode != domain.GUILD_TRACKING_MODE_ALL:
+                settings.tracking_mode = domain.GUILD_TRACKING_MODE_NONE
+
+        return self._mutate(ctx, guild_id, apply)
 
     def list_tracked_channels(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
         return self.get_guild_settings(ctx, guild_id)
 
     def set_summary_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.summary_channel_id = (channel_id or "").strip()
-        self._save(ctx, settings)
-        return settings
+        channel_id = (channel_id or "").strip()
+        return self._mutate(ctx, guild_id, lambda s: setattr(s, "summary_channel_id", channel_id))
 
     def clear_summary_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
         return self.set_summary_channel(ctx, guild_id, "")
 
     def set_soundboard_enforcement(self, ctx: Any, guild_id: str, enabled: bool) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.soundboard_enforcement_enabled = bool(enabled)
-        self._save(ctx, settings)
-        return settings
+        return self._mutate(
+            ctx, guild_id, lambda s: setattr(s, "soundboard_enforcement_enabled", bool(enabled))
+        )
 
     def set_activity_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.activity_channel_id = (channel_id or "").strip()
-        self._save(ctx, settings)
-        return settings
+        channel_id = (channel_id or "").strip()
+        return self._mutate(ctx, guild_id, lambda s: setattr(s, "activity_channel_id", channel_id))
 
     def set_activity_category_channel(
         self, ctx: Any, guild_id: str, category: str, channel_id: str
@@ -320,70 +336,83 @@ class Service:
         category = domain.clean_activity_category(category)
         if not category:
             raise ValueError("category must be one of: join-leave, messages, voice-log, profile")
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.activity_category_channel_ids = {
-            **domain.clean_activity_category_channel_ids(getattr(settings, "activity_category_channel_ids", {})),
-            category: (channel_id or "").strip(),
-        }
-        self._save(ctx, settings)
-        return settings
+        channel = (channel_id or "").strip()
+
+        def apply(settings: domain.GuildSettings) -> None:
+            settings.activity_category_channel_ids = {
+                **domain.clean_activity_category_channel_ids(
+                    getattr(settings, "activity_category_channel_ids", {})
+                ),
+                category: channel,
+            }
+
+        return self._mutate(ctx, guild_id, apply)
 
     def clear_activity_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
-        settings = self.set_activity_channel(ctx, guild_id, "")
-        settings.activity_category_channel_ids = {}
-        self._save(ctx, settings)
-        return settings
+        def apply(settings: domain.GuildSettings) -> None:
+            settings.activity_channel_id = ""
+            settings.activity_category_channel_ids = {}
+
+        return self._mutate(ctx, guild_id, apply)
 
     def clear_activity_category_channel(self, ctx: Any, guild_id: str, category: str) -> domain.GuildSettings:
         category = domain.clean_activity_category(category)
         if not category:
             raise ValueError("category must be one of: join-leave, messages, voice-log, profile")
-        settings = self.get_guild_settings(ctx, guild_id)
-        category_channels = domain.clean_activity_category_channel_ids(getattr(settings, "activity_category_channel_ids", {}))
-        category_channels.pop(category, None)
-        settings.activity_category_channel_ids = category_channels
-        self._save(ctx, settings)
-        return settings
+
+        def apply(settings: domain.GuildSettings) -> None:
+            category_channels = domain.clean_activity_category_channel_ids(
+                getattr(settings, "activity_category_channel_ids", {})
+            )
+            category_channels.pop(category, None)
+            settings.activity_category_channel_ids = category_channels
+
+        return self._mutate(ctx, guild_id, apply)
 
     def set_activity_mode(self, ctx: Any, guild_id: str, mode: str) -> domain.GuildSettings:
         mode = (mode or "").strip().lower()
         if mode not in {domain.ACTIVITY_MODE_OFF, domain.ACTIVITY_MODE_MINIMAL, domain.ACTIVITY_MODE_FULL}:
             raise ValueError("mode must be one of: off, minimal, full")
-        settings = self.get_guild_settings(ctx, guild_id)
-        if mode == domain.ACTIVITY_MODE_OFF:
-            settings.activity_event_types = []
-        elif mode == domain.ACTIVITY_MODE_MINIMAL:
-            settings.activity_event_types = sorted(
-                {
-                    domain.ACTIVITY_EVENT_MEMBER_JOIN,
-                    domain.ACTIVITY_EVENT_MEMBER_LEAVE,
-                    domain.ACTIVITY_EVENT_INVITE_USED,
-                }
-            )
-        else:
-            settings.activity_event_types = sorted(domain.ACTIVITY_EVENT_TYPES)
-        self._save(ctx, settings)
-        return settings
+
+        def apply(settings: domain.GuildSettings) -> None:
+            if mode == domain.ACTIVITY_MODE_OFF:
+                settings.activity_event_types = []
+            elif mode == domain.ACTIVITY_MODE_MINIMAL:
+                settings.activity_event_types = sorted(
+                    {
+                        domain.ACTIVITY_EVENT_MEMBER_JOIN,
+                        domain.ACTIVITY_EVENT_MEMBER_LEAVE,
+                        domain.ACTIVITY_EVENT_INVITE_USED,
+                    }
+                )
+            else:
+                settings.activity_event_types = sorted(domain.ACTIVITY_EVENT_TYPES)
+
+        return self._mutate(ctx, guild_id, apply)
 
     def set_managed_voice_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        settings.managed_voice_channel_id = (channel_id or "").strip()
-        if settings.managed_voice_channel_id == "":
-            settings.managed_voice_connected_at = None
-        self._save(ctx, settings)
-        return settings
+        channel_id = (channel_id or "").strip()
+
+        def apply(settings: domain.GuildSettings) -> None:
+            settings.managed_voice_channel_id = channel_id
+            if settings.managed_voice_channel_id == "":
+                settings.managed_voice_connected_at = None
+
+        return self._mutate(ctx, guild_id, apply)
 
     def clear_managed_voice_channel(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
         return self.set_managed_voice_channel(ctx, guild_id, "")
 
     def remember_fallback_summary_channel(self, ctx: Any, guild_id: str, channel_id: str) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        channel_id = (channel_id or "").strip()
-        if not channel_id or settings.fallback_summary_channel_id == channel_id:
-            return settings
-        settings.fallback_summary_channel_id = channel_id
-        self._save(ctx, settings)
-        return settings
+        channel = (channel_id or "").strip()
+
+        def apply(settings: domain.GuildSettings) -> bool:
+            if not channel or settings.fallback_summary_channel_id == channel:
+                return False
+            settings.fallback_summary_channel_id = channel
+            return True
+
+        return self._mutate(ctx, guild_id, apply)
 
     def describe_settings(self, settings: domain.GuildSettings) -> str:
         summary_channel = settings.summary_channel_id.strip()
@@ -585,9 +614,7 @@ class Service:
         view.participants.sort(key=lambda item: (item.joined_at, item.user_name))
         return view
 
-    def _save(self, ctx: Any, settings: domain.GuildSettings) -> None:
-        if self.repo is None:
-            return
+    def _prepare_for_save(self, settings: domain.GuildSettings) -> None:
         settings.guild_id = settings.guild_id.strip()
         settings.tracking_mode = domain.normalize_tracking_mode(settings.tracking_mode)
         settings.tracked_channel_ids = domain.clean_channel_ids(settings.tracked_channel_ids)
@@ -605,6 +632,11 @@ class Service:
             getattr(settings, "activity_category_channel_ids", {})
         )
         settings.activity_event_types = domain.clean_activity_event_types(getattr(settings, "activity_event_types", []))
+
+    def _save(self, ctx: Any, settings: domain.GuildSettings) -> None:
+        if self.repo is None:
+            return
+        self._prepare_for_save(settings)
         self.repo.upsert_guild_settings(ctx, settings)
 
     def install(self, session: Any, allowed_guild_id: str, bot_admin_user_ids: list[str]) -> Any:
@@ -705,17 +737,17 @@ class Service:
         raise ValueError("unknown settings command")
 
     def enforce_track_all(self, ctx: Any, guild_id: str) -> domain.GuildSettings:
-        settings = self.get_guild_settings(ctx, guild_id)
-        needs_save = False
-        if domain.normalize_tracking_mode(settings.tracking_mode) != domain.GUILD_TRACKING_MODE_ALL:
-            settings.tracking_mode = domain.GUILD_TRACKING_MODE_ALL
-            needs_save = True
-        if len(settings.tracked_channel_ids) > 0:
-            settings.tracked_channel_ids = []
-            needs_save = True
-        if needs_save:
-            self._save(ctx, settings)
-        return settings
+        def apply(settings: domain.GuildSettings) -> bool:
+            needs_save = False
+            if domain.normalize_tracking_mode(settings.tracking_mode) != domain.GUILD_TRACKING_MODE_ALL:
+                settings.tracking_mode = domain.GUILD_TRACKING_MODE_ALL
+                needs_save = True
+            if len(settings.tracked_channel_ids) > 0:
+                settings.tracked_channel_ids = []
+                needs_save = True
+            return needs_save
+
+        return self._mutate(ctx, guild_id, apply)
 
     def handle_inspect_command(
         self,
@@ -793,10 +825,11 @@ class Service:
         role_id = option_role_id(options, "role")
         if not role_id:
             raise ValueError("role is required")
-        settings = self.get_guild_settings(ctx, interaction.guild_id)
-        if hasattr(settings, "auto_role_id"):
-            setattr(settings, "auto_role_id", role_id)
-            self._save(ctx, settings)
+        self._mutate(
+            ctx,
+            interaction.guild_id,
+            lambda s: setattr(s, "auto_role_id", role_id) if hasattr(s, "auto_role_id") else False,
+        )
         return f"Autorole configured: {_role_mention(role_id)}"
 
     def handle_unmute_command(

@@ -65,8 +65,9 @@ class _Cursor:
 
 
 class _UpdateResult:
-    def __init__(self, matched_count: int) -> None:
+    def __init__(self, matched_count: int, upserted_id: Any = None) -> None:
         self.matched_count = matched_count
+        self.upserted_id = upserted_id
 
 
 class _Collection:
@@ -96,6 +97,8 @@ class _Collection:
                 continue
             updated = dict(current)
             updated.update(update.get("$set", {}))
+            for key, value in update.get("$inc", {}).items():
+                updated[key] = int(updated.get(key, 0) or 0) + value
             self.documents[idx] = updated
             return _UpdateResult(1)
         if not upsert:
@@ -103,8 +106,23 @@ class _Collection:
         created = {"_id": query.get("_id")}
         created.update(update.get("$setOnInsert", {}))
         created.update(update.get("$set", {}))
+        for key, value in update.get("$inc", {}).items():
+            created[key] = int(created.get(key, 0) or 0) + value
         self.documents.append(created)
-        return _UpdateResult(0)
+        return _UpdateResult(0, created["_id"])
+
+    def update_many(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False) -> _UpdateResult:
+        modified = 0
+        for idx, current in enumerate(self.documents):
+            if not _matches(current, query):
+                continue
+            updated = dict(current)
+            updated.update(update.get("$set", {}))
+            for key, value in update.get("$inc", {}).items():
+                updated[key] = int(updated.get(key, 0) or 0) + value
+            self.documents[idx] = updated
+            modified += 1
+        return _UpdateResult(modified)
 
 
 class _FakeDb:
