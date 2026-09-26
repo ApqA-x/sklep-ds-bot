@@ -23,6 +23,7 @@ import pytest
 
 pymongo = pytest.importorskip("pymongo")
 from pymongo import MongoClient  # noqa: E402
+from pymongo import errors as pymongo_errors  # noqa: E402
 
 from voice_tracker import migrate, schema  # noqa: E402
 from stand_guard import guard_db_name, guard_mongo_uri  # noqa: E402
@@ -192,6 +193,39 @@ def test_db05_conflicting_duplicates_abort_then_identical_merge_builds_unique(db
     assert db[schema.DA].count_documents({}) == 2  # dup2 удалён merge'ом; d1 и оба e1-keep целые
     assert "discord_audit_guildId_entryId_unique" in _index_names(db, schema.DA)
     assert "web_disc_audit_guildId_entryId" in _index_names(db, schema.DA)  # старый не тронут (drop — руками)
+
+
+# ------------------------------------------------------------------ M4 (T11)
+
+
+def test_m4_audit_state_unique_precheck_and_idempotent(db) -> None:
+    """M4: unique (guildId) на discord_audit_state — инвариант «один документ
+    состояния синхронизации на гильдию» (T11/H08). Конфликтные дубли → abort."""
+    plan = migrate.plan_and_apply(db, apply=False, only=4)
+    assert plan["actions"][0]["action"] == "would-apply"
+    assert "discord_audit_state_guildId_unique" not in _index_names(db, schema.DAS)
+
+    db[schema.DAS].insert_many([
+        {"_id": "a", "guildId": "g1", "freshCursor": "10"},
+        {"_id": "b", "guildId": "g1", "freshCursor": "20"},  # конфликтная дубль-гильдия
+    ])
+    with pytest.raises(RuntimeError, match="discord_audit_state"):
+        migrate.plan_and_apply(db, apply=True, only=4)
+    assert db[schema.DAS].count_documents({}) == 2  # молча ничего не удалено
+    assert migrate.migration_status(db)[4]["status"] == "failed"
+
+    # конфликт убран оператором — повтор проходим: unique построен, повтор идемпотентен
+    db[schema.DAS].delete_one({"_id": "b"})
+    result = migrate.plan_and_apply(db, apply=True, only=4)
+    assert result["actions"][0]["action"] == "applied"
+    assert "discord_audit_state_guildId_unique" in _index_names(db, schema.DAS)
+    with pytest.raises(pymongo_errors.DuplicateKeyError):
+        db[schema.DAS].insert_one({"_id": "c", "guildId": "g1"})
+    again = migrate.plan_and_apply(db, apply=True, only=4)
+    assert again["actions"][0]["action"] == "skip-done"
+    # M4 additive: откат приложения поверх неё не блокируется (DB07)
+    migrate.plan_and_apply(db, apply=True)  # добирает M1–M3 на чистых данных
+    assert migrate.check_rollback(db, 3) == []
 
 
 # ------------------------------------------------------------------ DB06
