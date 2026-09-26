@@ -1,0 +1,13 @@
+[Unit]
+Description=dsbot daily backup timer (T14, RPO 24h)
+
+[Timer]
+# 04:30 MSK-нейтрально: суточный бэкап в часы минимальной голосовой активности.
+# Persistent=true догоняет пропущенный запуск после простоя хоста (B06).
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=900
+Unit=dsbot-backup.service
+
+[Install]
+WantedBy=timers.target
