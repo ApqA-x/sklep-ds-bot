@@ -1,6 +1,9 @@
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
+from voice_tracker import media as media_module
 from voice_tracker.media import classify, relative_path, store_attachments
 
 
@@ -57,3 +60,45 @@ def test_store_attachments_dedupes_and_disabled_dir(tmp_path):
 
     off = asyncio.run(store_attachments("", "170000000000000000", [one]))  # MEDIA_DIR не задан → не пишем
     assert off[0]["stored"] is False and off[0]["path"] == ""
+
+
+# M08: два одновременных сохранения одного digest — итоговый файл цел, .part не разделяются.
+def test_store_attachments_concurrent_same_digest(tmp_path):
+    async def slow_read_factory(att_id, delay):
+        class Slow(FakeAttachment):
+            async def read(self, use_cached=False):
+                await asyncio.sleep(delay)
+                return self._data
+
+        return Slow(att_id=att_id, filename=f"{att_id}.png", content_type="image/png",
+                    size=4, data=b"DUEL")
+
+    async def main():
+        a, b = await slow_read_factory("1", 0.0), await slow_read_factory("2", 0.01)
+        return await asyncio.gather(
+            store_attachments(str(tmp_path), "170000000000000000", [a]),
+            store_attachments(str(tmp_path), "170000000000000000", [b]),
+        )
+
+    meta_a, meta_b = asyncio.run(main())
+    assert meta_a[0]["stored"] and meta_b[0]["stored"]
+    assert meta_a[0]["path"] == meta_b[0]["path"]
+    assert (tmp_path / meta_a[0]["path"]).read_bytes() == b"DUEL"
+    # мусорных .part файлов не остаётся
+    assert not list(tmp_path.rglob("*.part"))
+
+
+# L03: зависшее скачивание прерывается таймаутом — мета остаётся без файла, gateway не блокируется.
+def test_store_attachments_download_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(media_module, "DOWNLOAD_TIMEOUT_S", 0.05)
+
+    class Hanging(FakeAttachment):
+        async def read(self, use_cached=False):
+            await asyncio.sleep(5)
+            return self._data
+
+    hang = Hanging(att_id="9", filename="h.png", content_type="image/png", size=1, data=b"H")
+    ok = FakeAttachment(att_id="10", filename="o.png", content_type="image/png", size=1, data=b"O")
+    meta = asyncio.run(store_attachments(str(tmp_path), "170000000000000000", [hang, ok]))
+    assert meta[0]["stored"] is False  # таймаут → только метаданные
+    assert meta[1]["stored"] is True  # соседнее скачивание не пострадало
