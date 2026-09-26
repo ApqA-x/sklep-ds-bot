@@ -14,6 +14,40 @@ REASON_UNKNOWN = "unknown"
 REASON_ERROR = "error"
 REASON_REJECTED = "rejected"
 
+# T08.11 (O10): журнал отличает вызов команды от отказа и от подтверждённого эффекта.
+# "effect" пишется только для заведомо мутирующих маршрутов, успешных в диспатчере;
+# классификация консервативная: неизвестный маршрут остаётся "invocation".
+STAGE_INVOCATION = "invocation"
+STAGE_REJECTED = "rejected"
+STAGE_EFFECT = "effect"
+
+MUTATING_ROUTES = frozenset(
+    {
+        ("connect", ""),
+        ("disconnect", ""),
+        ("autorole", ""),
+        ("unmute", "add"),
+        ("unmute", "remove"),
+        ("trusted", "add"),
+        ("trusted", "remove"),
+        ("stalker", "start"),
+        ("stalker", "stop"),
+        ("settings", "summary-set"),
+        ("settings", "summary-clear"),
+        ("settings", "activity-channel-set"),
+        ("settings", "activity-channel-clear"),
+        ("settings", "activity"),
+    }
+)
+
+
+def classify_stage(ok: bool, root: str, command: str) -> str:
+    if not ok:
+        return STAGE_REJECTED
+    if (root, command) in MUTATING_ROUTES:
+        return STAGE_EFFECT
+    return STAGE_INVOCATION
+
 
 def build_command_after(
     root: str,
@@ -73,6 +107,7 @@ def record_command_audit(
     command: str,
     after: dict[str, Any],
     ok: bool,
+    stage: str = STAGE_INVOCATION,
 ) -> None:
     # Document shape mirrors api/mutations.py::record_audit in sklep-ds-bot-web.
     db[COLL_WEB_AUDIT].insert_one(
@@ -87,6 +122,8 @@ def record_command_audit(
             "at": datetime.now(UTC),
             "source": "web",
             "origin": "discord",
+            # T08.11: вызов / отказ / подтверждённый эффект — три разных факта в журнале
+            "stage": stage,
         }
     )
 
@@ -117,6 +154,7 @@ def safe_record_command_audit(
             command=command,
             after=after,
             ok=ok,
+            stage=classify_stage(ok, root, command),
         )
     except Exception:
         logger.warning("site audit write failed guild=%s command=/%s", guild_id, root, exc_info=True)
