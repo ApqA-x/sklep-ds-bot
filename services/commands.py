@@ -37,6 +37,7 @@ from voice_tracker.discord_models import (
     User,
 )
 from voice_tracker.repository import Repository
+from voice_tracker import supervise
 from voice_tracker.runtime import configure_logging, load_config, register_commands_http
 from voice_tracker.site_audit import (
     REASON_DISABLED,
@@ -311,6 +312,16 @@ async def main() -> None:
         embed = discord.Embed(title="Voice Tracker", description=content, color=0x5865F2)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # T12: у сервиса нет фоновых циклов, но heartbeat обязателен — он доказывает,
+    # что loop жив и Mongo доступна (иначе контейнер неотличим от зависшего).
+    supervisor = supervise.Supervisor()
+    heartbeat = supervise.Heartbeat(
+        repo.db,
+        "commands",
+        supervisor,
+        state_fn=lambda: {"discord": supervise.discord_state(client)},
+    )
+    supervise.attach(supervisor, heartbeat)
     await client.login(cfg.discord_token)
     try:
         await register_commands_http(cfg.discord_token, cfg.discord_application_id, cfg.discord_guild_id, registered_commands)
@@ -321,6 +332,7 @@ async def main() -> None:
         )
         await client.connect()
     finally:
+        await supervisor.shutdown()
         await client.close()
         mongo_client.close()
 

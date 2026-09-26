@@ -18,6 +18,7 @@ from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
 from services.chat_templates import voice_session_summary
+from voice_tracker import supervise
 from voice_tracker.bus import Bus
 from voice_tracker import domain, eventlog
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
@@ -2771,21 +2772,29 @@ async def main() -> None:
                 logger.exception("voice session orphan reconciliation failed")
             await asyncio.sleep(120)
 
-    sweep = asyncio.create_task(sweep_pending())
-    reconcile = asyncio.create_task(reconcile_managed_voice())
-    voice_reap = asyncio.create_task(reconcile_voice_sessions())
-    invite_refresh = asyncio.create_task(refresh_invite_snapshots())
-    invite_reconcile = asyncio.create_task(reconcile_invite_metadata())
-    role_reconcile = asyncio.create_task(reconcile_member_roles())
+    # T12: все фоновые циклы под надзором — гибель наблюдаема (structured log +
+    # снапшот в heartbeat), respawn с backoff+jitter; shutdown = cancel+await.
+    supervisor = supervise.Supervisor()
+    supervisor.spawn("gateway-event-sweep", sweep_pending, critical=True)
+    supervisor.spawn("gateway-managed-voice-reconcile", reconcile_managed_voice, critical=True)
+    supervisor.spawn("gateway-voice-session-reaper", reconcile_voice_sessions, critical=True)
+    supervisor.spawn("gateway-invite-snapshot-refresh", refresh_invite_snapshots, critical=False)
+    supervisor.spawn("gateway-invite-metadata-reconcile", reconcile_invite_metadata, critical=False)
+    supervisor.spawn("gateway-member-role-reconcile", reconcile_member_roles, critical=False)
+    heartbeat = supervise.Heartbeat(
+        repo.db,
+        "gateway",
+        supervisor,
+        state_fn=lambda: {
+            "nats": supervise.nats_state(bus.conn),
+            "discord": supervise.discord_state(client),
+        },
+    )
+    supervise.attach(supervisor, heartbeat)
     try:
         await client.connect()
     finally:
-        sweep.cancel()
-        reconcile.cancel()
-        voice_reap.cancel()
-        invite_refresh.cancel()
-        invite_reconcile.cancel()
-        role_reconcile.cancel()
+        await supervisor.shutdown()
         await bus.aclose()
         mongo_client.close()
 

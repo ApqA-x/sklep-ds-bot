@@ -21,6 +21,10 @@ services:
     depends_on:
       - mongo
       - nats
+    # T12/R07: crash-restart делает restart policy; HEALTHCHECK из Dockerfile
+    # только сигнализирует (unhealthy ≠ авто-рестарт) — restart storm за этим
+    # файлом не стоит: упавшая Mongo не вызывает бег на месте у приложений.
+    restart: unless-stopped
 
   tracker:
     build:
@@ -32,6 +36,10 @@ services:
     depends_on:
       - mongo
       - nats
+    # T12/R07: crash-restart делает restart policy; HEALTHCHECK из Dockerfile
+    # только сигнализирует (unhealthy ≠ авто-рестарт) — restart storm за этим
+    # файлом не стоит: упавшая Mongo не вызывает бег на месте у приложений.
+    restart: unless-stopped
 
   writer:
     build:
@@ -43,6 +51,10 @@ services:
     depends_on:
       - mongo
       - nats
+    # T12/R07: crash-restart делает restart policy; HEALTHCHECK из Dockerfile
+    # только сигнализирует (unhealthy ≠ авто-рестарт) — restart storm за этим
+    # файлом не стоит: упавшая Mongo не вызывает бег на месте у приложений.
+    restart: unless-stopped
 
   commands:
     build:
@@ -54,6 +66,10 @@ services:
     depends_on:
       - mongo
       - nats
+    # T12/R07: crash-restart делает restart policy; HEALTHCHECK из Dockerfile
+    # только сигнализирует (unhealthy ≠ авто-рестарт) — restart storm за этим
+    # файлом не стоит: упавшая Mongo не вызывает бег на месте у приложений.
+    restart: unless-stopped
 
   activity:
     build:
@@ -65,6 +81,10 @@ services:
     depends_on:
       - mongo
       - nats
+    # T12/R07: crash-restart делает restart policy; HEALTHCHECK из Dockerfile
+    # только сигнализирует (unhealthy ≠ авто-рестарт) — restart storm за этим
+    # файлом не стоит: упавшая Mongo не вызывает бег на месте у приложений.
+    restart: unless-stopped
 
   stalker:
     build:
@@ -76,6 +96,10 @@ services:
     depends_on:
       - mongo
       - nats
+    # T12/R07: crash-restart делает restart policy; HEALTHCHECK из Dockerfile
+    # только сигнализирует (unhealthy ≠ авто-рестарт) — restart storm за этим
+    # файлом не стоит: упавшая Mongo не вызывает бег на месте у приложений.
+    restart: unless-stopped
 
   controlplane:
     build:
@@ -87,6 +111,10 @@ services:
     depends_on:
       - mongo
       - nats
+    # T12/R07: crash-restart делает restart policy; HEALTHCHECK из Dockerfile
+    # только сигнализирует (unhealthy ≠ авто-рестарт) — restart storm за этим
+    # файлом не стоит: упавшая Mongo не вызывает бег на месте у приложений.
+    restart: unless-stopped
 
 volumes:
   mongo-data:
