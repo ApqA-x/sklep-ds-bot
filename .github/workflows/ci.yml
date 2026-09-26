@@ -10,7 +10,14 @@ on:
 permissions:
   contents: read
 
+env:
+  UV_VERSION: "0.12.19"
+
 jobs:
+  # T15/п.1: обязательные lanes ставят ровно uv.lock (--frozen: несовпадение с
+  # pyproject ломает job, а не тихо пере-резолвит). forward-canary — единственный
+  # слой со свежего разрешения по диапазонам: его задача ловить будущее (3.14),
+  # он allow_failure и release-гейтом не является.
   test:
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.allow_failure || false }}
@@ -26,56 +33,126 @@ jobs:
             python-version: "3.14"
             allow_failure: true
             allow_prereleases: true
+            locked: false
           - lane: deprecation-strict
             python-version: "3.12"
             allow_failure: true
+    env:
+      UV_PYTHON_PREFERENCE: only-system
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: ${{ matrix.allow_prereleases || false }}
-          cache: "pip"
-          cache-dependency-path: pyproject.toml
 
-      - name: Install dependencies
-        run: python -m pip install -e ".[test]"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies (uv.lock, frozen)
+        if: matrix.locked != false
+        run: uv sync --frozen --extra test
+
+      - name: "Install dependencies (canary: свежий резолв по диапазонам)"
+        if: matrix.locked == false
+        run: |
+          uv venv
+          uv pip install -e ".[test]"
+
+      - name: Lock integrity
+        if: matrix.locked != false
+        run: uv lock --check
 
       - name: Compile
         if: matrix.lane == 'fast' || matrix.lane == 'forward-canary'
-        run: python -m compileall voice_tracker services tests
+        run: uv run --no-sync python -m compileall voice_tracker services tests
 
       - name: Run tests
         if: matrix.lane == 'fast' || matrix.lane == 'forward-canary'
-        run: pytest
+        run: uv run --no-sync pytest
 
       - name: Run deprecation-strict tests
         if: matrix.lane == 'deprecation-strict'
-        run: pytest -W error::DeprecationWarning
+        run: uv run --no-sync pytest -W error::DeprecationWarning
 
-  required-test:
-    name: test
+  # T15/п.4: Mongo+NATS интеграционный слой был только локальным стендом — теперь
+  # обязателен и в CI. Тот же docker-compose.test.yml и тот же stand_guard, что
+  # защищают прод-ресурсы на dev-машине (27099/14222, тестовые имена БД).
+  integration:
+    name: integration
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON_PREFERENCE: only-system
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: pyproject.toml
 
-      - name: Install dependencies
-        run: python -m pip install -e ".[test]"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Start test stand (mongo 27099, nats 14222 — loopback, свои volumes)
+        run: |
+          docker compose -f docker-compose.test.yml up -d
+          for i in $(seq 1 30); do
+            if docker exec dsbot-test-mongo mongosh --quiet --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
+              echo "stand mongo ready after ${i} attempt(s)"; exit 0
+            fi
+            sleep 2
+          done
+          echo "stand mongo never became ready"
+          docker compose -f docker-compose.test.yml logs
+          exit 1
+
+      - name: Install dependencies (uv.lock, frozen)
+        run: uv sync --frozen --extra test
+
+      - name: Run integration tests
+        run: uv run --no-sync pytest -m integration
+
+      - name: Teardown stand
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
+
+  # фиксированное имя для branch protection (не меняется при матрице)
+  required-test:
+    name: test
+    needs: [test]
+    runs-on: ubuntu-latest
+    if: always()
+    env:
+      UV_PYTHON_PREFERENCE: only-system
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies (uv.lock, frozen)
+        run: uv sync --frozen --extra test
 
       - name: Run required tests
-        run: pytest
+        run: uv run --no-sync pytest
+
+      - name: Fail if matrix test lanes failed
+        run: exit 1
+        if: needs.test.result == 'failure'

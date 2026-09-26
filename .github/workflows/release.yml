@@ -15,7 +15,13 @@ concurrency:
   group: release-main
   cancel-in-progress: false
 
+env:
+  REPO: ${{ github.repository }}
+
 jobs:
+  # Публикация только по «зелённому» CI ровно этого SHA (workflow_run даёт
+  # success-run). Ручного workflow_dispatch здесь нет намеренно (п.5/CI03):
+  # опубликовать непроверенный коммит нельзя ни тегом, ни кнопкой.
   version:
     runs-on: ubuntu-latest
     if: >-
@@ -40,6 +46,8 @@ jobs:
           dry_run: true
           commit_sha: ${{ github.event.workflow_run.head_sha }}
 
+  # CI04: матрица пушит ТОЛЬКО per-SHA теги. Ни один vX-тег не появляется,
+  # пока все service-build'ы не закончились. Частичная матрица = нет кандидата.
   publish:
     needs: version
     runs-on: ubuntu-latest
@@ -83,12 +91,67 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
             ghcr.io/${{ steps.repo.outputs.name }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha }}
-            ghcr.io/${{ steps.repo.outputs.name }}/${{ matrix.service }}:v${{ needs.version.outputs.new_version }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-  tag:
+  # vX-теги — только после полной матрицы (нужен весь набор образов, п.8).
+  promote:
     needs: [version, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag full matrix to v${{ needs.version.outputs.new_version }}
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          VERSION: v${{ needs.version.outputs.new_version }}
+        run: |
+          REPO_LC="${REPO,,}"
+          for SERVICE in gateway tracker writer commands activity stalker controlplane; do
+            SRC="ghcr.io/${REPO_LC}/${SERVICE}:${SHA}"
+            DST="ghcr.io/${REPO_LC}/${SERVICE}:${VERSION}"
+            docker buildx imagetools create -t "$DST" "$SRC"
+            echo "promoted $DST"
+          done
+
+  # CI07: смоук именно опубликованного артефакта (pull по digest пересобранного
+  # multi-arch манифеста, не локального checkout) на целевой платформе amd64.
+  smoke:
+    needs: [publish, promote]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gateway, tracker, writer, commands, activity, stalker, controlplane]
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Smoke published image
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          REPO_LC="${REPO,,}"
+          BASE="ghcr.io/${REPO_LC}/${SERVICE}"
+          DIGEST=$(docker buildx imagetools inspect "${BASE}:${SHA}" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "inspected ${BASE}@${DIGEST}"
+          # импорт сервисного модуля и healthcheck-CLI внутри уже опубликованного
+          # образа: подтверждает, что uv-locked зависимости целы на целевой платформе.
+          docker run --rm --platform linux/amd64 "${BASE}@${DIGEST}" \
+            python -c "import importlib, sys; importlib.import_module('voice_tracker.healthcheck'); importlib.import_module('services.${SERVICE}'); import voice_tracker.backup_report; print('SMOKE-OK', sys.version.split()[0])"
+
+  tag:
+    needs: [version, publish, promote, smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -105,36 +168,45 @@ jobs:
           tag_prefix: v
           commit_sha: ${{ github.event.workflow_run.head_sha }}
 
+  # Неполный кандидат не оставляем: при провале матрицы чистим per-SHA теги,
+  # при провале smoke — и promoted vX тоже (git-тег тогда не создаётся).
   cleanup-publish:
-    needs: [publish, version]
-    if: ${{ always() && needs.publish.result == 'failure' }}
+    needs: [version, publish, promote, smoke]
+    if: ${{ always() && (needs.publish.result == 'failure' || needs.smoke.result == 'failure') }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         service: [gateway, tracker, writer, commands, activity, stalker, controlplane]
     steps:
-      - name: Delete partial SHA-tagged image
+      - name: Delete partial SHA/vX-tagged images
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          VERSION: ${{ needs.promote.result == 'success' && format('v{0}', needs.version.outputs.new_version) || '' }}
         run: |
           OWNER="${{ github.repository_owner }}"
           REPO_NAME="${{ github.repository }}"
           REPO_NAME="${REPO_NAME#*/}"
           SERVICE="${{ matrix.service }}"
-          SHA="${{ github.event.workflow_run.head_sha }}"
           PACKAGE="${REPO_NAME}%2F${SERVICE}"
 
-          for PREFIX in "orgs" "users"; do
-            VERSION_ID=$(gh api \
-              "/${PREFIX}/${OWNER}/packages/container/${PACKAGE}/versions" \
-              --paginate --jq ".[] | select(.metadata.container.tags[] == \"${SHA}\") | .id" 2>/dev/null) && break
-          done
+          # теги, под которыми мог остаться неполный кандидат
+          TAGS=("${SHA}")
+          if [ -n "${VERSION}" ]; then TAGS+=("${VERSION}"); fi
 
-          if [ -n "${VERSION_ID:-}" ]; then
+          for TAG in "${TAGS[@]}"; do
+            VERSION_ID=""
             for PREFIX in "orgs" "users"; do
-              gh api --method DELETE \
-                "/${PREFIX}/${OWNER}/packages/container/${PACKAGE}/versions/${VERSION_ID}" 2>/dev/null && break
+              VERSION_ID=$(gh api \
+                "/${PREFIX}/${OWNER}/packages/container/${PACKAGE}/versions" \
+                --paginate --jq ".[] | select(.metadata.container.tags[] == \"${TAG}\") | .id" 2>/dev/null) && break
             done
-            echo "Deleted ${SERVICE}:${SHA}"
-          fi
+            if [ -n "${VERSION_ID:-}" ]; then
+              for PREFIX in "orgs" "users"; do
+                gh api --method DELETE \
+                  "/${PREFIX}/${OWNER}/packages/container/${PACKAGE}/versions/${VERSION_ID}" 2>/dev/null && break
+              done
+              echo "Deleted ${SERVICE}:${TAG}"
+            fi
+          done
