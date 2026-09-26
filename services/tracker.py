@@ -7,7 +7,7 @@ from nats.aio.client import Client as NATS
 from pymongo import MongoClient
 
 from voice_tracker.bus import Bus
-from voice_tracker import domain
+from voice_tracker import domain, eventlog
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
 from voice_tracker.tracker import Defaults, Service, decode_voice_event
@@ -27,10 +27,10 @@ async def main() -> None:
 
     nats = NATS()
     await nats.connect(cfg.nats_url)
-    bus = Bus(nats, cfg.event_signing_secret, "tracker")
+    bus = Bus(nats, cfg.event_signing_secret, "tracker", max_age_seconds=cfg.event_max_age_seconds)
     service = Service(
         repo,
-        bus,
+        eventlog.DurablePublisher(bus, repo.db, issuer="tracker"),
         Defaults(tracking_mode=cfg.tracking_mode, tracked_channel_ids=cfg.tracked_channel_ids),
     )
     startup_ready = asyncio.Event()
@@ -59,7 +59,33 @@ async def main() -> None:
             logger.exception("voice event handling failed payload_size=%s", len(payload))
             raise
 
-    await bus.subscribe(None, domain.SUBJECT_VOICE_EVENT, repo, handle)
+    await bus.subscribe(
+        None, domain.SUBJECT_VOICE_EVENT, None, handle, consumer="tracker", db=repo.db
+    )
+
+    async def sweep() -> None:
+        # T09/E01: догрузка пропущенных/незавершённых событий из журнала; republish
+        # записанных, но не доставленных на транспорт session.closed (E02).
+        while True:
+            await asyncio.sleep(cfg.event_sweep_interval_seconds)
+            try:
+                await eventlog.republish_pending(bus, repo.db, domain.SUBJECT_SESSION_CLOSED)
+                n = await eventlog.sweep_pending(
+                    repo.db,
+                    "tracker",
+                    [domain.SUBJECT_VOICE_EVENT],
+                    handle,
+                    max_deliver=cfg.event_max_deliver,
+                )
+                stats = eventlog.pending_stats(repo.db, "tracker", [domain.SUBJECT_VOICE_EVENT])
+                if n or stats["backlog"] or stats["quarantined"]:
+                    logger.info("tracker event sweep delivered=%s %s", n, stats)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("tracker event sweep failed")
+
+    sweep_task = asyncio.create_task(sweep(), name="tracker-event-sweep")
     await service.Start()
     logger.info("tracker startup replay complete")
     startup_ready.set()
@@ -67,6 +93,7 @@ async def main() -> None:
     try:
         await asyncio.Event().wait()
     finally:
+        sweep_task.cancel()
         await bus.aclose()
         mongo_client.close()
 

@@ -56,9 +56,11 @@ class Envelope:
     issued_at: int
     payload: bytes
     signature: str
+    schema: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "v": self.schema,
             "messageId": self.message_id,
             "subject": self.subject,
             "issuer": self.issuer,
@@ -69,10 +71,13 @@ class Envelope:
 
 
 class Bus:
-    def __init__(self, conn: Any, secret: bytes | str, issuer: str) -> None:
+    def __init__(self, conn: Any, secret: bytes | str, issuer: str, *, max_age_seconds: int = 3600) -> None:
         self.conn = conn
         self.secret = _as_bytes(secret)
         self.issuer = issuer.strip()
+        # T09.8/E07: wire-freshness остаётся; легитимный replay после простоя идёт
+        # через журнал (eventlog.sweep_pending), а не через ослабление подписи.
+        self.max_age_seconds = max_age_seconds
         self._seen: dict[str, int] = {}
         self._lock = threading.Lock()
 
@@ -83,11 +88,13 @@ class Bus:
         secret: bytes | str,
         issuer: str,
         connector: Callable[[str], Awaitable[Any]],
+        *,
+        max_age_seconds: int = 3600,
     ) -> "Bus":
         if not str(secret).strip():
             raise ValueError("event signing secret is required")
         conn = await connector(url)
-        return cls(conn, secret, issuer)
+        return cls(conn, secret, issuer, max_age_seconds=max_age_seconds)
 
     def close(self) -> Any:
         if self.conn is None:
@@ -102,7 +109,7 @@ class Bus:
         if inspect.isawaitable(result):
             await result
 
-    async def publish_json(self, *args: Any) -> None:
+    async def publish_json(self, *args: Any, message_id: str | None = None) -> None:
         if len(args) == 2:
             subject, value = args
         elif len(args) == 3:
@@ -113,7 +120,9 @@ class Bus:
             raise ValueError("nats connection is nil")
         payload = _json_bytes(value)
         env = Envelope(
-            message_id=str(uuid4()),
+            # T09.4: стабильный event id переиспользуется при retry (eventlog),
+            # uuid — только для наблюдений без устойчивого факта-источника.
+            message_id=message_id or str(uuid4()),
             subject=subject,
             issuer=self.issuer,
             issued_at=int(_utc_now().timestamp()),
@@ -137,6 +146,9 @@ class Bus:
         subject: str,
         deduper: Deduper | None,
         handler: Callable[[bytes], Any],
+        *,
+        consumer: str | None = None,
+        db: Any = None,
     ) -> Any:
         if self.conn is None:
             raise ValueError("nats connection is nil")
@@ -144,9 +156,24 @@ class Bus:
         async def _callback(msg: Any) -> None:
             data = getattr(msg, "data", msg)
             try:
-                env, payload = decode_envelope(self.secret, subject, data)
+                env, payload = decode_envelope(
+                    self.secret, subject, data, max_age_seconds=self.max_age_seconds
+                )
             except Exception as exc:
-                logger.warning("nats envelope error subject=%s: %s", subject, exc)
+                # E08: poison с consumer/db уходит в карантин с причиной и не блокирует очередь
+                if consumer is not None and db is not None:
+                    from . import eventlog
+
+                    eventlog.quarantine_poison(db, consumer, subject, _as_bytes(data), str(exc))
+                else:
+                    logger.warning("nats envelope error subject=%s: %s", subject, exc)
+                return
+
+            if consumer is not None and db is not None:
+                # T09: единая точка исполнения (wire+свип) с per-consumer inbox
+                from . import eventlog
+
+                await eventlog.deliver(db, consumer, env.message_id, subject, payload, handler)
                 return
 
             if deduper is not None:
@@ -212,11 +239,22 @@ def sign_envelope(
     return base64.b64encode(mac.digest()).decode("ascii")
 
 
-def decode_envelope(secret: bytes | str, expected_subject: str, data: bytes | bytearray | str) -> tuple[Envelope, bytes]:
+def decode_envelope(
+    secret: bytes | str,
+    expected_subject: str,
+    data: bytes | bytearray | str,
+    *,
+    max_age_seconds: int = 3600,
+) -> tuple[Envelope, bytes]:
     raw = _as_bytes(data)
     payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("invalid envelope")
+
+    schema = payload.get("v", 1)
+    if schema != 1:
+        # E08: неизвестная схема — отказать (fail-closed), а не интерпретировать
+        raise ValueError(f"unsupported envelope schema {schema!r}")
 
     env = Envelope(
         message_id=str(payload.get("messageId", "")),
@@ -225,6 +263,7 @@ def decode_envelope(secret: bytes | str, expected_subject: str, data: bytes | by
         issued_at=int(payload.get("issuedAt") or 0),
         payload=_json_bytes(payload.get("payload")),
         signature=str(payload.get("signature", "")),
+        schema=1,
     )
 
     if env.subject != expected_subject:
@@ -239,8 +278,9 @@ def decode_envelope(secret: bytes | str, expected_subject: str, data: bytes | by
     if env.issued_at == 0:
         raise ValueError("missing issuedAt")
 
+    # T09.8/E07: подпись/issuer/schema обязательны всегда; окно freshness — конфиг
     age = _utc_now() - datetime.fromtimestamp(env.issued_at, UTC)
-    if age < -timedelta(minutes=5) or age > timedelta(hours=1):
+    if age < -timedelta(minutes=5) or age > timedelta(seconds=max_age_seconds):
         raise ValueError("stale envelope")
 
     expected_signature = sign_envelope(secret, env.message_id, env.subject, env.issuer, env.issued_at, env.payload)

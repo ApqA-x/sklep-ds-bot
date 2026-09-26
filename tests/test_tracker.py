@@ -299,6 +299,9 @@ async def test_main_subscribes_before_start(monkeypatch: pytest.MonkeyPatch) -> 
         event_signing_secret = "test-secret"
         tracking_mode = domain.GUILD_TRACKING_MODE_ALL
         tracked_channel_ids: list[str] = []
+        event_max_age_seconds = 3600
+        event_sweep_interval_seconds = 15
+        event_max_deliver = 8
 
     class FakeMongoClient:
         def __init__(self, _uri: str) -> None:
@@ -312,7 +315,7 @@ async def test_main_subscribes_before_start(monkeypatch: pytest.MonkeyPatch) -> 
 
     class FakeRepoMain:
         def __init__(self, _db: object) -> None:
-            pass
+            self.db = object()
 
         def ensure_indexes(self, _ctx: object) -> None:
             calls.append("ensure_indexes")
@@ -322,10 +325,10 @@ async def test_main_subscribes_before_start(monkeypatch: pytest.MonkeyPatch) -> 
             calls.append("nats_connect")
 
     class FakeBus:
-        def __init__(self, _nats: FakeNats, _secret: str, _issuer: str) -> None:
+        def __init__(self, _nats: FakeNats, _secret: str, _issuer: str, *_args, **_kwargs) -> None:
             pass
 
-        async def subscribe(self, _ctx: object, _subject: str, _repo: object, _handler: object) -> None:
+        async def subscribe(self, _ctx: object, _subject: str, _repo: object, _handler: object, *, consumer=None, db=None) -> None:
             calls.append("subscribe")
 
         async def aclose(self) -> None:

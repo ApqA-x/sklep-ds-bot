@@ -23,7 +23,7 @@ from services.chat_templates import activity_invite_used
 from services.chat_templates import activity_member_join
 from services.chat_templates import activity_member_leave
 from services.chat_templates import activity_unknown_event
-from voice_tracker import domain
+from voice_tracker import domain, eventlog
 from voice_tracker.bus import Bus
 from voice_tracker.repository import Repository
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
@@ -410,7 +410,7 @@ async def main() -> None:
 
     nats = NATS()
     await nats.connect(cfg.nats_url)
-    bus = Bus(nats, cfg.event_signing_secret, "activity")
+    bus = Bus(nats, cfg.event_signing_secret, "activity", max_age_seconds=cfg.event_max_age_seconds)
 
     intents = discord.Intents.none()
     intents.guilds = True
@@ -450,11 +450,36 @@ async def main() -> None:
                 exc_info=last_error,
             )
 
-    await bus.subscribe(None, domain.SUBJECT_ACTIVITY_EVENT, repo, handle_activity)
+    await bus.subscribe(
+        None, domain.SUBJECT_ACTIVITY_EVENT, None, handle_activity, consumer="activity", db=repo.db
+    )
+
+    async def event_sweep() -> None:
+        # T09/E01: догрузка пропущенных activity-событий из журнала (wire = fast path)
+        while True:
+            await asyncio.sleep(cfg.event_sweep_interval_seconds)
+            try:
+                n = await eventlog.sweep_pending(
+                    repo.db,
+                    "activity",
+                    [domain.SUBJECT_ACTIVITY_EVENT],
+                    handle_activity,
+                    max_deliver=cfg.event_max_deliver,
+                )
+                stats = eventlog.pending_stats(repo.db, "activity", [domain.SUBJECT_ACTIVITY_EVENT])
+                if n or stats["backlog"] or stats["quarantined"]:
+                    logger.info("activity event sweep delivered=%s %s", n, stats)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("activity event sweep failed")
+
+    sweep_task = asyncio.create_task(event_sweep(), name="activity-event-sweep")
     await client.login(cfg.discord_token)
     try:
         await client.connect()
     finally:
+        sweep_task.cancel()
         await client.close()
         await bus.aclose()
         mongo_client.close()

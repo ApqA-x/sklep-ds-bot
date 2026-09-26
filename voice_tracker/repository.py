@@ -120,6 +120,16 @@ class Repository:
         self.messages.create_index([("subject", 1), ("messageId", 1)], unique=True)
         self.messages.create_index([("createdAt", 1)], expireAfterSeconds=7200)
 
+        # T09: durable event log (outbox) + per-consumer inbox
+        self.db["event_log"].create_index([("subject", 1), ("createdAt", 1)], name="event_log_subject_createdAt")
+        self.db["event_log"].create_index(
+            [("publishedAt", 1)], name="event_log_unpublished", partialFilterExpression={"publishedAt": None}
+        )
+        self.db["event_inbox"].create_index(
+            [("consumer", 1), ("state", 1)], name="event_inbox_consumer_state"
+        )
+        self.db["event_inbox"].create_index([("eventId", 1)], name="event_inbox_eventId")
+
         self.guild_invite_snapshots.create_index([("guildId", 1)], unique=True)
         self.guild_invite_snapshots.create_index([("capturedAt", -1)])
 
