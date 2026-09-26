@@ -1,0 +1,27 @@
+# T01: интеграционный стенд для тестов (реальная Mongo/NATS, без связи с production).
+# Отличия от dev/prod compose: фиксированное project name (свои volumes/networks),
+# только loopback-порты, никаких внешних volume (dsbot-media) и никаких портов
+# прод-инстансов (27017 локальный Windows-mongod, 27018 dev-стенд веба).
+# Стенд обслуживает оба репозитория: web-интеграционные тесты ходят на тот же
+# TEST_MONGO_URI=mongodb://127.0.0.1:27099.
+#
+# Запуск:  docker compose -f docker-compose.test.yml up -d
+# Очистка: docker compose -f docker-compose.test.yml down -v
+name: dsbot-teststand
+services:
+  mongo-test:
+    image: mongo:7
+    container_name: dsbot-test-mongo
+    ports:
+      - "127.0.0.1:27099:27017"
+    volumes:
+      - mongo-test-data:/data/db
+
+  nats-test:
+    image: nats:2
+    container_name: dsbot-test-nats
+    ports:
+      - "127.0.0.1:14222:4222"
+
+volumes:
+  mongo-test-data:
