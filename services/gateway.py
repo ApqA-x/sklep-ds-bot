@@ -2275,7 +2275,8 @@ async def main() -> None:
         sent_at = _ensure_utc(getattr(message, "created_at", None))
         try:
             attachments_meta = await store_attachments(
-                cfg.media_dir, guild_id, list(getattr(message, "attachments", []) or []), sent_at
+                cfg.media_dir, guild_id, list(getattr(message, "attachments", []) or []), sent_at,
+                min_free_bytes=cfg.media_min_free_bytes,
             )
         except Exception:
             logger.exception("attachment store failed guild=%s message=%s", guild_id, _message_id(message))
@@ -2432,6 +2433,41 @@ async def main() -> None:
             )
         except Exception:
             logger.exception("message delete activity publish failed guild=%s message=%s", guild_id, _raw_payload_message_id(payload))
+
+    @client.event
+    async def on_raw_bulk_message_delete(payload: object) -> None:
+        # T16 (п.5 плана): Discord purge пачкой тоже должен оставлять tombstone —
+        # иначе UI показывает удалённые сообщения как живые. Данные не удаляются (D07).
+        guild_id = _raw_payload_guild_id(payload)
+        if not _guild_allowed(cfg.discord_guild_id, guild_id):
+            return
+        channel_id = _raw_payload_channel_id(payload)
+        message_ids = [
+            str(message_id).strip()
+            for message_id in (getattr(payload, "ids", None) or [])
+            if str(message_id or "").strip()
+        ]
+        if not message_ids:
+            return
+        for message_id in message_ids:
+            forget_message_snapshot(channel_id, message_id)
+        try:
+            marked = repo.mark_chat_messages_bulk_deleted(
+                None,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_ids=message_ids,
+                deleted_at=_utc_now(),
+            )
+            logger.info(
+                "bulk message delete guild=%s channel=%s ids=%d tombstoned=%d",
+                guild_id, channel_id, len(message_ids), marked,
+            )
+        except Exception:
+            logger.exception(
+                "chat messages bulk delete record failed guild=%s channel=%s count=%d",
+                guild_id, channel_id, len(message_ids),
+            )
 
     async def _publish_reaction_activity(payload: object, event_type: str) -> None:
         guild_id = _raw_payload_guild_id(payload)

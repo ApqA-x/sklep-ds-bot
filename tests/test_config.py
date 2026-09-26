@@ -21,6 +21,26 @@ def test_load_canonicalizes_tracking_defaults_to_all(monkeypatch: pytest.MonkeyP
     assert cfg.tracked_channel_ids == []
 
 
+def test_media_min_free_bytes_default_and_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MEDIA_MIN_FREE_BYTES", raising=False)
+    assert load_config().media_min_free_bytes == 2 * 1024 * 1024 * 1024
+
+    # 0 — осознанное отключение проверки, не «мусорное» значение
+    monkeypatch.setenv("MEDIA_MIN_FREE_BYTES", "0")
+    assert load_config().media_min_free_bytes == 0
+
+    monkeypatch.setenv("MEDIA_MIN_FREE_BYTES", "1048576")
+    assert load_config().media_min_free_bytes == 1048576
+
+
+def test_media_min_free_bytes_falls_back_on_junk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MEDIA_MIN_FREE_BYTES", "two-gb")
+    assert load_config().media_min_free_bytes == 2 * 1024 * 1024 * 1024
+
+    monkeypatch.setenv("MEDIA_MIN_FREE_BYTES", "-5")
+    assert load_config().media_min_free_bytes == 2 * 1024 * 1024 * 1024
+
+
 def test_load_uses_defaults_when_env_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MONGO_URI", "")
     monkeypatch.setenv("MONGO_DB", "")

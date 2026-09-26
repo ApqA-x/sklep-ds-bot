@@ -53,6 +53,7 @@ class FakeRepo:
     def __init__(self, auto_unmute_ids: dict[str, list[str]]) -> None:
         self.auto_unmute_ids = auto_unmute_ids
         self.db = _JournalDb()
+        self.bulk_deleted_calls: list[dict] = []
 
     def ensure_indexes(self, _ctx) -> None:
         return None
@@ -73,6 +74,12 @@ class FakeRepo:
             return settings
         self.upsert_guild_settings(_ctx, settings)
         return settings
+
+    def mark_chat_messages_bulk_deleted(self, _ctx, *, guild_id, channel_id, message_ids, deleted_at=None):
+        self.bulk_deleted_calls.append(
+            {"guild_id": guild_id, "channel_id": channel_id, "message_ids": list(message_ids)}
+        )
+        return len(message_ids)
 
 
 class FakeMongoClient:
@@ -803,6 +810,8 @@ async def _boot_gateway(monkeypatch, fake_repo: FakeRepo) -> object:
         event_max_age_seconds=3600,
         event_sweep_interval_seconds=15,
         event_max_deliver=8,
+        media_dir="",
+        media_min_free_bytes=0,
     ))
     monkeypatch.setattr(gateway, "require_event_signing_secret", lambda _secret: None)
     monkeypatch.setattr(gateway, "MongoClient", lambda _uri: fake_mongo)
@@ -830,6 +839,35 @@ def _bot_member(*, mute_members: bool = False, deafen_members: bool = False):
             deafen_members=deafen_members,
         ),
     )
+
+
+# T16 (п.5): purge пачкой обязан оставлять tombstone существующим сообщениям
+# архива — иначе UI показывает удалённое как живое. Данные не удаляются (D07).
+async def test_bulk_message_delete_tombstones(monkeypatch) -> None:
+    repo = FakeRepo({"123": ["42"]})
+    await _boot_gateway(monkeypatch, repo)
+    client = FakeClient.instances[0]
+    handler = getattr(client, "on_raw_bulk_message_delete", None)
+    assert handler is not None
+
+    payload = SimpleNamespace(guild_id=123, channel_id=555, ids=[11, 22, "  ", ""])
+    await handler(payload)
+
+    # пустые id отброшены, snowflake'ы строками, чужие гильдии не здесь
+    assert repo.bulk_deleted_calls == [
+        {"guild_id": "123", "channel_id": "555", "message_ids": ["11", "22"]}
+    ]
+
+
+async def test_bulk_message_delete_ignores_foreign_guild(monkeypatch) -> None:
+    repo = FakeRepo({"123": ["42"]})
+    await _boot_gateway(monkeypatch, repo)
+    client = FakeClient.instances[0]
+    handler = getattr(client, "on_raw_bulk_message_delete", None)
+
+    await handler(SimpleNamespace(guild_id=999, channel_id=555, ids=[11]))
+
+    assert repo.bulk_deleted_calls == []
 
 
 async def test_auto_unmute_listener_runs_when_member_is_already_muted(monkeypatch) -> None:

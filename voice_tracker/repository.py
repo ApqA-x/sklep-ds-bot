@@ -310,6 +310,29 @@ class Repository:
         )
         return True
 
+    def mark_chat_messages_bulk_deleted(
+        self,
+        _ctx: Any,
+        *,
+        guild_id: str,
+        channel_id: str,
+        message_ids: list[str],
+        deleted_at: datetime | None = None,
+    ) -> int:
+        """T16 (L07): Discord чистит ленту массово — ставим tombstone существующим
+        записям архива. Без upsert: о никогда не виденных сообщениях добавлять
+        нечего, а удаление данных — только по решению владельца (D07)."""
+        guild_id = str(guild_id or "").strip()
+        channel_id = str(channel_id or "").strip()
+        ids = [str(m).strip() for m in message_ids if str(m or "").strip()]
+        if guild_id == "" or channel_id == "" or not ids:
+            return 0
+        result = self.chat_messages.update_many(
+            {"guildId": guild_id, "channelId": channel_id, "messageId": {"$in": ids}},
+            {"$set": {"deletedAt": deleted_at or _utc_now()}},
+        )
+        return int(getattr(result, "modified_count", 0) or 0)
+
     def get_guild_settings(self, _ctx: Any, guild_id: str) -> GuildSettings | None:
         data = self.guild_settings.find_one({"_id": guild_id})
         return GuildSettings.from_mongo(data)
