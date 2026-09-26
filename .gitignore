@@ -12,3 +12,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+# T13: указатель на «что задеплоено сейчас» — артефакт хоста (сами env-файлы уже
+# закрыты правилами .env / .env.* в начале файла)
+deploy/manifest/current.json

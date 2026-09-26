@@ -20,6 +20,7 @@ dependencies = [
 test = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.23,<1",
+    "PyYAML>=6,<7",
 ]
 
 [tool.pytest.ini_options]

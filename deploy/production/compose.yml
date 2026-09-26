@@ -1,0 +1,250 @@
+# dsbot production deployment (T13).
+#
+# Инварианты (проверяются deploy/scripts/validate_compose.py через `compose config`):
+#   - только immutable image references (registry/name@sha256:<digest> из env-файла);
+#     `build:` и bind-монты кода запрещены;
+#   - наружу публикуется только ingress web, и только на loopback (реверс-прокси —
+#     снаружи); mongo/nats приложений — internal-сеть без published ports;
+#   - Mongo/NATS — выделенные контейнеры этого проекта с named volumes; переезд с
+#     Windows-host Mongo — отдельная backup/restore миграция (T14), не молчаливая
+#     смена URI;
+#   - restart policy + healthchecks + resource ceilings + log rotation;
+#   - controlplane НЕ стартует по умолчанию (ADR-0004): профиль controlplane.
+#
+# Все project/file/env пути задаёт scripts/deploy.sh; из случайного cwd не запускать.
+# Значения секретов живут только в env-файле хоста (chmod 600), не в git.
+
+name: dsbot-prod
+
+x-defaults: &app-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+  networks:
+    - dsbot-data
+  # Ожидаемый uid/gid на Linux (linux_init.sh готовит media volume под него).
+  user: "${DSBOT_UID:?set in env file}:${DSBOT_GID:?set in env file}"
+
+x-bot-env: &bot-env
+  # Зависимости фиксированы на контейнеры этого же проекта — staging/prod не могут
+  # случайно указать на чужую (в т.ч. прод) базу.
+  MONGO_URI: mongodb://mongo:27017
+  NATS_URL: nats://nats:4222
+  MEDIA_DIR: /data/media
+
+services:
+  mongo:
+    image: ${MONGO_IMAGE:?pin mongo:7 by digest in env file}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - dsbot-data
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  nats:
+    image: ${NATS_IMAGE:?pin nats:2.10-alpine by digest in env file}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - dsbot-data
+    # мониторинг-эндпоинт http://nats:8222 — только внутри internal-сети
+    command: ["-m", "8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  gateway:
+    <<: *app-defaults
+    image: ${BOT_GATEWAY_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: gateway
+    volumes:
+      # gateway ЕДИНСТВЕННЫЙ пишёт media (вложения); web читает ro
+      - media:/data/media
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  tracker:
+    <<: *app-defaults
+    image: ${BOT_TRACKER_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: tracker
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  writer:
+    <<: *app-defaults
+    image: ${BOT_WRITER_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: writer
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  commands:
+    <<: *app-defaults
+    image: ${BOT_COMMANDS_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: commands
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  activity:
+    <<: *app-defaults
+    image: ${BOT_ACTIVITY_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: activity
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  stalker:
+    <<: *app-defaults
+    image: ${BOT_STALKER_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: stalker
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # ADR-0004: controlplane (consumer новой архитектуры) НЕ входит в дефолтный
+  # релиз — активного потребителя нет; `docker compose --profile controlplane
+  # up controlplane` только осознанно. Статус Up — не основание включать.
+  controlplane:
+    <<: *app-defaults
+    profiles: ["controlplane"]
+    image: ${BOT_CONTROLPLANE_IMAGE:?}
+    env_file: .env
+    environment:
+      <<: *bot-env
+      SERVICE_NAME: controlplane
+    depends_on:
+      mongo:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  web:
+    <<: *app-defaults
+    image: ${WEB_IMAGE:?}
+    env_file: .env
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      MEDIA_DIR: /data/media
+      WEB_ENV: production
+    ports:
+      # единственный ingress; TLS/публичный интерфейс — реверс-прокси снаружи
+      - "${WEB_INGRESS_BIND:-127.0.0.1}:${WEB_HOST_PORT:-8000}:8000"
+    volumes:
+      - media:/data/media:ro
+    depends_on:
+      mongo:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+volumes:
+  mongo-data:
+    name: ${MONGO_VOLUME:?name mongo volume explicitly (per-environment; linux_init.sh)}
+  media:
+    name: ${MEDIA_VOLUME:?name media volume explicitly (linux_init.sh chowns it)}
+
+networks:
+  dsbot-data:
+    internal: true
