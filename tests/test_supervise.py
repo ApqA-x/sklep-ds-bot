@@ -1,11 +1,17 @@
 """T12: supervisor, heartbeat и healthcheck CLI на ботовской стороне."""
 from __future__ import annotations
 
+import ast
 import asyncio
+import pathlib
+import re
+import sys
+import types
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from voice_tracker import healthcheck as hc
 from voice_tracker import supervise
 from voice_tracker.healthcheck import evaluate, main as healthcheck_main, worker_for
 
@@ -46,13 +52,15 @@ async def test_failing_loop_respawns_and_marks_unhealthy() -> None:
         raise RuntimeError("boom")
 
     sup.spawn("sweep", dying, critical=True)
-    await asyncio.sleep(0.5)
-    assert calls["n"] >= 3
-    assert sup.unhealthy_tasks() == ["sweep"]
-    snap = sup.snapshot()[0]
-    assert snap["lastErrorType"] == "RuntimeError"
-    assert snap["critical"] is True
-    await sup.shutdown()
+    try:
+        await asyncio.sleep(0.5)
+        assert calls["n"] >= 3
+        assert sup.unhealthy_tasks() == ["sweep"]
+        snap = sup.snapshot()[0]
+        assert snap["lastErrorType"] == "RuntimeError"
+        assert snap["critical"] is True
+    finally:
+        await sup.shutdown()
 
 
 async def test_loop_that_returns_is_treated_as_failure() -> None:
@@ -62,9 +70,11 @@ async def test_loop_that_returns_is_treated_as_failure() -> None:
         return
 
     sup.spawn("quitter", quits, critical=True)
-    await asyncio.sleep(0.3)
-    assert sup.unhealthy_tasks() == ["quitter"]
-    await sup.shutdown()
+    try:
+        await asyncio.sleep(0.3)
+        assert sup.unhealthy_tasks() == ["quitter"]
+    finally:
+        await sup.shutdown()
 
 
 async def test_beat_marks_progress_and_clears_failures() -> None:
@@ -75,11 +85,13 @@ async def test_beat_marks_progress_and_clears_failures() -> None:
         raise RuntimeError("boom")
 
     sup.spawn("flaky-loop", flaky, critical=True)
-    await asyncio.sleep(0.3)
-    # beat вызывается на каждом запуске до падения → серия не накапливается
-    assert sup.unhealthy_tasks() == []
-    assert sup._handles["flaky-loop"].restarts >= 2
-    await sup.shutdown()
+    try:
+        await asyncio.sleep(0.3)
+        # beat вызывается на каждом запуске до падения → серия не накапливается
+        assert sup.unhealthy_tasks() == []
+        assert sup._handles["flaky-loop"].restarts >= 2
+    finally:
+        await sup.shutdown()
 
 
 async def test_shutdown_cancels_and_awaits_drain() -> None:
@@ -315,3 +327,690 @@ def test_single_writer_claim_and_release() -> None:
     assert coll.docs["gateway"]["stopped"] is True
     supervise.claim_single_writer(real_db, "gateway", "host-b")
     assert coll.docs["gateway"]["instance"] == "host-b"
+
+
+# ============================================================ R26-10 (V26-24)
+# явные health contracts: fail-closed по loops/deps, startup grace, idle healthy
+
+
+def _loop_entry(
+    loop: hc.LoopContract,
+    now: datetime,
+    *,
+    running: bool = True,
+    failures: int = 0,
+    tick: object = "auto",
+) -> dict:
+    if tick == "auto":
+        tick = (
+            now.isoformat(timespec="seconds")
+            if loop.max_progress_age_seconds is not None
+            else None
+        )
+    return {
+        "name": loop.name,
+        "critical": loop.critical,
+        "running": running,
+        "restarts": 0,
+        "consecutiveFailures": failures,
+        "lastErrorType": None,
+        "lastErrorAt": None,
+        "lastTickAt": tick,
+        "startedAt": now.isoformat(timespec="seconds"),
+    }
+
+
+def _deps_for(contract: hc.HealthContract) -> dict:
+    deps: dict = {}
+    if "nats" in contract.deps:
+        deps["nats"] = {"connected": True, "reconnecting": False, "closed": False}
+    if "discord" in contract.deps:
+        deps["discord"] = {"closed": False, "latencyMs": 40.0}
+    return deps
+
+
+def _healthy_doc(
+    contract: hc.HealthContract,
+    now: datetime,
+    *,
+    age: float = 5,
+    started_age: float = 600,  # по умолчанию вне startup grace: проверяем steady state
+) -> dict:
+    return {
+        "worker": contract.worker,
+        "instance": "host-a",
+        "started_at": now - timedelta(seconds=started_age),
+        "updated_at": now - timedelta(seconds=age),
+        "loops": [_loop_entry(l, now) for l in contract.loops],
+        "deps": _deps_for(contract),
+    }
+
+
+def _set_loop(doc: dict, name: str, **changes: object) -> None:
+    # алиасы коротких имён тестов → реальные ключи snapshot/evaluate (R26-10):
+    # production-проверка читает consecutiveFailures/lastTickAt, не «failures/tick»
+    if "tick" in changes:
+        changes["lastTickAt"] = changes.pop("tick")
+    if "failures" in changes:
+        changes["consecutiveFailures"] = changes.pop("failures")
+    for entry in doc["loops"]:
+        if entry["name"] == name:
+            entry.update(changes)
+            return
+    raise AssertionError(f"loop {name} not in doc")
+
+
+CONTRACT_WORKERS = (
+    "tracker",
+    "writer",
+    "gateway",
+    "activity",
+    "stalker",
+    "commands",
+    "dsbot-controlplane",
+)
+
+SPAWN_NAMES = {
+    "tracker": {"tracker-event-sweep"},
+    "writer": {"writer-event-sweep"},
+    "gateway": {
+        "gateway-event-sweep",
+        "gateway-managed-voice-reconcile",
+        "gateway-voice-session-reaper",
+        "gateway-invite-snapshot-refresh",
+        "gateway-invite-metadata-reconcile",
+        "gateway-member-role-reconcile",
+    },
+    "activity": {"activity-event-sweep"},
+    "stalker": {"stalker-event-sweep"},
+    "commands": set(),
+    "dsbot-controlplane": set(),
+}
+
+
+def test_v26_24_contracts_cover_seven_workers_with_service_spawn_names() -> None:
+    assert len(CONTRACT_WORKERS) == 7
+    for worker in CONTRACT_WORKERS:
+        contract = hc.contract_for(worker)
+        assert contract is not None and contract.worker == worker
+        names = {loop.name for loop in contract.loops}
+        assert f"{worker}-heartbeat" in names
+        assert names - {f"{worker}-heartbeat"} == SPAWN_NAMES[worker]
+    # controlplane: SERVICE-алиас ведёт к своему контракту
+    assert hc.contract_for(worker_for("controlplane")) is not None
+    # unknown identity нет контракта → CLI откажет (fail-closed)
+    assert hc.contract_for("mystery") is None
+
+
+def test_v26_24_fresh_heartbeat_with_dead_required_loop_fails() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("gateway")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    _set_loop(doc, "gateway-voice-session-reaper", running=False)
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "not running" in detail and "gateway-voice-session-reaper" in detail
+
+
+def test_v26_24_required_loop_with_failures_fails() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    _set_loop(doc, "tracker-event-sweep", failures=2)
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "failing" in detail
+    # non-critical петля может иметь ошибки, не роняя сервис
+    gcontract = hc.contract_for("gateway")
+    assert gcontract is not None
+    gdoc = _healthy_doc(gcontract, now)
+    _set_loop(gdoc, "gateway-invite-snapshot-refresh", failures=4)
+    ok, _ = evaluate(gdoc, now, 90.0, gcontract)
+    assert ok
+
+
+def test_v26_24_stale_progress_fails_after_grace() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("writer")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    stale = (now - timedelta(seconds=300)).isoformat(timespec="seconds")
+    _set_loop(doc, "writer-heartbeat", tick=stale)
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "progress stale" in detail and "writer-heartbeat" in detail
+    # sweep с beat давно молчит → тоже stale
+    doc2 = _healthy_doc(contract, now)
+    _set_loop(doc2, "writer-event-sweep", tick=stale)
+    ok2, detail2 = evaluate(doc2, now, 90.0, contract)
+    assert not ok2 and "progress stale" in detail2
+
+
+def test_v26_24_startup_grace_tolerates_missing_ticks_then_expires() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("activity")
+    assert contract is not None
+    doc = _healthy_doc(contract, now, started_age=10)
+    for entry in doc["loops"]:
+        entry["lastTickAt"] = None
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert ok and "startup-grace" in detail
+    # тот же снапшот после истечения grace — fail-closed на missing tick
+    late = _healthy_doc(contract, now, started_age=contract.startup_grace_seconds + 60)
+    for entry in late["loops"]:
+        entry["lastTickAt"] = None
+    ok, detail = evaluate(late, now, 90.0, contract)
+    assert not ok and "no progress tick" in detail
+    # grace не прощает мёртвую петлю и оторванные зависимости
+    dead = _healthy_doc(contract, now, started_age=1)
+    _set_loop(dead, "activity-event-sweep", running=False)
+    ok, _ = evaluate(dead, now, 90.0, contract)
+    assert not ok
+
+
+def test_v26_24_nats_disconnected_and_discord_closed_fail() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("stalker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["nats"] = {"connected": False, "reconnecting": True, "closed": False}
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "nats" in detail
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["nats"] = {"connected": None, "reconnecting": None, "closed": None}
+    assert not evaluate(doc, now, 90.0, contract)[0]  # unknown state = invalid
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["discord"] = {"closed": True, "latencyMs": None}
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "discord" in detail
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["discord"] = {"closed": None, "latencyMs": None}
+    assert not evaluate(doc, now, 90.0, contract)[0]
+
+
+def test_v26_24_idle_without_user_events_is_healthy() -> None:
+    # в доке нет никаких пользовательских событий — только петли/зависимости;
+    # тишина R03: fresh heartbeat + healthy loops = OK
+    now = datetime.now(UTC)
+    for worker in CONTRACT_WORKERS:
+        contract = hc.contract_for(worker)
+        assert contract is not None
+        ok, detail = evaluate(_healthy_doc(contract, now), now, 90.0, contract)
+        assert ok, f"{worker}: {detail}"
+        assert "fresh" in detail
+
+
+def test_v26_24_unknown_or_missing_snapshot_fields_are_invalid() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    base = _healthy_doc(contract, now)
+
+    doc = dict(base)
+    doc.pop("loops")
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "loops" in detail
+
+    doc = _healthy_doc(contract, now)
+    doc["loops"].append("garbage")
+    assert not evaluate(doc, now, 90.0, contract)[0]
+
+    doc = _healthy_doc(contract, now)
+    doc["loops"] = [l for l in doc["loops"] if l["name"] != "tracker-event-sweep"]
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "missing" in detail
+
+    doc = _healthy_doc(contract, now)
+    _set_loop(doc, "tracker-event-sweep", running="yes")
+    assert not evaluate(doc, now, 90.0, contract)[0]
+    _set_loop(doc, "tracker-event-sweep", running=True, consecutiveFailures="0")
+    assert not evaluate(doc, now, 90.0, contract)[0]
+    _set_loop(doc, "tracker-heartbeat", tick="not-a-date")
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "lastTickAt" in detail
+
+    doc = _healthy_doc(contract, now)
+    doc.pop("deps")
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "deps" in detail
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["nats"] = "up"
+    assert not evaluate(doc, now, 90.0, contract)[0]
+
+    # старый док без started_at: grace считается от updated_at, но живые тики ОК
+    doc = _healthy_doc(contract, now)
+    doc.pop("started_at")
+    assert evaluate(doc, now, 90.0, contract)[0]
+
+
+def test_v26_24_stale_heartbeat_short_circuits_contract() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("gateway")
+    assert contract is not None
+    doc = _healthy_doc(contract, now, age=600)
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "stale" in detail
+
+
+# ============================================================ R26-10 (V26-25)
+# Supervisor: итерации успех/неуспех внутри while; heartbeat life ≠ progress;
+# CLI identity/timeouts/safe errors.
+
+
+async def test_v25_fail_and_beat_separate_loop_life_from_progress() -> None:
+    sup = supervise.Supervisor()
+
+    async def forever() -> None:
+        await asyncio.sleep(3600)
+
+    sup.spawn("writer-heartbeat", forever, critical=True)
+    try:
+        await asyncio.sleep(0.05)
+        snap = sup.snapshot()[0]
+        assert snap["running"] is True and snap["startedAt"] is not None  # жизнь
+        assert snap["lastTickAt"] is None and snap["consecutiveFailures"] == 0
+
+        sup.fail("writer-heartbeat", RuntimeError("auth mongodb://user:secret@host"))
+        snap = sup.snapshot()[0]
+        assert snap["running"] is True  # цикл жив, respawn не триггерится
+        assert snap["restarts"] == 0
+        assert snap["consecutiveFailures"] == 1
+        assert snap["lastErrorType"] == "RuntimeError"
+        assert "mongodb" not in str(snap["lastErrorType"])
+        assert snap["lastTickAt"] is None  # успешного прогресса так и не было
+
+        sup.fail("writer-heartbeat", "write failed mongodb://user:pass@host/db")
+        snap = sup.snapshot()[0]
+        assert snap["consecutiveFailures"] == 2
+        label = str(snap["lastErrorType"])
+        # метка остаётся «плоской»: без пробелов, URL-разделителей и обрезана по длине
+        assert re.fullmatch(r"[0-9A-Za-z_.-]+", label)
+        assert "://" not in label and " " not in label
+        assert len(label) <= 64
+
+        # восстановление: следующая успешная итерация сбрасывает серию, ошибка видна
+        sup.beat("writer-heartbeat")
+        snap = sup.snapshot()[0]
+        assert snap["consecutiveFailures"] == 0
+        assert snap["lastTickAt"] is not None
+        assert snap["lastErrorAt"] is not None
+        assert snap["running"] is True
+    finally:
+        await sup.shutdown()
+    # unknown task name — no-op, не падение
+    sup.fail("no-such-loop", "boom")
+
+
+async def test_v25_recovery_clears_unhealthy_tasks() -> None:
+    sup = supervise.Supervisor(unhealthy_after=2)
+
+    async def forever() -> None:
+        await asyncio.sleep(3600)
+
+    sup.spawn("sweep", forever, critical=True)
+    try:
+        await asyncio.sleep(0.05)
+        sup.fail("sweep", "MongoUnavailable")
+        sup.fail("sweep", "MongoUnavailable")
+        assert sup.unhealthy_tasks() == ["sweep"]
+        contract = hc.contract_for("tracker")
+        assert contract is not None
+        doc = _healthy_doc(contract, datetime.now(UTC))
+        _set_loop(doc, "tracker-event-sweep", failures=2)
+        assert not evaluate(doc, datetime.now(UTC), 90.0, contract)[0]
+        sup.beat("sweep")
+        assert sup.unhealthy_tasks() == []
+        doc_ok = _healthy_doc(contract, datetime.now(UTC))
+        assert evaluate(doc_ok, datetime.now(UTC), 90.0, contract)[0]
+    finally:
+        await sup.shutdown()
+
+
+async def test_v25_heartbeat_doc_marks_started_at_and_iteration_failure() -> None:
+    db = RecordingDB()
+    sup = supervise.Supervisor()
+    hb = supervise.Heartbeat(db, "writer", sup, interval_seconds=0.02)
+    supervise.attach(sup, hb)
+    try:
+        await asyncio.sleep(0.08)
+        doc = db.coll.docs["writer"]
+        assert doc["started_at"] == supervise.PROCESS_STARTED_AT
+        entry = next(l for l in doc["loops"] if l["name"] == "writer-heartbeat")
+        assert entry["running"] is True and entry["lastTickAt"] is not None
+        assert entry["consecutiveFailures"] == 0
+
+        db.coll.fail_times = 5  # записи падают: цикл жив, прогресса нет
+        await asyncio.sleep(0.08)
+        snap = next(l for l in sup.snapshot() if l["name"] == "writer-heartbeat")
+        assert snap["running"] is True
+        assert snap["consecutiveFailures"] >= 1
+        assert snap["lastErrorType"] == "RuntimeError"
+        assert "secret" not in str(snap["lastErrorType"])
+        assert snap["lastTickAt"] is not None  # прошлый успех ≠ текущая жизнь
+    finally:
+        await sup.shutdown()
+
+
+def _fake_pymongo(monkeypatch: pytest.MonkeyPatch, doc: dict | None, error: Exception | None = None):
+    calls: dict = {}
+
+    class _Collection:
+        def find_one(self, flt):
+            calls["filter"] = flt
+            if error is not None:
+                raise error
+            return doc
+
+    class _DB:
+        def __getitem__(self, name: str):
+            calls["collection"] = name
+            return _Collection()
+
+    class _Client:
+        def __init__(self, uri: str, **kwargs):
+            calls["uri"] = uri
+            calls["kwargs"] = kwargs
+
+        def __getitem__(self, name: str):
+            return _DB()
+
+        def close(self) -> None:
+            calls["closed"] = True
+
+    module = types.ModuleType("pymongo")
+    module.MongoClient = _Client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pymongo", module)
+    return calls
+
+
+def _mongo_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONGO_URI", "mongodb://user:secret@host:27017")
+    monkeypatch.setenv("MONGO_DB", "botdb")
+    monkeypatch.delenv("SERVICE_NAME", raising=False)
+    monkeypatch.delenv("SERVICE", raising=False)
+
+
+def test_v25_cli_service_identity_precedence_and_alias(monkeypatch, capsys) -> None:
+    _mongo_env(monkeypatch)
+    now = datetime.now(UTC)
+    # SERVICE_NAME > SERVICE
+    monkeypatch.setenv("SERVICE", "tracker")
+    monkeypatch.setenv("SERVICE_NAME", "gateway")
+    calls = _fake_pymongo(monkeypatch, _healthy_doc(hc.contract_for("gateway"), now))
+    assert healthcheck_main([]) == 0
+    assert calls["filter"] == {"worker": "gateway"}
+    assert calls["collection"] == "bot_runtime_heartbeats"
+    # явный --service бьёт окружение
+    calls = _fake_pymongo(monkeypatch, _healthy_doc(hc.contract_for("writer"), now))
+    assert healthcheck_main(["--service", "writer"]) == 0
+    assert calls["filter"] == {"worker": "writer"}
+    # controlplane → dsbot-controlplane
+    calls = _fake_pymongo(
+        monkeypatch, _healthy_doc(hc.contract_for("dsbot-controlplane"), now)
+    )
+    assert healthcheck_main(["--service", "controlplane"]) == 0
+    assert calls["filter"] == {"worker": "dsbot-controlplane"}
+    # ничто не задано → tracker
+    monkeypatch.delenv("SERVICE")
+    monkeypatch.delenv("SERVICE_NAME")
+    calls = _fake_pymongo(monkeypatch, _healthy_doc(hc.contract_for("tracker"), now))
+    assert healthcheck_main([]) == 0
+    assert calls["filter"] == {"worker": "tracker"}
+    assert "secret" not in capsys.readouterr().out
+
+
+def test_v25_cli_mongo_timeouts_are_bounded(monkeypatch) -> None:
+    _mongo_env(monkeypatch)
+    calls = _fake_pymongo(monkeypatch, _healthy_doc(hc.contract_for("tracker"), datetime.now(UTC)))
+    assert healthcheck_main([]) == 0
+    kwargs = calls["kwargs"]
+    assert 0 < kwargs["serverSelectionTimeoutMS"] <= 3000
+    assert 0 < kwargs["connectTimeoutMS"] <= 10000
+    assert 0 < kwargs["socketTimeoutMS"] <= 10000
+
+
+def test_v25_cli_unhealthy_exit_code_and_safe_errors(monkeypatch, capsys) -> None:
+    _mongo_env(monkeypatch)
+    now = datetime.now(UTC)
+    contract = hc.contract_for("gateway")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    _set_loop(doc, "gateway-event-sweep", running=False)
+    _fake_pymongo(monkeypatch, doc)
+    assert healthcheck_main(["--service", "gateway"]) == 1
+    out = capsys.readouterr().out
+    assert "gateway-event-sweep" in out and "not running" in out
+    assert "mongodb://" not in out
+
+    _fake_pymongo(
+        monkeypatch,
+        None,
+        error=RuntimeError("auth failed mongodb://user:secretpass@host/db"),
+    )
+    assert healthcheck_main([]) == 1
+    err = capsys.readouterr().err
+    assert "RuntimeError" in err
+    assert "mongodb://" not in err and "secretpass" not in err
+
+
+def test_v25_cli_unknown_service_fails_closed_without_db(monkeypatch, capsys) -> None:
+    _mongo_env(monkeypatch)
+    calls = _fake_pymongo(monkeypatch, None)
+    assert healthcheck_main(["--service", "mystery"]) == 1
+    err = capsys.readouterr().err
+    assert "contract" in err and "mystery" in err
+    assert "filter" not in calls  # до Mongo не доходило: неизвестная identity = invalid
+
+
+# ============================================================ R26-10.3
+# production loops: проглоченное исключение наблюдаемо (fail), успех — beat;
+# контракты: progress-age по реальным интервалам, non-critical не гейтит readiness.
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+# имена spawn-ов, найденные в services/*.py (сверено с контрактами выше)
+SERVICE_LOOP_FILES = {
+    "tracker": ["tracker-event-sweep"],
+    "writer": ["writer-event-sweep"],
+    "activity": ["activity-event-sweep"],
+    "stalker": ["stalker-event-sweep"],
+    "gateway": [
+        "gateway-event-sweep",
+        "gateway-managed-voice-reconcile",
+        "gateway-voice-session-reaper",
+        "gateway-invite-snapshot-refresh",
+        "gateway-invite-metadata-reconcile",
+        "gateway-member-role-reconcile",
+    ],
+}
+
+
+def _service_loop_signal_calls(service: str) -> tuple[set[str], set[str], set[str]]:
+    """(spawned, beaten, failed) — имена loops, для которых в исходниках сервиса
+    есть supervisor.spawn/beat/fail с этим name-аргументом (AST, не grep)."""
+    tree = ast.parse((REPO_ROOT / "services" / f"{service}.py").read_text(encoding="utf-8"))
+    spawned: set[str] = set()
+    beaten: set[str] = set()
+    failed: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if not isinstance(node.func.value, ast.Name) or node.func.value.id != "supervisor":
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant):
+            loop_name = node.args[0].value
+        else:
+            continue
+        if node.func.attr == "spawn":
+            spawned.add(loop_name)
+        elif node.func.attr == "beat":
+            beaten.add(loop_name)
+        elif node.func.attr == "fail":
+            failed.add(loop_name)
+    return spawned, beaten, failed
+
+
+@pytest.mark.parametrize("service", sorted(SERVICE_LOOP_FILES))
+def test_v26_10_3_every_supervised_loop_is_instrumented_fail_and_beat(service: str) -> None:
+    spawned, beaten, failed = _service_loop_signal_calls(service)
+    assert spawned == set(SERVICE_LOOP_FILES[service])
+    # каждый spawn-нутый цикл отмечает и неуспех итерации, и успех: иначе
+    # consecutiveFailures/lastTickAt в heartbeat никогда не появятся
+    assert beaten >= spawned, f"{service}: loops without beat(): {spawned - beaten}"
+    assert failed >= spawned, f"{service}: loops without fail(): {spawned - failed}"
+
+
+def test_v26_10_3_dockerfile_sets_service_and_healthcheck_relies_on_precedence() -> None:
+    # Точка 6: Dockerfile запекает только ENV SERVICE (без SERVICE_NAME);
+    # healthcheck без --service обязан резолвить identity по SERVICE.
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "ENV SERVICE=${SERVICE}" in dockerfile
+    assert "SERVICE_NAME" not in dockerfile
+    assert "python -m voice_tracker.healthcheck" in dockerfile
+    # precedence: SERVICE_NAME бьёт SERVICE, SERVICE работает без SERVICE_NAME
+    assert hc.resolve_service(None, {"SERVICE_NAME": "gateway", "SERVICE": "tracker"}) == "gateway"
+    assert hc.resolve_service(None, {"SERVICE": "writer"}) == "writer"
+    assert hc.resolve_service(None, {}) == "tracker"
+
+
+async def test_v26_10_3_swallowed_exception_raises_failures_then_success_resets() -> None:
+    """Ровно паттерн production-loop: исключение внутри while проглатывается,
+    отмечается fail(); полностью успешная итерация — beat()."""
+    sup = supervise.Supervisor()
+    ok_iterations = {"n": 0}
+    fail_next = {"remaining": 2}
+
+    async def sweep_like() -> None:
+        # бесконечный while с try/except, как в services/*.py
+        while True:
+            await asyncio.sleep(0.01)
+            try:
+                if fail_next["remaining"] > 0:
+                    fail_next["remaining"] -= 1
+                    raise RuntimeError("mongo writePreference unavailable")
+                ok_iterations["n"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                sup.fail("writer-event-sweep", exc)
+                continue
+            sup.beat("writer-event-sweep")
+
+    sup.spawn("writer-event-sweep", sweep_like, critical=True)
+    try:
+        await asyncio.sleep(0.2)
+        snap = sup._handles["writer-event-sweep"].snapshot()
+        assert snap["running"] is True  # цикл не умирал: respawn не при чём
+        assert snap["restarts"] == 0
+        # две проглоченные ошибки подняли серию ровно на 2 (не дублируется)
+        # и не «съели» успех последующих итераций:
+        assert ok_iterations["n"] > 0
+        assert snap["consecutiveFailures"] == 0  # beat после успеха сбросил
+        assert snap["lastTickAt"] is not None  # и обновил отметку прогресса
+        assert snap["lastErrorType"] == "RuntimeError"
+        assert snap["lastErrorAt"] is not None
+    finally:
+        await sup.shutdown()
+
+
+async def test_v26_10_3_persistent_failures_unhealthy_then_recovery_healthy() -> None:
+    """fail() на каждой итерации → unhealthy_tasks; beat() → снова ровно 0."""
+    sup = supervise.Supervisor(unhealthy_after=3)
+
+    async def forever() -> None:
+        await asyncio.sleep(3600)
+
+    sup.spawn("tracker-event-sweep", forever, critical=True)
+    try:
+        assert sup.unhealthy_tasks() == []
+        for _ in range(3):
+            sup.fail("tracker-event-sweep", RuntimeError("nats down"))
+        assert sup.unhealthy_tasks() == ["tracker-event-sweep"]
+        contract = hc.contract_for("tracker")
+        assert contract is not None
+        now = datetime.now(UTC)
+        doc = _healthy_doc(contract, now)
+        _set_loop(doc, "tracker-event-sweep", failures=3, lastErrorType="RuntimeError")
+        ok, detail = evaluate(doc, now, 90.0, contract)
+        assert not ok and "failing" in detail
+        # восстановление наблюдаемо: успешная итерация вернула счётчик в 0
+        sup.beat("tracker-event-sweep")
+        assert sup.unhealthy_tasks() == []
+        doc_ok = _healthy_doc(contract, now)
+        assert evaluate(doc_ok, now, 90.0, contract)[0]
+    finally:
+        await sup.shutdown()
+
+
+def test_v26_10_3_every_critical_loop_has_progress_age_contract() -> None:
+    """Все mandatory critical loops застрахованы от «живой, но залипший» —
+    у каждого задан max_progress_age_seconds; non-critical — явно безгейтны."""
+    for worker in CONTRACT_WORKERS:
+        contract = hc.contract_for(worker)
+        assert contract is not None
+        for loop in contract.loops:
+            if loop.critical:
+                assert loop.max_progress_age_seconds is not None, (worker, loop.name)
+                assert loop.max_progress_age_seconds > 0
+            else:
+                assert loop.max_progress_age_seconds is None, (worker, loop.name)
+    # heartbeat: 15s интервал × запас; sweep 15..60s: 180s; reconcile 5s: 90s;
+    # reaper первый тик 90+120s: 300s
+    assert hc.HEARTBEAT_LOOP_PROGRESS_AGE_SECONDS > 3 * 15
+    assert hc.EVENT_SWEEP_PROGRESS_AGE_SECONDS >= 3 * 60
+    assert hc.VOICE_RECONCILE_PROGRESS_AGE_SECONDS > 5 * 3
+    assert hc.VOICE_REAPER_PROGRESS_AGE_SECONDS > 90 + 120
+
+
+def test_v26_10_3_long_intervals_are_not_stale_before_their_time() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("gateway")
+    assert contract is not None
+    ages = {l.name: l.max_progress_age_seconds for l in contract.loops}
+    doc = _healthy_doc(contract, now)
+    # каждый critical loop на границе «чуть старше своего интервала, но внутри
+    # договора» — не stale (запас есть, false positive запрещён)
+    _set_loop(doc, "gateway-event-sweep", tick=(now - timedelta(seconds=100)).isoformat(timespec="seconds"))
+    _set_loop(doc, "gateway-managed-voice-reconcile", tick=(now - timedelta(seconds=45)).isoformat(timespec="seconds"))
+    _set_loop(doc, "gateway-voice-session-reaper", tick=(now - timedelta(seconds=250)).isoformat(timespec="seconds"))
+    _set_loop(doc, "gateway-heartbeat", tick=(now - timedelta(seconds=40)).isoformat(timespec="seconds"))
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert ok, detail
+    # и каждый из них просрочен за пределами договора
+    for name in (
+        "gateway-event-sweep",
+        "gateway-managed-voice-reconcile",
+        "gateway-voice-session-reaper",
+        "gateway-heartbeat",
+    ):
+        overdue = _healthy_doc(contract, now)
+        limit = ages[name]
+        _set_loop(
+            overdue, name, tick=(now - timedelta(seconds=limit + 30)).isoformat(timespec="seconds")
+        )
+        ok, detail = evaluate(overdue, now, 90.0, contract)
+        assert not ok and "progress stale" in detail and name in detail, (name, detail)
+
+
+def test_v26_10_3_noncritical_loops_never_gate_readiness() -> None:
+    """Non-critical invite/member loops: падают, молчат или отсутствуют как
+    «running» — readiness не снимается (иначе это были бы critical)."""
+    now = datetime.now(UTC)
+    contract = hc.contract_for("gateway")
+    assert contract is not None
+    noncritical = [l.name for l in contract.loops if not l.critical]
+    assert set(noncritical) == {
+        "gateway-invite-snapshot-refresh",
+        "gateway-invite-metadata-reconcile",
+        "gateway-member-role-reconcile",
+    }
+    for name in noncritical:
+        for changes in (
+            {"running": False},
+            {"failures": 9},
+            {"tick": None},
+            {"tick": (now - timedelta(days=1)).isoformat(timespec="seconds")},
+        ):
+            doc = _healthy_doc(contract, now)
+            _set_loop(doc, name, **changes)
+            ok, detail = evaluate(doc, now, 90.0, contract)
+            assert ok, (name, changes, detail)

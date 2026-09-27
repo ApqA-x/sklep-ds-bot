@@ -255,6 +255,10 @@ async def main() -> None:
         # subject — хендлер всегда получает payload своего типа, без диспетчера.
         while True:
             await asyncio.sleep(cfg.event_sweep_interval_seconds)
+            # R26-10.3: у итерации две подоперации (subject-ы). Ошибка любой из
+            # них — неуспешная итерация ровно один раз (не удваиваем серию),
+            # успех обеих — beat.
+            first_error: Exception | None = None
             for subject, handler in (
                 (domain.SUBJECT_VOICE_EVENT, handle_voice),
                 (domain.SUBJECT_ACTIVITY_EVENT, handle_activity),
@@ -273,8 +277,14 @@ async def main() -> None:
                         logger.info("stalker event sweep subject=%s delivered=%s", subject, n)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
                     logger.exception("stalker event sweep failed subject=%s", subject)
+            if first_error is not None:
+                supervisor.fail("stalker-event-sweep", first_error)
+            else:
+                supervisor.beat("stalker-event-sweep")
 
     # T12: цикл догрузки под надзором + heartbeat; shutdown — drain, затем
     # закрытие Discord/NATS/Mongo клиентов.

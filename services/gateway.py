@@ -2718,9 +2718,14 @@ async def main() -> None:
     async def sweep_pending() -> None:
         while True:
             await asyncio.sleep(60)
+            # R26-10.3: две подоперации (pending-delivery и журнал событий).
+            # beat — только когда вся итерация прошла без исключений; серия
+            # отказов растёт ровно на 1 за итерацию, а не за подоперацию.
+            first_error: Exception | None = None
             try:
                 await _deliver_pending(client, repo)
-            except Exception:
+            except Exception as exc:
+                first_error = exc
                 logger.exception("pending summary sweep failed")
             # T09: журнал — republish непринятых транспортом событий gateway и
             # догрузка summary.ready, пропущенных по wire (E01/E02)
@@ -2742,40 +2747,58 @@ async def main() -> None:
                 )
                 if n:
                     logger.info("gateway event sweep delivered=%s", n)
-            except Exception:
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
                 logger.exception("gateway event journal sweep failed")
+            if first_error is not None:
+                supervisor.fail("gateway-event-sweep", first_error)
+            else:
+                supervisor.beat("gateway-event-sweep")
 
     async def reconcile_managed_voice() -> None:
         while True:
             await asyncio.sleep(5)
             try:
                 await voice_controller.reconcile()
-            except Exception:
+            except Exception as exc:
+                supervisor.fail("gateway-managed-voice-reconcile", exc)
                 logger.exception("managed voice reconciliation iteration failed guild=%s", cfg.discord_guild_id)
+            else:
+                supervisor.beat("gateway-managed-voice-reconcile")
 
     async def refresh_invite_snapshots() -> None:
         while True:
             await asyncio.sleep(max(5, invite_attribution.snapshot_refresh_seconds))
             try:
                 await invite_attribution.refresh_snapshot()
-            except Exception:
+            except Exception as exc:
+                supervisor.fail("gateway-invite-snapshot-refresh", exc)
                 logger.exception("invite snapshot refresh failed guild=%s", cfg.discord_guild_id)
+            else:
+                supervisor.beat("gateway-invite-snapshot-refresh")
 
     async def reconcile_invite_metadata() -> None:
         while True:
             await asyncio.sleep(300)
             try:
                 await invite_attribution.reconcile_metadata()
-            except Exception:
+            except Exception as exc:
+                supervisor.fail("gateway-invite-metadata-reconcile", exc)
                 logger.exception("invite metadata reconciliation iteration failed guild=%s", cfg.discord_guild_id)
+            else:
+                supervisor.beat("gateway-invite-metadata-reconcile")
 
     async def reconcile_member_roles() -> None:
         while True:
             await asyncio.sleep(300)
             try:
                 await reconcile_member_state_once()
-            except Exception:
+            except Exception as exc:
+                supervisor.fail("gateway-member-role-reconcile", exc)
                 logger.exception("member role reconciliation iteration failed guild=%s", cfg.discord_guild_id)
+            else:
+                supervisor.beat("gateway-member-role-reconcile")
 
     async def _reap_orphan_voice_sessions() -> None:
         # сироты = активные сессии, которых нет в живом кэше голосовых состояний
@@ -2828,8 +2851,11 @@ async def main() -> None:
         while True:
             try:
                 await _reap_orphan_voice_sessions()
-            except Exception:
+            except Exception as exc:
+                supervisor.fail("gateway-voice-session-reaper", exc)
                 logger.exception("voice session orphan reconciliation failed")
+            else:
+                supervisor.beat("gateway-voice-session-reaper")
             await asyncio.sleep(120)
 
     # T12: все фоновые циклы под надзором — гибель наблюдаема (structured log +
