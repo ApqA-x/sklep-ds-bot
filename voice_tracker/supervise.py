@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import socket
 import time
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
@@ -26,6 +27,10 @@ from typing import Any, Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_COLLECTION = "bot_runtime_heartbeats"
+# E09 (R26-02): identity процесса-издателя. Порядок seq внутри scope держит
+# bucket-lock одного процесса; второй параллельный gateway его ломает, поэтому
+# startup сверяется со свежим heartbeat ДРУГОГО instance и отказывает.
+INSTANCE_ID = socket.gethostname()
 DEFAULT_BACKOFF_INITIAL_SECONDS = 1.0
 DEFAULT_BACKOFF_CAP_SECONDS = 60.0
 DEFAULT_UNHEALTHY_AFTER = 3
@@ -42,6 +47,61 @@ def backoff_seconds(
     """Экспоненциальный backoff с полным джиттером: uniform(base/2, base)."""
     base = min(cap, initial * (2 ** max(attempt - 1, 0)))
     return random.uniform(base / 2.0, base)
+
+
+def evaluate_single_writer(
+    doc: Any, our_instance: str, now: datetime, max_age_seconds: float
+) -> str | None:
+    """E09 (R26-02): чистая проверка — можно ли стартовать этому instance.
+    Отказ только по СВЕЖЕМУ heartbeat другого живого instance; наш же instance
+    (рестарт того же контейнера), просроченный или снятый при graceful stop —
+    проходные. None — стартовать можно, иначе причина отказа."""
+    if not isinstance(doc, dict):
+        return None
+    if doc.get("stopped") is True:
+        return None
+    if doc.get("instance") == our_instance:
+        return None
+    updated = doc.get("updated_at")
+    if not isinstance(updated, datetime):
+        return None
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=UTC)
+    age = (now - updated.astimezone(UTC)).total_seconds()
+    if age > max_age_seconds:
+        return None
+    return (
+        f"второй writer активен: worker={doc.get('worker')} instance={doc.get('instance')} "
+        f"heartbeat {age:.0f}s назад — запуск отказан (E09: порядок seq держит один процесс)"
+    )
+
+
+def claim_single_writer(
+    db: Any, worker: str, instance: str, *, max_age_seconds: float = 90.0
+) -> None:
+    """Startup-guard издателя: держим heartbeat-строку за собой до первого тика.
+    Атомарность — одна строка на worker в практике (replace_one upsert по
+    {"worker"}), гонка двух холодных стартов — известное ограничение без
+    unique-индекса; основной защитимый случай — второй живой writer."""
+    now = datetime.now(UTC)
+    doc = db[HEARTBEAT_COLLECTION].find_one({"worker": worker})
+    reason = evaluate_single_writer(doc, instance, now, max_age_seconds)
+    if reason is not None:
+        raise RuntimeError(reason)
+    db[HEARTBEAT_COLLECTION].update_one(
+        {"worker": worker},
+        {"$set": {"worker": worker, "instance": instance, "updated_at": now, "stopped": False}},
+        upsert=True,
+    )
+
+
+def release_single_writer(db: Any, worker: str, instance: str) -> None:
+    """Graceful stop: снимаем с себя право (stopped=True), чтобы быстрый рестарт
+    нового контейнера не был отвергнут собственным свежим heartbeat."""
+    db[HEARTBEAT_COLLECTION].update_one(
+        {"worker": worker, "instance": instance},
+        {"$set": {"stopped": True, "updated_at": datetime.now(UTC)}},
+    )
 
 
 def _error_name(exc: BaseException) -> str:
@@ -272,6 +332,7 @@ class Heartbeat:
             self._beats += 1
             doc: dict[str, Any] = {
                 "worker": self.worker,
+                "instance": INSTANCE_ID,
                 "updated_at": datetime.now(UTC),
                 "loops": self.supervisor.snapshot(),
                 "heartbeatErrors": self._db_errors,

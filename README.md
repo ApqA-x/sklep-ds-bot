@@ -63,6 +63,18 @@ Shared package code is in `voice_tracker/`.
 8. Activity service receives `activity.events` and posts embeds to the configured activity channel.
 9. Stalker service receives `voice.events` plus member join/leave `activity.events` and DMs subscribed watchers.
 
+### Event durability & ordering (T09 / R26-01 / R26-02)
+
+Events go through a Mongo outbox (`event_log`) + per-consumer inbox
+(`event_inbox`); NATS is only the fast path (details: `docs/adr/0002-mongo-outbox-inbox.md`).
+`voice.events` are delivered in per-scope order `(guildId, userId)`: the gateway publisher
+assigns a monotonic `seq` under a per-scope lock before publishing, and consumers gate each
+delivery on its journal predecessors (deferred state, bounded drain). Ordering therefore
+requires a **single gateway writer**: startup refuses a second instance when a fresh
+heartbeat of another instance exists (`bot_runtime_heartbeats`,
+`GATEWAY_SINGLETON_MAX_AGE_SECONDS`, 0 disables). Apply migration **M6** before rolling the
+new image.
+
 ## Command Docs
 
 Full command reference lives in [COMMANDS.md](COMMANDS.md).

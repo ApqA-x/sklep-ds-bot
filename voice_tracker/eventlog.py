@@ -30,6 +30,17 @@ Sweep (sweep_pending, R26-01/E01) — три прохода за тик:
 pending_stats — несколько indexed count/limit-1 запросов вместо полного N+1
 обхода журнала; missing/received/expired processing в backlog, active processing
 и карантин — отдельными полями.
+
+R26-02 (порядок доставки): event_seq — монотонный номер события в scope
+(subject, guild+user для voice.events), выдаётся издателем под per-scope lock и
+доназначается consumer'ом легаси-строкам без него (порядок — (orderAt,_id),
+где orderAt — время самого события occurredAt, не время вставки).
+event_scope_progress — ватермарк lastSeq consumer'а по scope. Перед claim
+гейт проверяет терминальность предшественников scope: незавершённые догоняются
+рекурсивно (окно GATE_WINDOW, GATE_SCANS сканов), при активном лизе или
+карантине предшественника событие встаёт в deferred — без lease и без attempts,
+чужие scope не блокирует. Карантин предшественника останавливает свой scope
+(не шину); deferred видно в pending_stats.
 """
 from __future__ import annotations
 
@@ -48,11 +59,44 @@ logger = logging.getLogger(__name__)
 COLL_EVENT_LOG = "event_log"
 COLL_EVENT_INBOX = "event_inbox"
 COLL_SWEEP_STATE = "event_sweep_state"
+# R26-02: монотонный номер издателя по (subject, scope) и прогресс consumer'а.
+COLL_EVENT_SEQ = "event_seq"
+COLL_SCOPE_PROGRESS = "event_scope_progress"
 
 STATE_RECEIVED = "received"
 STATE_PROCESSING = "processing"
 STATE_COMPLETED = "completed"
 STATE_QUARANTINED = "quarantined"
+# R26-02: предшественник того же scope ещё не терминален — событие ждёт в
+# deferred (lease не держит, attempts не ест, другой scope не блокирует).
+STATE_DEFERRED = "deferred"
+CLAIMABLE_STATES = [STATE_RECEIVED, STATE_DEFERRED]
+
+GATE_WINDOW = 64
+GATE_SCANS = 3
+
+
+def derive_scope(subject: str, payload: Any) -> str | None:
+    """R26-02: ключ упорядочивания доставки. События голоса упорядочиваются на
+    пару (guild, user): JOIN и LEAVE одного участника не переставляются, разные
+    участники независимы (head-of-line блок одного scope запрещён обзором).
+    Прочие subjects не гейтятся."""
+    if subject != "voice.events" or not isinstance(payload, dict):
+        return None
+    guild = str(payload.get("guildId") or payload.get("guild_id") or "")
+    user = str(payload.get("userId") or payload.get("user_id") or "")
+    if not guild or not user:
+        return None
+    return f"{guild}\x1f{user}"
+
+
+def _progress_id(consumer: str, subject: str, scope: str) -> str:
+    return f"{consumer}\x1f{subject}\x1f{scope}"
+
+
+def _seq_id(subject: str, scope: str) -> str:
+    return f"{subject}\x1f{scope}"
+
 
 DEFAULT_LEASE_SECONDS = 120
 DEFAULT_MAX_DELIVER = 8
@@ -104,6 +148,18 @@ def record(
     """Устойчивое намерение публикации (T09.4): строка журнала ДО любого транспорта."""
     eid = event_id or new_event_id()
     now = _utc_now()
+    # R26-02: orderAt — время самого события (occurredAt), не записи: лексический
+    # порядок легаси-строк без seq по createdAt неразличим внутри миллисекунды
+    # (BSON ms), а два voice-события одного участника в один ms физически редки.
+    from .timeutil import parse_datetime
+
+    try:
+        order_at = parse_datetime(payload.get("occurredAt")) if isinstance(payload, dict) else None
+    except (TypeError, ValueError):
+        order_at = None
+    if order_at is None:
+        order_at = now
+    order_at = _as_utc(order_at) or now
     try:
         db[COLL_EVENT_LOG].insert_one(
             {
@@ -111,6 +167,10 @@ def record(
                 "subject": subject,
                 "issuer": issuer,
                 "payload": payload,
+                # R26-02: scope пишется сразу — gate-запросы предшественников
+                # фильтруют по нему (без field-а предшественники не находятся).
+                "scope": derive_scope(subject, payload),
+                "orderAt": order_at,
                 "createdAt": now,
                 "publishedAt": None,
                 "publishError": None,
@@ -248,9 +308,10 @@ def claim(db: Any, event_id: str, consumer: str, subject: str) -> Claim | None:
         if outcome.matched_count != 1:
             return None
         return Claim(iid, event_id, consumer, subject, int(existing.get("attempts", 0)) + 1, token)
-    # received: предыдущая попытка освободила lease для retry (E03)
+    # received / deferred: предыдущая попытка освободила lease для retry (E03),
+    # либо gate R26-02 отпускал событие ждать предшественников того же scope
     outcome = db[COLL_EVENT_INBOX].update_one(
-        {"_id": iid, "state": STATE_RECEIVED},
+        {"_id": iid, "state": {"$in": CLAIMABLE_STATES}},
         {
             "$set": {
                 "state": STATE_PROCESSING,
@@ -360,6 +421,234 @@ def quarantine_poison(db: Any, consumer: str, subject: str, raw: bytes, reason: 
 Handler = Callable[[bytes], Any]
 
 
+# ------------------------------------------------------- delivery-order gate (R26-02)
+
+
+def _bump_seq_sync(db: Any, subject: str, scope: str) -> int:
+    from pymongo import ReturnDocument
+
+    doc = db[COLL_EVENT_SEQ].find_one_and_update(
+        {"_id": _seq_id(subject, scope)},
+        {"$inc": {"seq": 1}},
+        return_document=ReturnDocument.AFTER,
+        upsert=True,
+    )
+    return int((doc or {}).get("seq", 0))
+
+
+def _advance_progress_sync(db: Any, key: str, seq: int) -> None:
+    """Ватермарк consumer'а по scope — только вперёд (терминальные предшественники
+    выпадают из окна сканирования, работа гейта ограничена)."""
+    db[COLL_SCOPE_PROGRESS].update_one(
+        {"_id": key, "$or": [{"lastSeq": None}, {"lastSeq": {"$lt": seq}}]},
+        {"$set": {"lastSeq": seq, "updatedAt": _utc_now()}},
+        upsert=True,
+    )
+
+
+def _mark_deferred_sync(db: Any, consumer: str, event_id: str, subject: str) -> None:
+    """Gate не отпустил событие: ждёт в deferred — без lease и без attempts
+    (иначе очередь за медленным предшественником посадила бы невинное событие
+    в карантин по max_deliver)."""
+    iid = inbox_id(event_id, consumer)
+    now = _utc_now()
+    db[COLL_EVENT_INBOX].update_one(
+        {
+            "_id": iid,
+            "$or": [
+                {"state": {"$in": [STATE_RECEIVED, STATE_DEFERRED]}},
+                {"state": None},
+            ],
+        },
+        {
+            "$set": {"state": STATE_DEFERRED, "updatedAt": now},
+            "$setOnInsert": {
+                "_id": iid,
+                "eventId": event_id,
+                "consumer": consumer,
+                "subject": subject,
+                "attempts": 0,
+                "leaseToken": None,
+                "leaseExpiresAt": None,
+                "lastError": None,
+                "createdAt": now,
+                "completedAt": None,
+            },
+        },
+        upsert=True,
+    )
+
+
+def _gate_states(db: Any, consumer: str, docs: list[dict]) -> list[dict]:
+    proj = _inbox_projection(db, consumer, [d["_id"] for d in docs])
+    now = _utc_now()
+    out = []
+    for d in docs:
+        doc = proj.get(inbox_id(d["_id"], consumer))
+        state = doc.get("state") if doc else None
+        expired = False
+        if state == STATE_PROCESSING and doc is not None:
+            expires = _as_utc(doc.get("leaseExpiresAt"))
+            expired = expires is not None and expires <= now
+        out.append(
+            {
+                "eventId": d["_id"],
+                "subject": d.get("subject"),
+                "seq": d.get("seq"),
+                "state": state,
+                "leaseExpired": expired,
+                "raw": _payload_bytes(d.get("payload")),
+            }
+        )
+    return out
+
+
+def _gate_scan_sync(db: Any, consumer: str, event_id: str) -> dict:
+    """Одно bounded-сканирование предшественников self по scope.
+
+    Ключ порядка: seq (назначает издатель под bucket-локом; consume-side
+    доназначает строкам без seq по счётчику того же scope — раньше идут те, у
+    кого (orderAt,_id) лексикографически раньше). Строки без scope/seq
+    (чужие subjects, легаси-ряды) проходят без гейта.
+    """
+    row = db[COLL_EVENT_LOG].find_one(
+        {"_id": event_id},
+        {"subject": 1, "scope": 1, "seq": 1, "payload": 1, "createdAt": 1, "orderAt": 1},
+    )
+    if not row or row.get("createdAt") is None:
+        return {"gate": "none"}
+    subject = row.get("subject")
+    scope = row.get("scope")
+    order_at = _as_utc(row.get("orderAt"))
+    if scope is None or order_at is None:
+        payload = row.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = None
+        if scope is None:
+            scope = derive_scope(subject, payload)
+        # легаси-строка без orderAt: время события из payload, иначе createdAt
+        if order_at is None and isinstance(payload, dict):
+            from .timeutil import parse_datetime
+
+            try:
+                order_at = parse_datetime(payload.get("occurredAt"))
+            except (TypeError, ValueError):
+                order_at = None
+        if order_at is None:
+            order_at = _as_utc(row["createdAt"])
+        patch: dict[str, Any] = {}
+        if scope and row.get("scope") is None:
+            patch["scope"] = scope
+        if row.get("orderAt") is None and order_at is not None:
+            patch["orderAt"] = order_at
+        if patch:
+            db[COLL_EVENT_LOG].update_one({"_id": event_id}, {"$set": patch})
+    if scope is None:
+        return {"gate": "none"}
+    key = _progress_id(consumer, subject, scope)
+    seq = row.get("seq")
+    if seq is None:
+        created = order_at or _as_utc(row["createdAt"]) or _utc_now()
+        lex_before = {
+            "subject": subject,
+            "scope": scope,
+            "seq": None,
+            "_id": {"$ne": event_id},
+            "$or": [
+                # строки легаси без orderAt — предшественники по построению
+                # (записаны до апгрейда); их собственный scan донашивает orderAt
+                # ДО лексического сравнения, поэтому рекурсия сужается строго.
+                {"orderAt": {"$exists": False}},
+                {"orderAt": {"$lt": created}},
+                {"orderAt": created, "_id": {"$lt": row["_id"]}},
+            ],
+        }
+        docs = list(
+            db[COLL_EVENT_LOG]
+            .find(lex_before, {"subject": 1, "payload": 1, "seq": 1})
+            .sort([("orderAt", 1), ("_id", 1)])
+            .limit(GATE_WINDOW)
+        )
+        if docs:
+            states = _gate_states(db, consumer, docs)
+            pending = [p for p in states if p["state"] != STATE_COMPLETED]
+            if pending:
+                return {"gate": "preds", "preds": pending, "key": key}
+            # все лексические соседи уже completed (легаси без seq) — не блокируют
+        candidate = _bump_seq_sync(db, subject, scope)
+        from pymongo import ReturnDocument
+
+        updated = db[COLL_EVENT_LOG].find_one_and_update(
+            {"_id": event_id, "seq": None},
+            {"$set": {"seq": candidate, "updatedAt": _utc_now()}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if updated is None:
+            return {"gate": "none"}
+        seq = updated.get("seq", candidate)
+    seq = int(seq)
+    progress = db[COLL_SCOPE_PROGRESS].find_one({"_id": key}, {"lastSeq": 1})
+    last = progress.get("lastSeq") if isinstance(progress, dict) else None
+    last = int(last) if isinstance(last, int) else 0
+    filt = {"subject": subject, "scope": scope, "seq": {"$gt": last, "$lt": seq}}
+    docs = list(
+        db[COLL_EVENT_LOG]
+        .find(filt, {"subject": 1, "payload": 1, "seq": 1})
+        .sort([("seq", 1)])
+        .limit(GATE_WINDOW)
+    )
+    if not docs:
+        return {"gate": "clear", "key": key, "seq": seq}
+    return {"gate": "preds", "preds": _gate_states(db, consumer, docs), "key": key, "seq": seq}
+
+
+async def _gate_cleared(
+    db: Any,
+    consumer: str,
+    event_id: str,
+    subject: str,
+    handler: Handler,
+    max_deliver: int,
+) -> bool:
+    """True — все предшественники scope терминальны, self можно claim-ить.
+    Предшественники в received/deferred/истёкшем processing доставляются
+    рекурсивно (chain-drain с ограниченным числом сканов: длинный хвост
+    добирает retry-проход свипа, а не одна итерация)."""
+    for _ in range(GATE_SCANS):
+        info = await asyncio.to_thread(_gate_scan_sync, db, consumer, event_id)
+        if info["gate"] != "preds":
+            return True
+        blocked = False
+        progress_made = False
+        for p in info["preds"]:
+            state = p.get("state")
+            if state == STATE_COMPLETED:
+                if p.get("seq") is not None:
+                    await asyncio.to_thread(_advance_progress_sync, db, info["key"], int(p["seq"]))
+                    progress_made = True
+                continue
+            if state == STATE_PROCESSING and p.get("leaseExpired"):
+                progress_made = True  # станет доступен через deliver ниже
+            elif state in (STATE_PROCESSING, STATE_QUARANTINED):
+                blocked = True
+                continue
+            outcome = await deliver(
+                db, consumer, p["eventId"], p.get("subject") or subject, p["raw"], handler,
+                max_deliver=max_deliver,
+            )
+            progress_made = progress_made or outcome in ("completed", "fence_lost", "skipped")
+        if not progress_made:
+            return False
+        if blocked:
+            # один перескан: возможно, доставленный предшественник всё разблокировал
+            info = await asyncio.to_thread(_gate_scan_sync, db, consumer, event_id)
+            return info["gate"] != "preds"
+    return False
+
+
 async def deliver(
     db: Any,
     consumer: str,
@@ -373,8 +662,16 @@ async def deliver(
     """Единая точка исполнения: wire-путь и sweep идут через один claim, поэтому
     гонка «доставка по сети + догрузка из журнала» не даёт двойного эффекта.
 
+    R26-02: перед claim — гейт порядка по scope (см. _gate_scan_sync). Событие,
+    у которого есть незавершённый предшественник того же (subject, scope),
+    уходит в deferred и будет повторено retry-проходом; предшественники
+    доставляются рекурсивно в пределах GATE_SCANS.
+
     Результат complete() проверяется: потерянный при takeover fence НЕ отдаётся как
     «completed» — иначе caller удвоил бы эффект, считая доставку подтверждённой."""
+    if not await _gate_cleared(db, consumer, event_id, subject, handler, max_deliver):
+        await asyncio.to_thread(_mark_deferred_sync, db, consumer, event_id, subject)
+        return "deferred"
     claimed = await asyncio.to_thread(claim, db, event_id, consumer, subject)
     if claimed is None:
         return "skipped"
@@ -395,6 +692,18 @@ async def deliver(
             event_id,
         )
         return "fence_lost"
+    # self завершён — ватермарк scope можно двигать на его seq (гейт self'а
+    # гарантировал терминальность всех предшественников до claim)
+    row = await asyncio.to_thread(
+        db[COLL_EVENT_LOG].find_one, {"_id": event_id}, {"scope": 1, "seq": 1, "subject": 1}
+    )
+    if row and row.get("scope") is not None and isinstance(row.get("seq"), int):
+        await asyncio.to_thread(
+            _advance_progress_sync,
+            db,
+            _progress_id(consumer, row.get("subject", subject), row["scope"]),
+            int(row["seq"]),
+        )
     return "completed"
 
 
@@ -514,15 +823,15 @@ def _inbox_projection(db: Any, consumer: str, event_ids: list[str]) -> dict[str,
 
 
 def _retry_candidates(db: Any, consumer: str, subjects: list[str], now: datetime, limit: int) -> list[dict]:
-    """Retry-проход: незавершённые inbox-строки consumer'а (received или истёкший
-    processing) — они за курсором навсегда, и без этого прохода повторная попытка
-    исчезла бы за high-water mark (R26-01.2)."""
+    """Retry-проход: незавершённые inbox-строки consumer'а (received, deferred
+    R26-02 или истёкший processing) — они за курсором навсегда, и без этого
+    прохода повторная попытка исчезла бы за high-water mark (R26-01.2)."""
     cursor = db[COLL_EVENT_INBOX].find(
         {
             "consumer": consumer,
             "subject": {"$in": list(subjects)},
             "$or": [
-                {"state": STATE_RECEIVED},
+                {"state": {"$in": [STATE_RECEIVED, STATE_DEFERRED]}},
                 {"state": STATE_PROCESSING, "leaseExpiresAt": {"$lte": now}},
             ],
         },
@@ -602,6 +911,7 @@ def _pending_stats_sync(db: Any, consumer: str, subjects: list[str], *, cap: int
         if oldest_rows:
             oldest_missing = _as_utc(oldest_rows[0].get("oldest"))
     received = inbox_coll.count_documents({"consumer": consumer, "state": STATE_RECEIVED})
+    deferred = inbox_coll.count_documents({"consumer": consumer, "state": STATE_DEFERRED})
     expired = inbox_coll.count_documents(
         {"consumer": consumer, "state": STATE_PROCESSING, "leaseExpiresAt": {"$lte": now}}
     )
@@ -614,7 +924,7 @@ def _pending_stats_sync(db: Any, consumer: str, subjects: list[str], *, cap: int
     retry_filter = {
         "consumer": consumer,
         "$or": [
-            {"state": STATE_RECEIVED},
+            {"state": {"$in": [STATE_RECEIVED, STATE_DEFERRED]}},
             {"state": STATE_PROCESSING, "leaseExpiresAt": {"$lte": now}},
         ],
     }
@@ -623,7 +933,7 @@ def _pending_stats_sync(db: Any, consumer: str, subjects: list[str], *, cap: int
         if created is not None and (oldest is None or created < oldest):
             oldest = created
         break
-    backlog = missing + received + expired
+    backlog = missing + received + deferred + expired
     return {
         "consumer": consumer,
         "processed": completed,
@@ -632,6 +942,7 @@ def _pending_stats_sync(db: Any, consumer: str, subjects: list[str], *, cap: int
         "missingInbox": missing,
         "missingCapped": missing >= cap,
         "received": received,
+        "deferred": deferred,
         "expiredProcessing": expired,
         "activeProcessing": active,
         "oldestPendingAgeSeconds": (now - oldest).total_seconds() if oldest else 0.0,
@@ -675,7 +986,7 @@ async def sweep_pending(
             db, consumer, row["eventId"], event.get("subject", row.get("subject", "")),
             _payload_bytes(event["payload"]), handler, max_deliver=max_deliver,
         )
-        if outcome != "skipped":
+        if outcome not in ("skipped", "deferred"):
             delivered += 1
 
     # 2) forward-проход: страница за курсором; терминальные/активные inbox-строки
@@ -709,7 +1020,7 @@ async def sweep_pending(
                 db, consumer, row["_id"], event.get("subject", row["subject"]),
                 _payload_bytes(event["payload"]), handler, max_deliver=max_deliver,
             )
-            if outcome == "skipped":
+            if outcome in ("skipped", "deferred"):
                 last_ok = row
                 continue
             delivered += 1
@@ -752,7 +1063,7 @@ async def sweep_pending(
                         db, consumer, row["_id"], event.get("subject", row["subject"]),
                         _payload_bytes(event["payload"]), handler, max_deliver=max_deliver,
                     )
-                    if outcome != "skipped":
+                    if outcome not in ("skipped", "deferred"):
                         delivered += 1
     return delivered
 
@@ -766,12 +1077,63 @@ def pending_stats(db: Any, consumer: str, subjects: list[str]) -> dict[str, Any]
 
 class DurablePublisher:
     """Publisher-обёртка: событие с устойчивым фактом-источником получает
-    детерминированный event_id (T09.4) и проходит через outbox."""
+    детерминированный event_id (T09.4) и проходит через outbox.
+
+    R26-02: для упорядоченных subjects (voice.events) запись в журнал и выдача
+    seq идут под per-scope asyncio.Lock (один процесс-издатель): внутри scope
+    (guild,user) порядок seq совпадает с порядком вставки в журнал. Seq
+    назначается из того же счётчика event_seq, что и consume-side доназначение,
+    поэтому mixed backlog (легаси-строки без seq) упорядочивается согласованно.
+    Вне bucket-лока издателя (второй репликой gateway) порядок не гарантируется —
+    startup-guard E09 отказывает второму writer'у."""
 
     def __init__(self, bus: Any, db: Any, *, issuer: str = "") -> None:
         self.bus = bus
         self.db = db
         self.issuer = issuer
+        self._scope_locks: dict[str, asyncio.Lock] = {}
+
+    def _scope_lock(self, scope: str) -> asyncio.Lock:
+        if len(self._scope_locks) > 8192:
+            for key in [k for k, v in self._scope_locks.items() if not v.locked()]:
+                del self._scope_locks[key]
+        lock = self._scope_locks.get(scope)
+        if lock is None:
+            lock = self._scope_locks[scope] = asyncio.Lock()
+        return lock
+
+    async def _publish_ordered(self, subject: str, value: Any, event_id: str | None) -> str:
+        payload = value if isinstance(value, dict) else json.loads(
+            json.dumps(_plain(value), ensure_ascii=False, default=str)
+        )
+        scope = derive_scope(subject, payload)
+        if scope is None:
+            return await publish_durable(self.bus, self.db, subject, value, event_id=event_id)
+        async with self._scope_lock(scope):
+            eid = await asyncio.to_thread(
+                record, self.db, subject, payload, event_id=event_id, issuer=self.issuer
+            )
+            row = await asyncio.to_thread(self.db[COLL_EVENT_LOG].find_one, {"_id": eid})
+            if row is not None and row.get("seq") is None:
+                seq = await asyncio.to_thread(_bump_seq_sync, self.db, subject, scope)
+                await asyncio.to_thread(
+                    self.db[COLL_EVENT_LOG].update_one,
+                    {"_id": eid, "seq": None},
+                    {"$set": {"seq": seq, "updatedAt": _utc_now()}},
+                )
+            try:
+                await self.bus.publish_json(subject, value, message_id=eid)
+                await asyncio.to_thread(
+                    self.db[COLL_EVENT_LOG].update_one,
+                    {"_id": eid}, {"$set": {"publishedAt": _utc_now(), "publishError": None}},
+                )
+            except Exception as err:  # noqa: BLE001 — журнал устойчив, транспорт догонит
+                await asyncio.to_thread(
+                    self.db[COLL_EVENT_LOG].update_one,
+                    {"_id": eid}, {"$set": {"publishedAt": None, "publishError": str(err)[:300]}},
+                )
+                logger.warning("event publish deferred subject=%s id=%s: %s", subject, eid, err)
+            return eid
 
     async def publish_json(self, *args: Any, **kwargs: Any) -> None:
         # совместим и с publish_json(subject, value), и с legacy publish_json(ctx, subject, value)
@@ -781,7 +1143,7 @@ class DurablePublisher:
             subject, value = args
         else:
             raise TypeError("publish_json expects subject/value or ctx/subject/value")
-        from .domain import SUBJECT_SESSION_CLOSED, SUBJECT_SUMMARY_READY
+        from .domain import SUBJECT_SESSION_CLOSED, SUBJECT_SUMMARY_READY, SUBJECT_VOICE_EVENT
 
         event_id = kwargs.get("event_id")
         if event_id is None and subject == SUBJECT_SUMMARY_READY:
@@ -798,7 +1160,9 @@ class DurablePublisher:
                 # T09.4/E04: reaper/tracker могут опубликовать закрытие сессии дважды —
                 # это одно устойчивое событие с одним id
                 event_id = deterministic_event_id("session-closed", session_id)
-        await publish_durable(self.bus, self.db, subject, value, event_id=event_id)
+        if subject == SUBJECT_VOICE_EVENT:
+            return await self._publish_ordered(subject, value, event_id)
+        return await publish_durable(self.bus, self.db, subject, value, event_id=event_id)
 
 
 def _is_duplicate(err: Exception) -> bool:

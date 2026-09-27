@@ -21,8 +21,22 @@ class _JournalCollection:
         if doc is not None:
             doc.update(update.get("$set", {}))
 
-    def find_one(self, flt: dict):
+    def find_one(self, flt: dict, projection=None):
         return self.docs.get(flt.get("_id"))
+
+    def find_one_and_update(self, flt: dict, update: dict, *, return_document=None, upsert=False):
+        # R26-02: счётчик event_seq издателя — AFTER-семантика, как у pymongo
+        key = flt.get("_id")
+        doc = self.docs.get(key)
+        if doc is None:
+            if not upsert:
+                return None
+            doc = {"_id": key}
+            self.docs[key] = doc
+        for k, v in update.get("$inc", {}).items():
+            doc[k] = int(doc.get(k, 0) or 0) + v
+        doc.update(update.get("$set", {}))
+        return dict(doc)
 
     def find(self, _flt: dict | None = None):
         class _Cursor:

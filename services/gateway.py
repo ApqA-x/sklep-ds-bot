@@ -1942,6 +1942,23 @@ async def main() -> None:
     repo = Repository(mongo_client[cfg.mongo_db])
     repo.ensure_indexes(None)
 
+    # E09 (R26-02): gateway — единственный writer порядка voice.events (seq
+    # выдаётся под bucket-lock этого процесса). Свежий heartbeat другого
+    # instance = второй writer ломает гарантию порядка → старт отказан.
+    # getattr(...,0): боевой Config всегда несёт поле (=90); тестовые подставные
+    # cfg без поля проходят мимо guard.
+    singleton_max_age = getattr(cfg, "gateway_singleton_max_age_seconds", 0)
+    singleton_guard = singleton_max_age > 0
+    if singleton_guard:
+        try:
+            supervise.claim_single_writer(
+                repo.db, "gateway", supervise.INSTANCE_ID,
+                max_age_seconds=float(singleton_max_age),
+            )
+        except RuntimeError as exc:
+            mongo_client.close()
+            raise SystemExit(str(exc)) from None
+
     nats = NATS()
     await nats.connect(cfg.nats_url)
     bus = Bus(nats, cfg.event_signing_secret, "gateway", max_age_seconds=cfg.event_max_age_seconds)
@@ -2834,6 +2851,8 @@ async def main() -> None:
     finally:
         await supervisor.shutdown()
         await bus.aclose()
+        if singleton_guard:
+            supervise.release_single_writer(repo.db, "gateway", supervise.INSTANCE_ID)
         mongo_client.close()
 
 

@@ -320,6 +320,29 @@
       "unique": false
     },
     {
+      "collection": "event_log",
+      "keys": [
+        [
+          "subject",
+          1
+        ],
+        [
+          "scope",
+          1
+        ],
+        [
+          "seq",
+          1
+        ]
+      ],
+      "name": "event_log_subject_scope_seq",
+      "owner": "runner",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
       "collection": "event_inbox",
       "keys": [
         [

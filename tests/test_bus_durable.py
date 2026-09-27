@@ -35,7 +35,7 @@ class JCol:
             raise DuplicateKeyError()
         self.docs[doc["_id"]] = dict(doc)
 
-    def find_one(self, flt: dict):
+    def find_one(self, flt: dict, projection=None):
         doc = self.docs.get(flt.get("_id"))
         if doc is None:
             return None
