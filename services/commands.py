@@ -40,11 +40,11 @@ from voice_tracker.repository import Repository
 from voice_tracker import supervise
 from voice_tracker.runtime import configure_logging, load_config, register_commands_http
 from voice_tracker.site_audit import (
+    MUTATING_ROUTES,
     REASON_DISABLED,
     REASON_ERROR,
-    REASON_PERMISSIONS,
     REASON_REJECTED,
-    REASON_UNKNOWN,
+    reject_reason_for_result,
     safe_record_command_audit,
 )
 
@@ -73,11 +73,6 @@ TARGET_COMMAND_NAMES = {
 
 SUPPORTED_COMMAND_NAMES = (VOICE_COMMAND_NAMES | TARGET_COMMAND_NAMES) - LEGACY_ROOT_COMMAND_NAMES
 DASHBOARD_PAGE_SIZE = 10
-
-_REJECTED_RESULT_REASONS = {
-    "Insufficient permissions.": REASON_PERMISSIONS,
-    "Unknown command.": REASON_UNKNOWN,
-}
 
 
 def _guild_allowed(configured_guild_id: str, event_guild_id: object) -> bool:
@@ -226,6 +221,7 @@ async def main() -> None:
         *,
         ok: bool,
         reason: str = "",
+        effect_proved: bool = False,
     ) -> None:
         user = getattr(interaction, "user", None)
         user_id = str(getattr(user, "id", "") or "")
@@ -240,6 +236,7 @@ async def main() -> None:
             channel_id=str(getattr(interaction, "channel_id", "") or ""),
             reason=reason,
             ok=ok,
+            effect_proved=effect_proved,
         )
 
     @client.event
@@ -287,12 +284,22 @@ async def main() -> None:
                 logger.info("command completed %s response=embed", context)
             else:
                 logger.info("command completed %s response=text", context)
-        if ok and isinstance(result, str):
-            rejection = _REJECTED_RESULT_REASONS.get(result)
+        if ok:
+            rejection = reject_reason_for_result(result)
             if rejection is not None:
                 ok = False
                 reason = rejection
-        _audit_command(interaction, root, command, options, ok=ok, reason=reason)
+        # R26-04 п.6: "диспатчер вернул ok" ≠ эффект. Доказательство эффекта:
+        # мутирующий маршрут + отсутствие исключения + хендлер вернул реальный
+        # success-ответ. Каждая failure-ветка мутирующих маршрутов либо бросает
+        # исключение, либо возвращает строку из COMMAND_REJECTION_REASONS;
+        # единственная тихая no-ветка (_persist_autorole) теперь raise (см. B.3).
+        effect_proved = (
+            ok and (root, command) in MUTATING_ROUTES and reject_reason_for_result(result) is None
+        )
+        _audit_command(
+            interaction, root, command, options, ok=ok, reason=reason, effect_proved=effect_proved
+        )
         if isinstance(result, InteractionMessage):
             kwargs: dict[str, object] = {"ephemeral": result.ephemeral}
             if result.content is not None:
@@ -1055,7 +1062,8 @@ def _persist_autorole(repo: Repository | None, guild_id: str, role_id: str) -> N
     guild_id = (guild_id or "").strip()
     role_id = (role_id or "").strip()
     if guild_id == "" or role_id == "":
-        return
+        # R26-04 п.6: тихий no-op здесь означал бы ложный stage="effect" в журнале.
+        raise ValueError("autorole not persisted: missing guild or role id")
     # T06: запись через CAS-mutate (перечитать свежий документ), а не слепой upsert в обход revision
     repo.set_autorole(None, guild_id, role_id)
 
