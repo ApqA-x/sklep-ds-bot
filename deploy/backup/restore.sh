@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
-# T14 backup/restore — ВОССТАНОВЛЕНИЕ В ИЗОЛИРОВАННУЮ ЦЕЛЬ (п.5/п.6).
+# T14/R26-08 — ВОССТАНОВЛЕНИЕ ТОЛЬКО В ЦЕЛИ, СОЗДАННЫЕ ЭТИМ ПРОГОНОМ.
 #
-# Никогда не пишет в живой destination: целевая БД обязана быть ПУСТОЙ (проверка
-# getCollectionNames). Для DR на чистом хосте цель тоже новая — пустая БД, поэтому
-# проверка одна, без «разрешающих» обходов.
+# Модель рисков (R26-08): `docker volume create` молча возвращает СУЩЕСТВУЮЩИЙ
+# volume, а cleanup по имени из аргумента мог удалить чужой ресурс. Поэтому:
+#  * media-volume всегда НОВЫЙ dsbot-<profile>-restore-media-<runid>; имя извне
+#    не принимается (--media-volume удалён);
+#  * цель БД — voice_tracker_<profile>_rehearsal_<runid> (или --into-db,
+#    прогнанный через строгий allowlist restore_targets.py validate-db);
+#  * перед любой записью: манифест+checksums, validate-db, listDatabases
+#    (цель обязана отсутствовать), volume inspect (обязан ОТКАЗАТЬ), и только
+#    потом state-write prepared (резервация прогона) и сами записи;
+#  * после volume create метка com.dsbot.restore.run перечитывается — создан
+#    не нами = отказ (защита от «create вернул существующий» и от гонки);
+#  * гейт listDatabases повторяется непосредственно перед mongorestore
+#    (double-check гонки); mongorestore БЕЗ --drop — цель гарантированно пуста;
+#  * cleanup удаляет ТОЛЬКО цели, которые state-файл прогона подтверждает как
+#    созданные им (run id + фаза db-restored + ownership-метка volume);
+#  * verify обязателен всегда: флага обхода нет (--no-verify удалён),
+#    отказ verify = ненулевой exit, диагностика в state-файле не затирается;
+#  * cutover (перенос на чистый хост) принимает целевое prod-имя только с
+#    явным --confirm-dest <точное имя>; cleanup целей в cutover запрещён
+#    (--keep форсится), существующие ресурсы не удаляются никогда.
 #
-# Целостность проверяется ДО записи чего-либо: manifest check + sha256 расшифровки
-# (B04: битый архив виден до того, как что-то восстановлено).
-#
-# usage: restore.sh <production|staging> [--from RUN_DIR] [--into-db NAME]
-#        [--media-volume NAME] [--keep] [--no-verify]
+# usage: restore.sh <production|staging> [--from RUN_DIR]
+#        [--mode rehearsal|cutover] [--into-db NAME] [--state FILE] [--resume]
+#        [--keep] [--confirm-dest NAME]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,22 +32,169 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../scripts/_common.sh"
 source "$HERE/_backup_common.sh"
 
-resolve_env "${1:-}"; shift || true
-RUN_DIR="" INTO_DB="" MEDIA_VOL="" KEEP=0 DO_VERIFY=1
+TARGETS="$HERE/restore_targets.py"
+
+# Канон проекта для интерполяции имени БД в mongosh --eval (dropDatabase):
+# regex допускает ТОЛЬКО [A-Za-z0-9_], поэтому кавычка/;. в JS-строку попасть
+# физически не могут — после проверки имени этим regex интерполяция безопасна.
+DB_ALLOWLIST_RE='^voice_tracker_(production|staging)_rehearsal_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{6}$'
+DB_SAFE_RE='^[A-Za-z0-9_]+$'
+RUNID_RE='^[0-9]{8}T[0-9]{6}Z_[0-9a-f]{6}$'
+db_name_is_safe() { [[ "$1" =~ $DB_ALLOWLIST_RE ]]; }
+
+usage_restore() {
+  cat >&2 <<'EOF'
+usage: restore.sh <production|staging> [--from RUN_DIR]
+        [--mode rehearsal|cutover (default rehearsal)] [--into-db NAME]
+        [--state FILE] [--resume] [--keep] [--confirm-dest NAME]
+  verify обязателен всегда; --no-verify и --media-volume удалены (R26-08).
+EOF
+}
+
+resolve_env "${1:-}" || { usage_restore; exit 2; }
+shift || true
+MODE=rehearsal RUN_DIR="" INTO_DB="" STATE="" RESUME=0 KEEP=0 CONFIRM_DEST=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --from) RUN_DIR="$2"; shift 2 ;;
-    --into-db) INTO_DB="$2"; shift 2 ;;
-    --media-volume) MEDIA_VOL="$2"; shift 2 ;;
-    --keep) KEEP=1; shift ;;
-    --no-verify) DO_VERIFY=0; shift ;;
-    *) die "restore.sh: неизвестный аргумент $1" ;;
+    --from)         [ $# -ge 2 ] || die "restore.sh: $1 требует значение"; RUN_DIR="$2"; shift 2 ;;
+    --mode)         [ $# -ge 2 ] || die "restore.sh: $1 требует значение"; MODE="$2"; shift 2 ;;
+    --into-db)      [ $# -ge 2 ] || die "restore.sh: $1 требует значение"; INTO_DB="$2"; shift 2 ;;
+    --state)        [ $# -ge 2 ] || die "restore.sh: $1 требует значение"; STATE="$2"; shift 2 ;;
+    --confirm-dest) [ $# -ge 2 ] || die "restore.sh: $1 требует значение"; CONFIRM_DEST="$2"; shift 2 ;;
+    --resume)       RESUME=1; shift ;;
+    --keep)         KEEP=1; shift ;;
+    -h|--help)      usage_restore; exit 0 ;;
+    *)              die "restore.sh: неизвестный аргумент $1 (verify обязателен: --no-verify удалён; media-volume всегда новый: --media-volume удалён)" ;;
   esac
 done
+case "$MODE" in
+  rehearsal) ;;
+  cutover)
+    # prod-имя цели принимается ТОЛЬКО с явным точным подтверждением; cleanup
+    # целей в cutover запрещён — форсируем keep и фиксируем это в отчёте.
+    [ -n "$CONFIRM_DEST" ] || die "cutover требует --confirm-dest <точное целевое имя>"
+    KEEP=1
+    ;;
+  *) die "restore.sh: --mode rehearsal|cutover (получено $MODE)" ;;
+esac
+[ -z "$CONFIRM_DEST" ] || [ "$MODE" = cutover ] \
+  || die "--confirm-dest имеет смысл только с --mode cutover"
 
 require_docker
 load_backup_env
 
+# стабильный по профилю default: повторный запуск без --resume упрётся в
+# чужой run id в state-файле (защита «повтор в один час», R26-08 п.4)
+STATE="${STATE:-$BACKUP_DIR/.restore-$PROFILE-state.json}"
+
+WORK=""
+PHASE=start
+RUNID="" MEDIA_VOL="" SRC_DB="" MEDIA_FILES=0 MEDIA_BYTES=0
+STATE_STARTED=0 REACHED=""
+COMPLETED=0
+
+# ---------- read-only помощники ----------
+state_field() { host_python "$TARGETS" state-read --state "$STATE" --field "$1"; }
+
+state_write() { # state_write PHASE
+  host_python "$TARGETS" state-write --state "$STATE" --run-id "$RUNID" \
+    --db "$INTO_DB" --volume "${MEDIA_VOL:-}" --mode "$MODE" --profile "$PROFILE" \
+    --run-dir "$RUN_DIR" --phase "$1"
+}
+
+has_phase() { case " $REACHED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# один безопасный вызов: строка --eval — фиксированный литерал, НИКАКОЙ
+# интерполяции имён БД в JS (инъекция через имя цели исключена структурно)
+list_databases() {
+  compose exec -T mongo mongosh --quiet --eval \
+    'db.adminCommand({listDatabases:1}).databases.map(d=>d.name).join(" ")'
+}
+
+db_must_be_absent() {
+  local dbs d exists
+  dbs="$(list_databases)"
+  exists=false
+  for d in $dbs; do
+    if [ "$d" = "$INTO_DB" ]; then exists=true; fi
+  done
+  host_python "$TARGETS" assert-absent --exists "$exists"
+}
+
+volume_run_label() { # → stdout: значение ownership-метки; rc!=0 — volume отсутствует
+  local out
+  out="$(docker volume inspect -f '{{ index .Labels "com.dsbot.restore.run" }}' "$1")" || return 1
+  if [ "$out" = "<no value>" ]; then out=""; fi
+  printf '%s' "$out"
+}
+
+# ---------- cleanup: только цели, подтверждённые state этого прогона ----------
+cleanup_owned_targets() {
+  local all_ok=1 lbl
+  # БД: имя повторно проходит allowlist-regex (критерий безопасности --eval) +
+  # state подтверждает, что ЭТОТ прогон дошёл до db-restored для ЭТОЙ цели.
+  if [ -n "$INTO_DB" ] && db_name_is_safe "$INTO_DB" && [ "$STATE_STARTED" = 1 ] \
+     && host_python "$TARGETS" state-check --state "$STATE" --run-id "$RUNID" \
+          --db "$INTO_DB" --need-phase db-restored >/dev/null 2>&1; then
+    if compose exec -T mongo mongosh --quiet --eval \
+         "db.getSiblingDB('$INTO_DB').dropDatabase()" >/dev/null; then
+      info "cleanup: rehearsal-БД $INTO_DB удалена"
+    else
+      warn "cleanup: drop $INTO_DB не удался — цель осталась, разбираемся вручную"
+      all_ok=0
+    fi
+  else
+    info "cleanup: БД $INTO_DB НЕ удаляем (не подтверждена целью этого прогона)"
+  fi
+  if [ -n "$MEDIA_VOL" ]; then
+    if lbl="$(volume_run_label "$MEDIA_VOL")"; then
+      # никогда не rm ресурса, который state не подтверждает как созданный им:
+      # метка run == RUNID прогона + тот же volume записан в state
+      if [ "$lbl" = "$RUNID" ] \
+         && host_python "$TARGETS" state-check --state "$STATE" --run-id "$RUNID" \
+              --volume "$MEDIA_VOL" >/dev/null 2>&1 \
+         && docker volume rm "$MEDIA_VOL" >/dev/null; then
+        info "cleanup: media-volume $MEDIA_VOL удалён"
+      else
+        warn "cleanup: volume $MEDIA_VOL — ownership не подтверждён или rm не удался; НЕ трогаем"
+        [ "$lbl" = "$RUNID" ] || all_ok=0
+      fi
+    else
+      info "cleanup: volume $MEDIA_VOL отсутствует — удалять нечего"
+    fi
+  fi
+  if [ "$all_ok" = 1 ] && [ "$STATE_STARTED" = 1 ]; then
+    state_write cleaned >/dev/null 2>&1 || warn "cleanup: state cleaned не записан"
+  fi
+}
+
+# ---------- отказ: failed-state + cleanup только своих целей ----------
+finish() {
+  local rc=$?
+  if [ -n "$WORK" ]; then
+    rm -rf "$WORK"  # plaintext media на диске не оставляем ни при каком исходе
+  fi
+  if [ "$rc" = 0 ] || [ "$COMPLETED" = 1 ]; then
+    return 0
+  fi
+  if [ "$STATE_STARTED" = 1 ]; then
+    host_python "$TARGETS" state-write --state "$STATE" --run-id "$RUNID" \
+      --db "${INTO_DB:-}" --volume "${MEDIA_VOL:-}" --mode "$MODE" --profile "$PROFILE" \
+      --run-dir "$RUN_DIR" --phase "failed:$PHASE" >/dev/null 2>&1 \
+      || warn "failed-state не удалось записать в $STATE"
+  fi
+  if [ "$MODE" = rehearsal ] && [ "$KEEP" = 0 ]; then
+    cleanup_owned_targets || true
+  else
+    warn "цели НЕ удаляем (mode=$MODE keep=$KEEP): ${INTO_DB:-?} / ${MEDIA_VOL:-без media}"
+  fi
+  info "restore FAILED: exit=$rc фаза=$PHASE state=$STATE (диагностика сохранена)"
+  return "$rc"
+}
+trap finish EXIT
+
+# ---------- шаг 1: точка, манифест, checksums — ДО любых записей ----------
+WORK="$(mktemp -d)"
 DEST="$BACKUP_DIR/$PROFILE"
 if [ -z "$RUN_DIR" ]; then
   RUN_DIR="$(host_python - "$DEST" "$PROFILE" <<'PY'
@@ -59,48 +221,160 @@ fi
 [ -d "$RUN_DIR" ] || die "run dir missing: $RUN_DIR"
 [ -f "$RUN_DIR/.verified_ok" ] || die "каталог не помечен .verified_ok — не точка восстановления"
 
+PHASE=manifest
 info "точка: $RUN_DIR"
-# --- ДО записи: манифест и checksum'ы (B04) ---
 host_python "$HERE/backup_manifest.py" check --run-dir "$RUN_DIR"
-host_python - "$RUN_DIR/manifest.json" > "$RUN_DIR.restore.files.json" <<'PY'
+host_python - "$RUN_DIR/manifest.json" > "$WORK/files.json" <<'PY'
 import json, sys
 print(json.dumps(json.load(open(sys.argv[1]))["files"]))
 PY
-trap 'rm -f "$RUN_DIR.restore.files.json"' EXIT
-verify_checksums "$RUN_DIR" "$RUN_DIR.restore.files.json"
+verify_checksums "$RUN_DIR" "$WORK/files.json"
 info "checksums верифицированы до начала записи"
+read -r SRC_DB MEDIA_FILES MEDIA_BYTES <<EOF
+$(host_python -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["source"]["db"], int(m["media"]["files"]), int(m["media"]["bytes"]))' "$RUN_DIR/manifest.json")
+EOF
+[ -n "$SRC_DB" ] && [ -n "$MEDIA_FILES" ] && [ -n "$MEDIA_BYTES" ] \
+  || die "manifest: не читаются source.db / media.files / media.bytes"
 
-SRC_DB="$(host_python -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"]["db"])' "$RUN_DIR/manifest.json")"
-TS="$(date -u +%Y%m%dT%H%M%SZ)"
-[ -n "$INTO_DB" ] || INTO_DB="${SRC_DB}_t14rehearsal_${TS:2:8}"
-[ "$INTO_DB" != "$SRC_DB" ] || die "target db совпадает с источником — живой destination запрещён (п.5)"
-
-# целевая БД обязана быть пуста
-NAMES="$(compose exec -T mongo mongosh --quiet --eval "printjson(db.getSiblingDB('$INTO_DB').getCollectionNames().length)")"
-[ "$NAMES" = "0" ] || die "целевая БД $INTO_DB не пуста ($NAMES коллекций) — перезапись запрещена"
-
-t0=$SECONDS
-info "restore mongodump-архива: $SRC_DB → $INTO_DB"
-age_decrypt_stream "$RUN_DIR/mongo.archive.age" \
-  | compose exec -T mongo mongorestore --quiet --drop --archive \
-      --nsInclude "${SRC_DB}.*" --nsFrom "${SRC_DB}.*" --nsTo "${INTO_DB}.*"
-
-MEDIA_STATE="$(host_python -c 'import json,sys; print(json.load(open(sys.argv[1]))["media"]["files"])' "$RUN_DIR/manifest.json")"
-[ -n "$MEDIA_VOL" ] || MEDIA_VOL="dsbot-$PROFILE-restore-media-$TS"
-if [ "$MEDIA_STATE" != "0" ]; then
-  docker volume create "$MEDIA_VOL" >/dev/null
-  info "restore media → volume $MEDIA_VOL ($MEDIA_STATE файлов)"
-  age_decrypt_stream "$RUN_DIR/media.age" \
-    | docker run --rm -i -v "$MEDIA_VOL:/dst" "$MONGO_IMAGE" tar -xf - -C /dst
+# ---------- шаг 2: цели прогона (resume или новый run id) ----------
+PHASE=targets
+if [ "$RESUME" = 1 ]; then
+  [ -f "$STATE" ] || die "resume: state-файл не найден: $STATE"
+  RUNID="$(state_field runId)"
+  INTO_DB="$(state_field db)"
+  MEDIA_VOL="$(state_field volume)"
+  REACHED="$(state_field reached)"
+  [ "$(state_field cleaned)" != "true" ] \
+    || die "resume: прогон уже завершён cleanup'ом (cleaned) — сделайте новый запуск с новым --state"
+  [ "$RUNID" != "" ] && [ "$INTO_DB" != "" ] || die "resume: state не содержит полных целей"
+  [ "$(state_field mode)" = "$MODE" ] || die "resume: режим прогона в state ($MODE запросили) не совпадает"
+  s_run_dir="$(state_field runDir)"
+  [ -z "$s_run_dir" ] || [ "$s_run_dir" = "$RUN_DIR" ] \
+    || die "resume: state привязан к другой точке ($s_run_dir)"
+  [[ "$RUNID" =~ $RUNID_RE ]] || die "resume: run id в state повреждён"
+  if [ "$MODE" = rehearsal ]; then
+    [ "$INTO_DB" = "voice_tracker_${PROFILE}_rehearsal_${RUNID}" ] \
+      || die "resume: цель БД в state не совпадает с восстановленной по run id"
+    [ -z "$MEDIA_VOL" ] || [ "$MEDIA_VOL" = "dsbot-$PROFILE-restore-media-$RUNID" ] \
+      || die "resume: media-volume в state не совпадает с восстановленным по run id"
+  else
+    [ "$INTO_DB" = "$CONFIRM_DEST" ] || die "resume: cutover-цель не подтверждена --confirm-dest"
+  fi
+  if [ "$MEDIA_FILES" != "0" ] && [ -z "$MEDIA_VOL" ]; then
+    die "resume: точка содержит media, но media-цель в state не записана"
+  fi
+  STATE_STARTED=1
+  info "resume: run=$RUNID db=$INTO_DB media=${MEDIA_VOL:-нет} reached=$REACHED"
 else
-  info "media в снимке нет — volume не восстанавливаем"
-  MEDIA_VOL=""
+  RUNID="$(host_python "$TARGETS" run-id)"
+  [ -n "$INTO_DB" ] || INTO_DB="voice_tracker_${PROFILE}_rehearsal_${RUNID}"
+  if [ "$MEDIA_FILES" != "0" ]; then
+    MEDIA_VOL="dsbot-$PROFILE-restore-media-$RUNID"
+    [ "$MEDIA_VOL" != "$(env_value MEDIA_VOLUME)" ] \
+      || die "media-volume совпал с рабочим из env — невозможно (ошибка сборки имени)"
+  fi
 fi
-RESTORE_SECS=$((SECONDS - t0))
-info "restore занял ${RESTORE_SECS}s (B07 evidence)"
+if [ "$MEDIA_FILES" = "0" ]; then
+  MEDIA_VOL=""
+  info "media в снимке нет — volume не создаём"
+fi
 
-if [ "$DO_VERIFY" = 1 ]; then
-  info "verify восстановленной копии против манифеста (п.6)"
+# ---------- валидация имён целей ----------
+PHASE=validate
+if [ "$MODE" = rehearsal ]; then
+  host_python "$TARGETS" validate-db --db "$INTO_DB" --source "$SRC_DB" --configured "$MONGO_DB"
+else
+  [ "$INTO_DB" = "$CONFIRM_DEST" ] \
+    || die "cutover: --into-db ($INTO_DB) обязано точно совпадать с --confirm-dest ($CONFIRM_DEST)"
+  [[ "$INTO_DB" =~ $DB_SAFE_RE ]] || die "cutover: целевое имя содержит запрещённые символы"
+fi
+
+# ---------- гейт БД (первый) + гейт volume (отказ, если существует) ----------
+if ! has_phase db-restored; then
+  PHASE=db-gate
+  db_must_be_absent
+fi
+if [ -n "$MEDIA_VOL" ] && ! has_phase media-extracted; then
+  PHASE=volume-gate
+  if [ "$RESUME" = 0 ] && docker volume inspect "$MEDIA_VOL" >/dev/null 2>&1; then
+    die "volume $MEDIA_VOL уже существует — прогон пишет только в новые цели"
+  fi
+fi
+
+# ---------- резервация прогона: дальше идут только записи в наши цели ----------
+PHASE=state-prepared
+if ! has_phase prepared; then
+  # этот вызов и есть «резервация»: повторный запуск в тот же state-файл
+  # с другим run id получает отказ (защита «повтор в один час»)
+  state_write prepared >/dev/null
+fi
+STATE_STARTED=1
+
+# ---------- шаги 4–5: volume с ownership-меткой, tar, chown ----------
+if [ -n "$MEDIA_VOL" ] && ! has_phase media-extracted; then
+  PHASE=volume
+  # на свежем прогоне до create — только existence-гейт (volume-gate выше,
+  # голым inspect); сверка ownership-метки — после create, ровно как требует
+  # R26-08: «create молча возвращает существующий» ловится перечитыванием
+  # метки, а не вторым inspect до записи.
+  if [ "$RESUME" = 1 ] && lbl="$(volume_run_label "$MEDIA_VOL")"; then
+    [ "$lbl" = "$RUNID" ] \
+      || die "resume: volume $MEDIA_VOL существует с чужой меткой (${lbl:-<none>}) — не наш прогон"
+    info "resume: volume уже создан этим прогоном"
+  else
+    docker volume create \
+      --label "com.dsbot.restore.run=$RUNID" \
+      --label "com.dsbot.restore.mode=$MODE" \
+      "$MEDIA_VOL" >/dev/null
+    # «create молча возвращает существующий» — перечитываем метку: создан не
+    # нами = отказ, дальше cleanup этого ресурса не тронет никогда
+    lbl="$(volume_run_label "$MEDIA_VOL")" \
+      || die "volume $MEDIA_VOL не виден inspect после create"
+    [ "$lbl" = "$RUNID" ] \
+      || die "метка volume после create (${lbl:-<none>}) ≠ run id — ресурс создан НЕ этим прогоном"
+  fi
+  mountpoint_dir="$(docker volume inspect -f '{{.Mountpoint}}' "$MEDIA_VOL")"
+  [ -n "$mountpoint_dir" ] && [ "$mountpoint_dir" != "<no value>" ] \
+    || die "volume $MEDIA_VOL без Mountpoint"
+
+  PHASE=media
+  info "restore media → volume $MEDIA_VOL ($MEDIA_FILES файлов)"
+  age_decrypt_stream "$RUN_DIR/media.age" > "$WORK/media.tar"
+  # потолок: media.bytes из манифеста × 2 (явный параметр, проверяется до
+  # первой записи в volume)
+  host_python "$TARGETS" check-tar --archive "$WORK/media.tar" --max-bytes $(( MEDIA_BYTES * 2 ))
+  docker run --rm -i -v "$MEDIA_VOL:/dst" "$MONGO_IMAGE" tar -xf - -C /dst < "$WORK/media.tar"
+  uidv="$(env_value DSBOT_UID)"
+  gidv="$(env_value DSBOT_GID)"
+  { [ -n "$uidv" ] && [ -n "$gidv" ]; } \
+    || die "DSBOT_UID/DSBOT_GID не заданы в $ENV_FILE — некому вернуть права gateway на media"
+  [[ "$uidv" =~ ^[0-9]+$ ]] && [[ "$gidv" =~ ^[0-9]+$ ]] \
+    || die "DSBOT_UID/DSBOT_GID должны быть числовыми uid/gid"
+  # extraction идёт root'овым контейнером — без смены владельца gateway не сможет писать
+  docker run --rm -v "$MEDIA_VOL:/dst" "$MONGO_IMAGE" ch -R "$uidv:$gidv" /dst
+  rm -f "$WORK/media.tar"
+  state_write media-extracted >/dev/null
+fi
+
+# ---------- шаг 6: mongorestore без --drop (цель гарантированно пуста) ----------
+t0=$SECONDS
+if ! has_phase db-restored; then
+  PHASE=db-gate-rerace
+  db_must_be_absent   # double-check гонки непосредственно перед записью в БД
+  PHASE=mongorestore
+  info "restore mongodump-архива: $SRC_DB → $INTO_DB (цель гарантированно пуста — обход без drop)"
+  age_decrypt_stream "$RUN_DIR/mongo.archive.age" \
+    | compose exec -T mongo mongorestore --quiet --archive \
+        --nsInclude "${SRC_DB}.*" --nsFrom "${SRC_DB}.*" --nsTo "${INTO_DB}.*"
+  state_write db-restored >/dev/null
+else
+  info "resume: mongorestore уже выполнен прогоном $RUNID"
+fi
+
+# ---------- шаг 7: verify ОБЯЗАТЕЛЕН (обхода нет) ----------
+if ! has_phase verified; then
+  PHASE=verify
+  info "verify восстановленной копии против манифеста (обязательный)"
   MOUNT_ARGS=()
   RESTORE_MEDIA=""
   if [ -n "$MEDIA_VOL" ]; then
@@ -115,12 +389,26 @@ if [ "$DO_VERIFY" = 1 ]; then
        --uri "$MONGO_URI" --db "$RESTORE_DB" --manifest /tmp/manifest.json \
        ${RESTORE_MEDIA:+--media-dir "$RESTORE_MEDIA"}' \
     < "$RUN_DIR/manifest.json"
+  state_write verified >/dev/null
   info "verify OK"
+else
+  info "resume: verify уже выполнен прогоном $RUNID"
 fi
+RESTORE_SECS=$((SECONDS - t0))
 
+# ---------- отчёт; cleanup только rehearsal без --keep ----------
+COMPLETED=1
 if [ "$KEEP" = 0 ]; then
-  info "убираем rehearsal-цели (перезапуск с --keep оставил бы их)"
-  compose exec -T mongo mongosh --quiet --eval "db.getSiblingDB('$INTO_DB').dropDatabase()" >/dev/null
-  [ -n "$MEDIA_VOL" ] && docker volume rm "$MEDIA_VOL" >/dev/null
+  info "убираем rehearsal-цели (для хранения целей — --keep)"
+  cleanup_owned_targets
 fi
-info "restore+verify завершены за ${RESTORE_SECS}s"
+info "──────── отчёт restore ────────"
+info "run id: $RUNID | mode: $MODE | keep: $KEEP"
+info "цели:   db=$INTO_DB | media=${MEDIA_VOL:-не создавался}"
+info "точка:  $RUN_DIR (source db=$SRC_DB)"
+info "verify: выполнен и пройден (обязателен; обхода нет)"
+info "state:  $STATE"
+info "restore занял ${RESTORE_SECS}s (B07 evidence)"
+if [ "$MODE" = cutover ]; then
+  info "cutover: цели оставлены намеренно; активация (MONGO_DB/MEDIA_VOLUME в env профиля) — отдельный шаг оператора"
+fi

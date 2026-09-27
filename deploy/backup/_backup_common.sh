@@ -5,6 +5,11 @@
 
 BACKUP_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# необязательные шаги (cleanup-diagnostic, запись состояния при уже падающем
+# прогоне) не должны затыкать скрипт молча: предупреждение видно оператору,
+# но не меняет ход отказа
+warn() { echo "WARN: $*" >&2; }
+
 # --- конфигурация окружения бэкапа (из того же .env профиля, что и deploy) ---
 load_backup_env() {
   [ -f "$ENV_FILE" ] || die "env file missing: $ENV_FILE"
