@@ -2,6 +2,11 @@
 
 Импортируем stdlib-хелпер напрямую (тот же приём, что в test_backup_tools).
 Реального docker/Mongo здесь нет: проверяются только чистые функции-гейты.
+
+Карта приёмов (формат аннотаций — как в tests/test_eventlog_sweep.py):
+  V26-19 — source/prod-имена не цели: живая исходная или рабочая БД никогда
+           не принимаются как destination;
+  V26-20 — name: allowlist и чёрный список имён целей, shape run id.
 """
 from __future__ import annotations
 
@@ -38,6 +43,7 @@ def _ns(**kw) -> Namespace:
     "voice_tracker_staging_rehearsal_99999999T235959Z_ffffff",
 ])
 def test_validate_db_accepts_allowlisted_rehearsal_names(name: str) -> None:
+    """V26-20: name — allowlist принимает только полную форму rehearsal-цели."""
     rc = restore_targets.cmd_validate_db(_ns(db=name, source="voice_tracker_production", configured="voice_tracker_production"))
     assert rc == 0
 
@@ -61,6 +67,8 @@ def test_validate_db_accepts_allowlisted_rehearsal_names(name: str) -> None:
     "voice_tracker_production_rehearsal_20260927T121510Z_ab12cd7",
 ])
 def test_validate_db_rejects_everything_else(bad: str, capsys) -> None:
+    """V26-20: name — чёрный список: усечение, чужие префиксы, служебные и
+    prod-имена, инъекция в mongosh --eval, регистр hex — всё отклонено."""
     rc = restore_targets.cmd_validate_db(_ns(db=bad, source="voice_tracker_production", configured="voice_tracker_production"))
     assert rc == 2
     err = capsys.readouterr().err
@@ -68,6 +76,8 @@ def test_validate_db_rejects_everything_else(bad: str, capsys) -> None:
 
 
 def test_validate_db_rejects_source_and_configured_even_if_shape_is_valid() -> None:
+    """V26-19: source/prod-имена не цели — форма верная, но имя совпадает с
+    источником или рабочей БД из env."""
     # форма правильная, но имя совпадает с source/known configured — живой destination
     rc = restore_targets.cmd_validate_db(_ns(db=GOOD_DB, source=GOOD_DB, configured=""))
     assert rc == 2
@@ -167,6 +177,8 @@ def test_check_tar_rejects_unreadable_and_missing(tmp_path: Path) -> None:
 
 
 def test_run_id_full_precision_and_unique() -> None:
+    """V26-20: name — run id полной формы, уникален; собранное из него имя
+    цели проходит allowlist."""
     a = restore_targets.new_run_id()
     b = restore_targets.new_run_id()
     assert RUNID_RE.match(a), a

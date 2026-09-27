@@ -152,12 +152,21 @@ cleanup_owned_targets() {
       # метка run == RUNID прогона + тот же volume записан в state
       if [ "$lbl" = "$RUNID" ] \
          && host_python "$TARGETS" state-check --state "$STATE" --run-id "$RUNID" \
-              --volume "$MEDIA_VOL" >/dev/null 2>&1 \
-         && docker volume rm "$MEDIA_VOL" >/dev/null; then
-        info "cleanup: media-volume $MEDIA_VOL удалён"
+              --volume "$MEDIA_VOL" >/dev/null 2>&1; then
+        if docker volume rm "$MEDIA_VOL" >/dev/null; then
+          info "cleanup: media-volume $MEDIA_VOL удалён"
+        elif volume_run_label "$MEDIA_VOL" >/dev/null 2>&1; then
+          # rm вернул ошибку при живом volume: цель НЕ удалена — cleaned не
+          # пишем, иначе resume ложно заблокируется и осиротевшая цель выпадет
+          # из наблюдения (по образцу drop-ветки выше)
+          warn "cleanup: volume $MEDIA_VOL не удалён — цель осталась, разбираемся вручную"
+          all_ok=0
+        else
+          info "cleanup: volume $MEDIA_VOL уже отсутствует — удалять нечего"
+        fi
       else
-        warn "cleanup: volume $MEDIA_VOL — ownership не подтверждён или rm не удался; НЕ трогаем"
-        [ "$lbl" = "$RUNID" ] || all_ok=0
+        warn "cleanup: volume $MEDIA_VOL — ownership не подтверждён; НЕ трогаем"
+        all_ok=0
       fi
     else
       info "cleanup: volume $MEDIA_VOL отсутствует — удалять нечего"

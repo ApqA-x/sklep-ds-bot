@@ -8,6 +8,14 @@ volume'ов живёт в JSON-like файлах tmp_path. Реальные то
 
 На Windows pytest гоняется python.exe → bash запускается через `wsl --exec`;
 на Linux (в т.ч. внутри WSL) — напрямую. Пути конвертируются C:\\x → /mnt/c/x.
+
+Карта приёмов (формат аннотаций — как в tests/test_eventlog_sweep.py):
+  V26-19 — чужие цели и отказ до любых записей: existence/ownership-гейты,
+           cleanup только state-подтверждённых целей, защита чужого state,
+           cutover-гейты;
+  V26-20 — name/tar/checksum/age-key/UID/no-verify/crash: shape-валидация
+           имён целей, целостность архива, cleanup СВОИХ целей при отказе
+           на любом шаге.
 """
 from __future__ import annotations
 
@@ -125,6 +133,7 @@ case "$cmd" in
         printf '%s\n' "$name"; exit 0 ;;
       rm)
         name="${1:-}"
+        if [ -n "${FAKE_VOL_RM_FAIL:-}" ]; then echo "fake-docker: rm failed" >&2; exit 1; fi
         rm -rf "$FAKE_VOLS_DIR/$name"
         exit 0 ;;
       ls)
@@ -171,6 +180,7 @@ case "$cmd" in
               fi
               printf '%s\n' "${FAKE_DB_LIST:-admin local config}"; exit 0
             elif [[ "$eval" == *dropDatabase* ]]; then
+              if [ -n "${FAKE_DROP_FAIL:-}" ]; then exit 1; fi
               exit 0
             fi
             exit 0 ;;
@@ -394,6 +404,7 @@ def h(tmp_path: Path) -> Harness:
 
 
 def test_existing_volume_refused_before_any_write(h: Harness) -> None:
+    """V26-19: существующий чужой volume — отказ до любых записей, ресурс не тронут."""
     proc = h.run("production", "--keep", extra_env={"FAKE_VOL_EXISTS_ALWAYS": "1"})
     assert proc.returncode != 0
     assert "уже существует" in (proc.stderr + proc.stdout)
@@ -405,6 +416,7 @@ def test_existing_volume_refused_before_any_write(h: Harness) -> None:
 
 
 def test_target_db_present_refused_before_writes(h: Harness) -> None:
+    """V26-19: цель БД уже существует — отказ до любых записей."""
     proc = h.run("production", "--keep", "--into-db", FIXED_DB,
                  extra_env={"FAKE_DB_LIST": f"admin local config voice_tracker_production {FIXED_DB}"})
     assert proc.returncode != 0
@@ -414,6 +426,8 @@ def test_target_db_present_refused_before_writes(h: Harness) -> None:
 
 
 def test_db_appeared_in_race_second_gate_catches(h: Harness) -> None:
+    """V26-19: гонка — цель появилась между гейтами; второй гейт блокирует
+    запись в чужую БД, drop чужой цели нет, свой volume убран."""
     # первый list — цели нет; все «гонки» после этого видят цель: mongorestore запрещён
     proc = h.run("production", "--into-db", FIXED_DB, extra_env={
         "FAKE_DB_LIST_1": "admin local config voice_tracker_production",
@@ -431,6 +445,7 @@ def test_db_appeared_in_race_second_gate_catches(h: Harness) -> None:
 
 
 def test_volume_create_returning_existing_foreign_is_refused_and_untouched(h: Harness) -> None:
+    """V26-19: «create молча вернул существующий» с чужой меткой — отказ, ресурс цел."""
     # дефект R26-08: «docker volume create молча возвращает существующий».
     # Фейк на create пишет ЧУЖУЮ метку; скрипт обязан отказать после сверки
     # метки и никогда не удалять этот ресурс.
@@ -450,6 +465,8 @@ def test_volume_create_returning_existing_foreign_is_refused_and_untouched(h: Ha
 
 
 def test_no_verify_flag_is_gone(h: Harness) -> None:
+    """V26-19: отказ парсера до любых обращений к docker; V26-20: no-verify — обхода
+    обязательной проверки не существует."""
     proc = h.run("production", "--no-verify")
     assert proc.returncode != 0
     assert "неизвестный аргумент" in (proc.stderr + proc.stdout)
@@ -457,6 +474,8 @@ def test_no_verify_flag_is_gone(h: Harness) -> None:
 
 
 def test_media_volume_flag_is_gone(h: Harness) -> None:
+    """V26-19: отказ парсера до любых обращений к docker; V26-20: имя media-volume
+    извне не принимается — том всегда новый и свой."""
     proc = h.run("production", "--media-volume", "dsbot-media")
     assert proc.returncode != 0
     assert "неизвестный аргумент" in (proc.stderr + proc.stdout)
@@ -464,6 +483,8 @@ def test_media_volume_flag_is_gone(h: Harness) -> None:
 
 
 def test_rehearsal_rejects_prod_and_injection_db_names(h: Harness) -> None:
+    """V26-19: prod-имя цели не принимается и отказ идёт до любых записей;
+    V26-20: allowlist имён + защита инъекции в mongosh --eval."""
     for bad in ("voice_tracker_production", "x';db.getSiblingDB('admin').dropDatabase()"):
         proc = h.run("production", "--into-db", bad)
         assert proc.returncode != 0, bad
@@ -473,6 +494,7 @@ def test_rehearsal_rejects_prod_and_injection_db_names(h: Harness) -> None:
 
 
 def test_truncated_hour_targets_are_rejected_by_shape(h: Harness) -> None:
+    """V26-20: name — «усечённый до часа» идентификатор не форма цели (shape-allowlist)."""
     # старый дефект ${TS:2:8}: «усечённый до часа» идентификатор больше не форма цели
     proc = h.run("production", "--into-db", "voice_tracker_production_rehearsal_26092704")
     assert proc.returncode != 0
@@ -483,6 +505,7 @@ def test_truncated_hour_targets_are_rejected_by_shape(h: Harness) -> None:
 
 
 def test_bad_checksum_refused_before_docker_work(h: Harness) -> None:
+    """V26-20: checksum — подделанный .age файл отсекается до любых docker-записей."""
     victim = h.run_dir / "mongo.archive.age"
     victim.write_bytes(b"tampered-bytes-XXXXXXXXXXXXX")
     proc = h.run("production", "--keep")
@@ -492,6 +515,8 @@ def test_bad_checksum_refused_before_docker_work(h: Harness) -> None:
 
 
 def test_bad_age_key_refuses_with_no_surviving_targets(h: Harness) -> None:
+    """V26-20: key — неверный age-ключ; V26-19: свой volume убран cleanup'ом
+    прогона, чужих целей state не подтверждает — записей в БД нет."""
     proc = h.run("production", extra_env={"FAKE_AGE_DECRYPT_FAIL": "1"})
     assert proc.returncode != 0
     seq = h.seq()
@@ -504,6 +529,7 @@ def test_bad_age_key_refuses_with_no_surviving_targets(h: Harness) -> None:
 
 
 def test_tar_traversal_blocked_before_extraction(h: Harness) -> None:
+    """V26-20: tar — traversal-пути в архиве блокируют распаковку; свой volume убран."""
     h.run_dir = h.make_run_point(media_members=[("77/ok.bin", 32), ("../evil.bin", 10)])
     proc = h.run("production")
     assert proc.returncode != 0
@@ -514,6 +540,8 @@ def test_tar_traversal_blocked_before_extraction(h: Harness) -> None:
 
 
 def test_tar_oversize_blocked_by_manifest_ceiling(h: Harness) -> None:
+    """V26-20: tar — распакованный объём выше потолка media.bytes×2: блокировка
+    до записи в volume; свой volume убран, чужих целей не тронуты."""
     # манифест занижает распакованный объём (битый/подделанный снимок):
     # потолок media.bytes*2 обязан остановить распаковку до записи в volume
     h.run_dir = h.make_run_point(media_members=[("77/big.bin", 4096)])
@@ -533,6 +561,8 @@ def test_tar_oversize_blocked_by_manifest_ceiling(h: Harness) -> None:
 
 
 def test_crash_after_db_restored_cleans_only_state_confirmed_db(h: Harness) -> None:
+    """V26-20: crash на verify после db-restored; V26-19: drop только
+    state-подтверждённой цели этого прогона, volume — только свой."""
     proc = h.run("production", extra_env={"FAKE_VERIFY_FAIL": "1"})
     assert proc.returncode != 0
     seq = h.seq()
@@ -545,6 +575,8 @@ def test_crash_after_db_restored_cleans_only_state_confirmed_db(h: Harness) -> N
 
 
 def test_crash_at_volume_create_leaves_no_state_confirmed_db(h: Harness) -> None:
+    """V26-20: crash на volume create; V26-19: нечего подтверждать — записей в
+    чужие цели нет, cleanup не вызывает ни drop, ни rm."""
     proc = h.run("production", "--keep", extra_env={"FAKE_CREATE_FAIL": "1"})
     assert proc.returncode != 0
     seq = h.seq()
@@ -552,10 +584,116 @@ def test_crash_at_volume_create_leaves_no_state_confirmed_db(h: Harness) -> None
     assert h.state_json()["phase"] == "failed:volume"
 
 
+def test_crash_tar_extract_failure_cleans_own_volume_no_db_write(h: Harness) -> None:
+    """V26-20: crash на распаковке tar (шаг 4–5); V26-19: БД не достигнута —
+    дропать нечего и state не подтверждает, убран только СВОЙ volume."""
+    proc = h.run("production", extra_env={"FAKE_TAR_EXTRACT_FAIL": "1"})
+    assert proc.returncode != 0
+    seq = h.seq()
+    assert "create" in seq and "extract" in seq    # распаковка была и упала
+    assert "chown" not in seq and "restore" not in seq
+    assert "drop" not in seq                       # БД не достигнута — не трогаем
+    assert "vol-rm" in seq                         # свой volume убран
+    st = h.state_json()
+    assert st["failed"] == "media" and st["cleaned"] is True
+    assert "db-restored" not in st["reached"]
+    assert h.live_volumes() == []
+
+
+def test_crash_mongorestore_failure_treated_as_state_confirmed_target(h: Harness) -> None:
+    """V26-20: crash на mongorestore; V26-19: cleanup действует строго по
+    state-подтверждённым целям этого прогона — право на drop даёт только
+    фаза db-restored в reached.
+
+    Фактическое поведение seq: mongorestore падает ДО state_write
+    db-restored (set -e + pipefail на пайпе age|mongorestore), поэтому
+    цель НЕ подтверждена и drop в seq ОТСУТСТВУЕТ — частично
+    восстановленную БД не удаляем никогда (мог существовать чужой
+    ресурс); свой volume при этом убирается, cleaned=true.
+    """
+    proc = h.run("production", extra_env={"FAKE_RESTORE_FAIL": "1"})
+    assert proc.returncode != 0
+    seq = h.seq()
+    assert "restore" in seq and "verify" not in seq
+    assert "drop" not in seq                       # db-restored не в reached
+    assert "vol-rm" in seq                         # свой volume убран
+    st = h.state_json()
+    assert st["failed"] == "mongorestore" and st["cleaned"] is True
+    assert "db-restored" not in st["reached"]
+    assert h.live_volumes() == []
+
+
+def test_invalid_uid_env_refuses_after_extraction_before_chown(h: Harness) -> None:
+    """V26-20: нечисловые/отсутствующие DSBOT_UID/DSBOT_GID — отказ после
+    распаковки tar, до chown и до mongorestore; V26-19: записей в БД нет,
+    cleanup убирает только СВОЙ volume."""
+    base_env = h.env_file.read_text(encoding="utf-8")
+    variants = {
+        "нечисловые": base_env.replace("DSBOT_UID=10001", "DSBOT_UID=abc"),
+        "удалены": "".join(
+            ln + "\n" for ln in base_env.splitlines()
+            if not ln.startswith(("DSBOT_UID=", "DSBOT_GID="))),
+    }
+    for label, content in variants.items():
+        h.env_file.write_text(content, encoding="utf-8", newline="\n")
+        h.state.unlink(missing_ok=True)  # новый прогон — чистый state-файл
+        proc = h.run("production")
+        out = proc.stderr + proc.stdout
+        assert proc.returncode != 0, label
+        assert "DSBOT_UID" in out, label
+        seq = h.seq()
+        assert "extract" in seq, label             # распаковка состоялась
+        assert "chown" not in seq, label           # die до chown
+        assert "restore" not in seq, label         # и до mongorestore
+        assert "drop" not in seq and "vol-rm" in seq, label
+        assert h.live_volumes() == [], label       # свой volume убран
+        st = h.state_json()
+        assert st["failed"] == "media" and st["cleaned"] is True, label
+
+
+def test_failed_volume_rm_does_not_mark_cleaned(h: Harness) -> None:
+    """V26-20: cleanup не врал: volume rm НЕ удался — cleaned не пишется;
+    V26-19: осиротевшая цель остаётся отслеживаемой, resume не блокируется
+    ложным «уже завершён cleanup'ом»."""
+    proc = h.run("production", extra_env={"FAKE_VERIFY_FAIL": "1",
+                                          "FAKE_VOL_RM_FAIL": "1"})
+    assert proc.returncode != 0
+    out = proc.stderr + proc.stdout
+    assert "не удалён" in out                      # warn про оставшуюся цель
+    seq = h.seq()
+    assert "drop" in seq                           # state-подтверждённая БД удалена
+    assert "vol-rm" in seq                         # попытка rm была
+    st = h.state_json()
+    assert st["failed"] == "verify" and st["cleaned"] is False
+    assert h.live_volumes() == [st["volume"]]      # цель живёт, пока rm не удалось
+
+    again = h.run("production", "--resume")
+    assert "уже завершён cleanup'ом" not in (again.stderr + again.stdout)
+    assert again.returncode == 0, again.stderr[-2000:]  # resume не заблокирован
+    assert h.state_json()["cleaned"] is True       # теперь cleanup доведён
+    assert h.live_volumes() == []
+
+
+def test_failed_db_drop_does_not_mark_cleaned(h: Harness) -> None:
+    """V26-20: drop БД не удался — cleaned не пишется (цель осталась);
+    V26-19: свой volume при этом убран, чужие цели не тронуты."""
+    proc = h.run("production", extra_env={"FAKE_VERIFY_FAIL": "1",
+                                          "FAKE_DROP_FAIL": "1"})
+    assert proc.returncode != 0
+    assert "не удался" in (proc.stderr + proc.stdout)
+    seq = h.seq()
+    assert "drop" in seq and "vol-rm" in seq
+    st = h.state_json()
+    assert st["failed"] == "verify" and st["cleaned"] is False
+    assert h.live_volumes() == []
+
+
 # ---------------------------------------------------- успех / keep / resume
 
 
 def test_success_rehearsal_call_sequence_without_drop(h: Harness) -> None:
+    """V26-19: полный успешный прогон — гейты до записей, mongorestore без --drop,
+    ownership-метки, drop только своей state-подтверждённой цели, chown по UID из env."""
     proc = h.run("production")
     assert proc.returncode == 0, proc.stderr[-2000:]
     seq = h.seq()
@@ -593,6 +731,7 @@ def test_success_rehearsal_call_sequence_without_drop(h: Harness) -> None:
 
 
 def test_keep_preserves_targets_and_state_verified(h: Harness) -> None:
+    """V26-19: --keep — цели сохранены, drop/rm не вызывались, state без cleaned."""
     proc = h.run("production", "--keep")
     assert proc.returncode == 0, proc.stderr[-2000:]
     seq = h.seq()
@@ -603,6 +742,8 @@ def test_keep_preserves_targets_and_state_verified(h: Harness) -> None:
 
 
 def test_rerun_on_same_state_without_resume_is_refused(h: Harness) -> None:
+    """V26-19: повторный запуск без --resume в чужой state-файл — отказ, чужой
+    прогон не перезатёрт."""
     assert h.run("production", "--keep").returncode == 0
     before = h.state.read_bytes()
     proc = h.run("production", "--keep")   # повтор без --resume: новый run id в чужой state
@@ -612,6 +753,8 @@ def test_rerun_on_same_state_without_resume_is_refused(h: Harness) -> None:
 
 
 def test_resume_with_matching_state_skips_completed_steps(h: Harness) -> None:
+    """V26-19: resume продолжает ТОТ же прогон (run id/цели из state), шаги с
+    достигнутыми фазами не повторяются."""
     assert h.run("production", "--keep").returncode == 0
     st1 = h.state_json()
     proc = h.run("production", "--keep", "--resume")
@@ -627,12 +770,14 @@ def test_resume_with_matching_state_skips_completed_steps(h: Harness) -> None:
 
 
 def test_cutover_requires_confirm_dest(h: Harness) -> None:
+    """V26-19: cutover без явного --confirm-dest — отказ до любых обращений к docker."""
     proc = h.run("production", "--mode", "cutover", "--into-db", "voice_tracker_production")
     assert proc.returncode != 0
     assert "--confirm-dest" in (proc.stderr + proc.stdout)
 
 
 def test_cutover_dest_must_match_exact(h: Harness) -> None:
+    """V26-19: cutover-цель принимается только при точном совпадении с --confirm-dest."""
     proc = h.run("production", "--mode", "cutover", "--into-db", "voice_tracker_production",
                  "--confirm-dest", "voice_tracker_production_typo")
     assert proc.returncode != 0
@@ -640,6 +785,8 @@ def test_cutover_dest_must_match_exact(h: Harness) -> None:
 
 
 def test_cutover_success_keeps_targets_and_forces_keep(h: Harness) -> None:
+    """V26-19: cutover — cleanup целей запрещён (--keep форсится), prod-имя цели
+    никогда не уходит в dropDatabase-интерполяцию."""
     # чистый Linux-хост: voice_tracker_production отсутствует на сервере
     proc = h.run("production", "--mode", "cutover",
                  "--into-db", "voice_tracker_production",
