@@ -127,6 +127,46 @@ age_key_preflight() {
     || die "preflight: ключ age не читается/не валиден (round-trip encrypt→decrypt не прошёл) — backup прерван ДО остановки writers"
 }
 
+preflight_tools_and_space() {
+  # R26-09 (шаг 2 AI_RELEASE_REMAINING_WORK, добор PR #74): ДО freeze проверяется
+  # всё, без чего прогон обречён: инструменты — в их РЕАЛЬНОМ контексте
+  # исполнения, и свободное место — в том самом приёмнике, куда пойдёт запись.
+  # Порядок — дешёвое к дорогому: хостовая проверка места, затем пробы в
+  # контейнерах. Первый отказ = die: writers ещё стоят, полуточки нет,
+  # предыдущая точка не тронута (стенд не ложится впустую).
+  # Секреты не печатаются: значения MONGO_* и содержимое env-файла наружу не
+  # выводятся, только пути.
+  #
+  # 1) Порог и место (дешевле всего, без контейнеров). BACKUP_MIN_FREE_MB —
+  #    нижняя граница в MiB (default 64 — защита от «диск забит», не
+  #    рекомендация по размеру; ops обязан выставить от представительного
+  #    размера точки). Мусорное значение — отказ, а не «молча считаем 0».
+  BACKUP_MIN_FREE_MB="$(env_value BACKUP_MIN_FREE_MB)"
+  BACKUP_MIN_FREE_MB="${BACKUP_MIN_FREE_MB:-64}"
+  case "$BACKUP_MIN_FREE_MB" in
+    ''|*[!0-9]*) die "preflight: BACKUP_MIN_FREE_MB должно быть целым неотрицательным числом MiB — backup прерван ДО остановки writers" ;;
+  esac
+  local avail_kb
+  avail_kb="$(df -Pk "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')" || avail_kb=""
+  case "$avail_kb" in
+    # fail-closed: df не ответил (каталог исчез/прав нет) — не гадаем, отказ.
+    ''|*[!0-9]*) die "preflight: не удалось определить свободное место в $BACKUP_DIR (df -Pk) — backup прерван ДО остановки writers" ;;
+  esac
+  [ "$avail_kb" -ge "$((BACKUP_MIN_FREE_MB * 1024))" ] \
+    || die "preflight: недостаточно свободного места в $BACKUP_DIR (есть ${avail_kb} KB, нужно ${BACKUP_MIN_FREE_MB} MB по BACKUP_MIN_FREE_MB) — backup прерван ДО остановки writers"
+  # 2) mongodump — проба внутри mongo-контейнера: он не заморожен во время
+  #    префлайта, exec валиден, и это ровно тот контекст (образ, PATH), откуда
+  #    работает dump_mongo_archive. Вывод наружу не идёт (может содержать
+  #    пути/версии), важен только код возврата.
+  compose exec -T mongo mongodump --version >/dev/null 2>&1 \
+    || die "preflight: mongodump недоступен в контейнере mongo ($MONGO_DB не будет снят) — backup прерван ДО остановки writers"
+  # 3) tar — проба одноразовым контейнером с тем же entrypoint-враппером и тем
+  #    же образом, что у media_archive (frozen-сервис exec'нуть нельзя — и мы
+  #    ещё до freeze, но контекст обязан совпадать с реальным снимком).
+  compose run --rm --no-deps -T --entrypoint tar gateway --version >/dev/null 2>&1 \
+    || die "preflight: tar недоступен в образе gateway — backup прерван ДО остановки writers"
+}
+
 OPS_LOCK_FD=9
 acquire_ops_lock() {
   # Один прогон над точками профиля в любой момент: backup.sh и restore.sh

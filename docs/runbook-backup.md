@@ -90,10 +90,20 @@ ops-lock, stream-encryption) делают `dsbot-backup.service` failed-unit —
      python3 deploy/backup/backup_retention.py prune --dest "$BACKUP_DIR/production" \
      --profile production --daily-keep 7 --weekly-keep 4 --execute
    ```
-3. **preflight ключа age ДО freeze writers**: round-trip 32 случайных байт
-   (`age --encrypt` → `age --decrypt` → побайтовое сравнение) в приватном
-   mktemp-каталоге. Нечитаемый/невалидный ключ или сломанный age видны ДО
-   `compose stop` — стенд не ложится впустую, прогон не создаёт полуточку.
+3. **полный preflight ДО freeze writers** (R26-09, шаг 2; добор PR #74): пока
+   стенд работает, проверяются — **ключ age** (round-trip 32 случайных байт:
+   `age --encrypt` → `age --decrypt` → побайтовое сравнение в приватном
+   mktemp-каталоге), **инструменты в их реальном контексте исполнения**
+   (`mongodump --version` внутри контейнера mongo — там же, где пойдёт дамп;
+   `tar --version` одноразовым контейнером образа gateway через тот же
+   entrypoint-враппер, что и снимок медиа), **приёмник** (запись в `BACKUP_DIR`)
+   и **свободное место** в нём — не менее `BACKUP_MIN_FREE_MB` (MiB, по
+   умолчанию 64; это нижняя граница «диск жив», а не рекомендация по размеру:
+   ops выставляет порог от представительного размера точки). Любой отказ —
+   ненулевой выход **при нулевом числе `compose stop`**, без каталога
+   `.incomplete` и без касания предыдущей проверенной точки: отсутствующий
+   бинарник или полный диск больше не обнаруживаются, когда стенд уже лежит.
+   Значения секретов и URI в сообщениях не печатаются — только пути.
 4. **stream-encryption без plaintext-стейджинга**: stdout `mongodump
    --archive` и stdout `tar -c` (одноразовый контейнер) идут напрямую в
    `age --encrypt`; на диске существуют только `mongo.archive.age` и

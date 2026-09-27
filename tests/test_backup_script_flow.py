@@ -23,6 +23,11 @@
   i) R26-09 добор (PR #74 follow-up): унаследованный fd, указывающий на самый
      lock-файл но НЕ заблокированный, не даёт ложного владения — блокировка
      подтверждается настоящим LOCK_EX|LOCK_NB, конкурент не проходит.
+  j) R26-09 добор (PR #74 follow-up, шаг 2): ПОЛНЫЙ preflight ДО freeze —
+     не только ключ, но и инструменты в их реальном контексте исполнения
+     (mongodump в контейнере mongo, tar в образе gateway) и свободное место в
+     приёмнике (BACKUP_MIN_FREE_MB). От любого отказа — ненулевой выход при
+     НУЛЕВЫМ числе compose stop, без полуточки и без касания предыдущей точки.
 
 Номера вызовов age-«шифратора» в FAKE_AGE_FAIL_CALL/STALL_CALL: 1=preflight,
 2=mongo.archive.age, 3=media.age (round-trip preflight тоже шифрует).
@@ -80,6 +85,9 @@ FAKE_DOCKER = r"""#!/usr/bin/env bash
 # Тестовая заглушка docker CLI для R26-09 (backup-конвейер). Каждый вызов
 # логируется одной строкой; ответы — синтетика нужной формы (JSON counts/media,
 # «поток дампа», «tar-поток»), реальная инфраструктура не затрагивается.
+# Режимы (env процесса, фейки читают окружение напрямую): FAKE_MONGODUMP_FAIL=1
+# — mongodump отсутствует в контейнере mongo (127 на любых аргументах),
+# FAKE_TAR_FAIL=1 — tar отсутствует в образе gateway (127 на любых аргументах).
 printf '%s\n' "docker $*" >> "$FAKE_DOCKER_LOG"
 
 case "${1:-}" in
@@ -120,6 +128,13 @@ case "${1:-}" in
         bin="${1:-}"; shift || true
         case "$bin" in
           mongodump)
+            # R26-09 preflight: бинарника нет в контейнере mongo — отказ для
+            # ЛЮБЫХ аргументов mongodump, включая --version (проба префлайта
+            # обязана увидеть ровно тот же 127, что увидел бы дамп)
+            if [ "${FAKE_MONGODUMP_FAIL:-0}" = 1 ]; then
+              echo "OCI runtime exec failed: exec: \"mongodump\": executable file not found in \$PATH" >&2
+              exit 127
+            fi
             if [[ "$*" == *--version* ]]; then echo "mongodump version fake"; exit 0; fi
             # stdout: «архив дампа» (в реальном конвейере идёт в pipe age)
             printf 'MONGODUMP-PAYLOAD-0123456789ABCDEF\n'
@@ -128,6 +143,12 @@ case "${1:-}" in
         esac ;;
       run)
         if [[ "$*" == *"--entrypoint tar"* ]]; then
+          # R26-09 preflight: tar нет в образе gateway — 127 на ЛЮБЫХ аргументах
+          # (--version в том числе), как это сделал бы реальный docker run
+          if [ "${FAKE_TAR_FAIL:-0}" = 1 ]; then
+            echo "docker: Error response from daemon: OCI runtime create failed: tar: executable file not found in \$PATH" >&2
+            exit 127
+          fi
           printf 'TARSTREAM-PAYLOAD-0123456789ABCDEF\n'
           exit 0
         fi
@@ -264,6 +285,14 @@ class Harness:
         self.state = tmp_path / "restore-state.json"
 
     # ---------- запуск реальных скриптов ----------
+    def append_env_keys(self, **keys: str) -> None:
+        """Дописать ключи в env-файл профиля. load_backup_env/preflight читают
+        их через env_value именно из файла (не из процесса), поэтому такие
+        настройки нельзя передать через extra_env."""
+        with self.env_file.open("a", encoding="utf-8", newline="\n") as fh:
+            for k, v in keys.items():
+                fh.write(f"{k}={v}\n")
+
     def _prepare(self, script: str, args: list[str],
                  extra_env: dict[str, str] | None) -> tuple[list[str], dict[str, str]]:
         exports = {
@@ -337,11 +366,29 @@ class Harness:
         return [ln for ln in self.log_lines() if re.search(r"\bcompose\b.*\bup -d\b", ln)]
 
     def dump_calls(self) -> list[int]:
+        # «--archive» уже отсекает пробу префлайта (mongodump --version):
+        # это только реальные дампы Mongo
         return [i for i, ln in enumerate(self.log_lines())
                 if "mongodump" in ln and "--archive" in ln]
 
     def tar_calls(self) -> list[int]:
-        return [i for i, ln in enumerate(self.log_lines()) if "--entrypoint tar" in ln]
+        # Только media-потоки (tar -cf - …): проба префлайта идёт в тот же
+        # "--entrypoint tar gateway", но с --version и без -cf, и обязана
+        # оставаться ЗА окном заморозки — иначе window-ассерт солжёт.
+        return [i for i, ln in enumerate(self.log_lines())
+                if "--entrypoint tar" in ln and "--version" not in ln]
+
+    def dump_version_calls(self) -> list[int]:
+        """Пробы `mongodump --version` в контейнере mongo: до freeze — префлайт
+        (preflight_tools_and_space), после unfreeze — tools_json."""
+        return [i for i, ln in enumerate(self.log_lines())
+                if "mongodump" in ln and "--version" in ln]
+
+    def tar_version_calls(self) -> list[int]:
+        """Пробы `tar --version` одноразовым контейнером образа gateway
+        (тот же exec-контекст, что у media_archive) — префлайт."""
+        return [i for i, ln in enumerate(self.log_lines())
+                if "--entrypoint tar" in ln and "--version" in ln]
 
     def dest(self) -> Path:
         return self.backup_dir / "production"
@@ -488,6 +535,31 @@ def test_pipeline_has_no_plaintext_staging_calls() -> None:
     assert re.search(r"-C /data/media \. \\\n\s*\| age --encrypt", common), common
 
 
+def test_preflight_tools_and_space_wired_before_freeze() -> None:
+    """(j-статика) backup.sh вызывает preflight_tools_and_space исполняемой
+    строкой ДО вызова freeze; хелпер определён и содержит все три проверки
+    (df -Pk по приёмнику, mongodump --version в контейнере mongo,
+    --entrypoint tar gateway --version в образе gateway) и порог
+    BACKUP_MIN_FREE_MB; age хелпер не трогает (номера age-вызовов не сдвигаются)."""
+    lines = [ln for ln in (DEPLOY_BACKUP / "backup.sh").read_text(encoding="utf-8").splitlines()
+             if not ln.lstrip().startswith("#")]
+    call_i = [i for i, ln in enumerate(lines) if ln.strip() == "preflight_tools_and_space"]
+    freeze_i = [i for i, ln in enumerate(lines) if ln.strip() == "freeze"]
+    assert call_i, "backup.sh: preflight_tools_and_space не вызывается исполняемой строкой"
+    assert freeze_i, "backup.sh: не найден исполняемый вызов freeze"
+    assert call_i[0] < freeze_i[0], "preflight обязан предшествовать freeze writers"
+    common = (DEPLOY_BACKUP / "_backup_common.sh").read_text(encoding="utf-8")
+    assert re.search(r"^preflight_tools_and_space\(\)", common, re.MULTILINE), common
+    assert "compose exec -T mongo mongodump --version" in common
+    assert "compose run --rm --no-deps -T --entrypoint tar gateway --version" in common
+    assert 'df -Pk "$BACKUP_DIR"' in common
+    assert "BACKUP_MIN_FREE_MB" in common
+    # префлайт инструментов/места — без age: 1=preflight-ключа, 2=mongo, 3=media
+    body = common.split("preflight_tools_and_space()", 1)[1].split("\n}", 1)[0]
+    assert not re.search(r"(?m)(^|[\s;&|`(])age(\s|$)", body), \
+        "preflight_tools_and_space не должен вызывать age (номера age-вызовов фиксированы)"
+
+
 # ---------------------------------------------------------------- a) happy path
 
 
@@ -607,6 +679,101 @@ def test_non_age_key_file_refuses_before_freeze(h: Harness) -> None:
     assert "AGE-SECRET-KEY" in (proc.stderr + proc.stdout)
     assert h.stop_calls() == []
     assert h.finals() == [] and h.partials() == []
+
+
+# ------------------------------------- j) R26-09 добор: полный preflight ДО freeze
+# (AI_RELEASE_REMAINING_WORK шаг 2: ключ, инструменты, свободное место и приёмник
+# проверяются, пока writers ещё работают)
+
+
+def test_preflight_tools_probes_run_before_freeze(h: Harness) -> None:
+    """(j-0) успех: пробы mongodump --version (в контейнере mongo) и
+    tar --version (одноразовым контейнером образа gateway, тот же exec-контекст,
+    что у media_archive) записаны в docker-лог ДО первого compose stop;
+    age-вызовы префлайтом не сдвигаются (1=preflight, 2=mongo, 3=media)."""
+    proc = h.run_backup()
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    log = h.log_lines()
+    stop_i = min(i for i, ln in enumerate(log) if re.search(r"\bcompose\b.*\bstop\b", ln))
+    dump_probes = h.dump_version_calls()
+    tar_probes = h.tar_version_calls()
+    assert any(i < stop_i for i in dump_probes), \
+        "префлайт обязан пробовать mongodump в mongo-контейнере до freeze"
+    assert tar_probes and all(i < stop_i for i in tar_probes), \
+        "префлайт обязан пробовать tar в образе gateway до freeze"
+    # tools_json (п.2) по-прежнему вызывает mongodump --version — уже после unfreeze
+    up_i = max(i for i, ln in enumerate(log) if re.search(r"\bcompose\b.*\bup -d\b", ln))
+    assert any(i > up_i for i in dump_probes)
+    enc = [ln for ln in h.age_log_lines() if ln.startswith("age --encrypt")]
+    assert len(enc) == 3 and len([ln for ln in h.age_log_lines()
+                                  if ln.startswith("age --decrypt")]) == 1
+
+
+def test_preflight_missing_mongodump_refuses_before_freeze(h: Harness) -> None:
+    """(j-1) нет mongodump в контейнере mongo: обнаруживается префлайтом, пока
+    стенд работает — ненулевой exit со словом «mongodump», НОЛЬ compose stop,
+    ни одного дампа (--archive), ни полуточки, предпрогонная точка цела (B02)."""
+    prior = h.seed_prior_point()
+    before = h.snapshot(prior)
+    proc = h.run_backup(extra_env={"FAKE_MONGODUMP_FAIL": "1"})
+    assert proc.returncode != 0
+    out = proc.stderr + proc.stdout
+    assert "preflight" in out and "mongodump" in out
+    assert "ДО остановки writers" in out
+    assert h.stop_calls() == [], "стенд не должен ложиться из-за отсутствующего инструмента"
+    assert h.dump_calls() == []
+    assert not any("--archive" in ln for ln in h.log_lines())
+    assert h.partials() == [] and h.finals() == [prior]
+    assert h.snapshot(prior) == before
+    h.assert_no_plaintext_anywhere()
+
+
+def test_preflight_missing_tar_refuses_before_freeze(h: Harness) -> None:
+    """(j-2) нет tar в образе gateway — та же гарантия: отказ ДО freeze, медиа
+    не снимается, точка не заводится, предпрогон цел."""
+    prior = h.seed_prior_point()
+    before = h.snapshot(prior)
+    proc = h.run_backup(extra_env={"FAKE_TAR_FAIL": "1"})
+    assert proc.returncode != 0
+    out = proc.stderr + proc.stdout
+    assert "preflight" in out and "tar" in out
+    assert h.stop_calls() == []
+    assert h.dump_calls() == [] and h.tar_calls() == []
+    assert h.partials() == [] and h.finals() == [prior]
+    assert h.snapshot(prior) == before
+    h.assert_no_plaintext_anywhere()
+
+
+def test_preflight_insufficient_space_refuses_before_freeze(h: Harness) -> None:
+    """(j-3) BACKUP_MIN_FREE_MB завышен до заведомо неисполнимого (~95 TiB):
+    df показывает меньше — отказ ДО freeze со словом «места», writers стоят,
+    записей нет, предпрогон цел."""
+    prior = h.seed_prior_point()
+    before = h.snapshot(prior)
+    h.append_env_keys(BACKUP_MIN_FREE_MB="100000000")
+    proc = h.run_backup()
+    assert proc.returncode != 0
+    out = proc.stderr + proc.stdout
+    assert "preflight" in out and "места" in out
+    assert h.stop_calls() == []
+    assert h.dump_calls() == [] and h.tar_calls() == []
+    assert h.partials() == [] and h.finals() == [prior]
+    assert h.snapshot(prior) == before
+
+
+def test_preflight_garbage_min_free_mb_refuses_before_freeze(h: Harness) -> None:
+    """(j-4) BACKUP_MIN_FREE_MB=не число: fail-closed (значения не печатаются),
+    отказ тоже ДО freeze — молча «считать порог нулём» нельзя."""
+    prior = h.seed_prior_point()
+    before = h.snapshot(prior)
+    h.append_env_keys(BACKUP_MIN_FREE_MB="not-a-number")
+    proc = h.run_backup()
+    assert proc.returncode != 0
+    out = proc.stderr + proc.stdout
+    assert "preflight" in out and "BACKUP_MIN_FREE_MB" in out
+    assert h.stop_calls() == []
+    assert h.partials() == [] and h.finals() == [prior]
+    assert h.snapshot(prior) == before
 
 
 # ---------------------------------------------------------------- f/g) lock

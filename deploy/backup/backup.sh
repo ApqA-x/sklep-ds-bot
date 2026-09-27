@@ -17,8 +17,13 @@
 #  * stream-encryption: stdout mongodump и tar сразу уходит в age — на диск
 #    попадают только mongo.archive.age / media.age, plaintext-стейджинга нет
 #    ни при каком исходе (включая SIGKILL: trap не нужен, чтобы нечего стирать);
-#  * preflight ключа age (round-trip encrypt→decrypt синтетики) — ДО freeze
-#    writers: невалидный ключ виден, пока стенд ещё работает;
+#  * preflight ДО freeze writers — полный (шаг 2 AI_RELEASE_REMAINING_WORK,
+#    добор PR #74): ключ (round-trip encrypt→decrypt), инструменты в их реальном
+#    контексте исполнения (mongodump в контейнере mongo, tar в образе gateway),
+#    запись в BACKUP_DIR и свободное место не менее BACKUP_MIN_FREE_MB
+#    (default 64 MiB). Невалидный ключ, отсутствующий бинарник или полный диск
+#    видны, пока стенд ещё работает: отказ даёт ненулевой выход при нулевом
+#    числе compose stop и без .incomplete-каталога;
 #  * ops-lock (flock -x -n на $BACKUP_DIR/.ops-<profile>.lock) держится весь
 #    прогон: параллельный backup/restore/retention-вне-прогона не запускаются;
 #    без flock скрипт отказывается стартовать (fail-closed).
@@ -45,6 +50,9 @@ load_backup_env
 acquire_ops_lock
 # R26-09: кривой age-ключ обнаруживается ДО остановки writers (стенд не лежит впустую)
 age_key_preflight
+# R26-09 (добор PR #74): инструменты (mongodump/tar в реальных контекстах) и
+# свободное место в приёмнике — тоже ДО остановки writers
+preflight_tools_and_space
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 DEST="$BACKUP_DIR/$PROFILE"
