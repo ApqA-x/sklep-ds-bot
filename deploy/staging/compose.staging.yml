@@ -4,10 +4,19 @@
 #   - отдельный compose-проект (dsbot-staging), СВОИ named volumes (имена задаются
 #     в env-файле staging и не должны совпадать с прод), СВОЯ internal-сеть;
 #   - приложение пишет в mongo-контейнер этого проекта, база voice_tracker_staging
-#     (validate_env.py отказывает staging на прод-имени БД);
+#     (validate_env.py отказывает staging на прод-имени БД и на точных прод-
+#     отпечатках томов, R26-06 п.4);
 #   - web слушает другой loopback-порт;
 #   - image references — ТЕ ЖЕ переменные и те же самые images, что и production
 #     (тест того артефакта, что пойдёт на Linux).
+#
+# R26-06 (V26-16): единый источник env — env_file ссылается на ${DSBOT_ENV_FILE},
+# который deploy-скрипты передают и как --env-file для интерполяции. Старый
+# относительный env_file без переменной (docker резолвил его от каталога
+# compose-файла) запрещён.
+# R26-06 (V26-17): gateway/commands/activity/stalker/web получают вторую сеть
+# dsbot-egress (bridge = NAT) для Discord REST/Gateway/OAuth; mongo/nats/
+# tracker/writer/controlplane в egress НЕ состоят.
 #
 # Успех на NTFS НЕ подтверждает Linux-права (UID/GID, case sensitivity, atomic
 # rename) — эти проверки отдельные, на Linux-стенде (см. runbook раздел Linux).
@@ -81,7 +90,11 @@ services:
   gateway:
     <<: *app-defaults
     image: ${BOT_GATEWAY_IMAGE:?}
-    env_file: .env
+    env_file:
+      - "${DSBOT_ENV_FILE:?set by deploy scripts (single source of env)}"
+    networks:
+      - dsbot-data
+      - dsbot-egress
     environment:
       <<: *bot-env
       SERVICE_NAME: gateway
@@ -101,7 +114,8 @@ services:
   tracker:
     <<: *app-defaults
     image: ${BOT_TRACKER_IMAGE:?}
-    env_file: .env
+    env_file:
+      - "${DSBOT_ENV_FILE:?set by deploy scripts (single source of env)}"
     environment:
       <<: *bot-env
       SERVICE_NAME: tracker
@@ -119,7 +133,8 @@ services:
   writer:
     <<: *app-defaults
     image: ${BOT_WRITER_IMAGE:?}
-    env_file: .env
+    env_file:
+      - "${DSBOT_ENV_FILE:?set by deploy scripts (single source of env)}"
     environment:
       <<: *bot-env
       SERVICE_NAME: writer
@@ -137,7 +152,11 @@ services:
   commands:
     <<: *app-defaults
     image: ${BOT_COMMANDS_IMAGE:?}
-    env_file: .env
+    env_file:
+      - "${DSBOT_ENV_FILE:?set by deploy scripts (single source of env)}"
+    networks:
+      - dsbot-data
+      - dsbot-egress
     environment:
       <<: *bot-env
       SERVICE_NAME: commands
@@ -155,7 +174,11 @@ services:
   activity:
     <<: *app-defaults
     image: ${BOT_ACTIVITY_IMAGE:?}
-    env_file: .env
+    env_file:
+      - "${DSBOT_ENV_FILE:?set by deploy scripts (single source of env)}"
+    networks:
+      - dsbot-data
+      - dsbot-egress
     environment:
       <<: *bot-env
       SERVICE_NAME: activity
@@ -173,7 +196,11 @@ services:
   stalker:
     <<: *app-defaults
     image: ${BOT_STALKER_IMAGE:?}
-    env_file: .env
+    env_file:
+      - "${DSBOT_ENV_FILE:?set by deploy scripts (single source of env)}"
+    networks:
+      - dsbot-data
+      - dsbot-egress
     environment:
       <<: *bot-env
       SERVICE_NAME: stalker
@@ -193,7 +220,8 @@ services:
     <<: *app-defaults
     profiles: ["controlplane"]
     image: ${BOT_CONTROLPLANE_IMAGE:?}
-    env_file: .env
+    env_file:
+      - "${DSBOT_ENV_FILE:?set by deploy scripts (single source of env)}"
     environment:
       <<: *bot-env
       SERVICE_NAME: controlplane
@@ -211,13 +239,31 @@ services:
   web:
     <<: *app-defaults
     image: ${WEB_IMAGE:?}
-    env_file: .env
+    networks:
+      - dsbot-data
+      - dsbot-egress
+    # R26-06 (п.5): web без общего env_file — ровно ключи, которые читает
+    # wt-web api/config.py (набор идентичен production; см. комментарий там).
+    # staging гоняет ТЕ ЖЕ production-гарды (T02 fail-closed), отличается только
+    # изоляцией данных (свои volumes/DB/сеть) и тестовыми Discord-идентичностями.
     environment:
       MONGO_URI: mongodb://mongo:27017
       MEDIA_DIR: /data/media
-      # staging гоняет ТЕ ЖЕ production-гарды (T02 fail-closed), отличается только
-      # изоляцией данных (свои volumes/DB/сеть) и тестовыми Discord-идентичностями
       WEB_ENV: production
+      MONGO_DB: ${MONGO_DB:?}
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?}
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:?}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:?}
+      WEB_SESSION_SECRET: ${WEB_SESSION_SECRET:?}
+      WEB_GUILD_ALLOWLIST: ${WEB_GUILD_ALLOWLIST:?}
+      WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-}
+      DISCORD_REDIRECT_URI: ${DISCORD_REDIRECT_URI:-}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      WEB_PORT: ${WEB_PORT:-8000}
+      WEB_SESSION_MAX_AGE_HOURS: ${WEB_SESSION_MAX_AGE_HOURS:-}
+      WEB_QUERY_MAX_TIME_MS: ${WEB_QUERY_MAX_TIME_MS:-}
+      WEB_MEDIA_MIN_FREE_BYTES: ${WEB_MEDIA_MIN_FREE_BYTES:-}
     ports:
       - "${WEB_INGRESS_BIND:-127.0.0.1}:${WEB_HOST_PORT:-8090}:8000"
     volumes:
@@ -240,3 +286,7 @@ volumes:
 networks:
   dsbot-data:
     internal: true
+  # V26-17: NAT-egress для Discord (только web и сервисы с внешними вызовами);
+  # НЕ external — не требует предсуществования.
+  dsbot-egress:
+    internal: false

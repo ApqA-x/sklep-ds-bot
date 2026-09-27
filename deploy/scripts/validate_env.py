@@ -13,6 +13,16 @@ import sys
 
 DIGEST_RE = re.compile(r"^(?:[\w.\-]+/)?[\w.\-/]+@sha256:[0-9a-f]{64}$")
 
+# R26-06 (п.4): точные отпечатки прод-идентичностей вместо подстроки "-prod".
+# Исторический прод-volume называется ровно "dsbot-media" — подстроку "-prod"
+# он не содержит и раньше проходил staging-гард. Теперь: exact-совпадение +
+# allowlist-префикс для staging-томов.
+PROTECTED_VOLUMES = {"dsbot-media", "dsbot-prod-mongo-data"}
+PROTECTED_DB = "voice_tracker"
+PROTECTED_PROJECT = "dsbot-prod"
+STAGING_VOLUME_PREFIX = "dsbot-staging-"
+ALLOWED_STAGING_PROJECTS = {"dsbot-staging"}
+
 IMAGE_KEYS = [
     "MONGO_IMAGE",
     "NATS_IMAGE",
@@ -65,6 +75,12 @@ def check(path: str, mode: str) -> list[str]:
             errors.append(f"missing required key: {key}")
     if env.get("WEB_DEV_BYPASS_AUTH"):
         errors.append("WEB_DEV_BYPASS_AUTH must be absent/empty in production/staging")
+    if "DSBOT_ENV_FILE" in env:
+        # V26-16: интерполяция env_file берёт DSBOT_ENV_FILE из процесса (его
+        # подставляют deploy-скрипты). Ключ внутри env-файла = второй источник
+        # пути, который молча переопределяет выбор оператора.
+        errors.append("DSBOT_ENV_FILE must not be defined inside the env file "
+                      "(it is set by deploy scripts from the environment)")
     for key in IMAGE_KEYS:
         value = env.get(key, "")
         if value and not DIGEST_RE.match(value):
@@ -79,13 +95,29 @@ def check(path: str, mode: str) -> list[str]:
     if mode == "production":
         if env.get("MONGO_DB") and env["MONGO_DB"] == "voice_tracker_staging":
             errors.append("production MONGO_DB looks like staging")
-    if mode == "staging":
-        if env.get("MONGO_DB") == "voice_tracker":
-            errors.append("staging MONGO_DB is the PRODUCTION database name")
         for key in ("MONGO_VOLUME", "MEDIA_VOLUME"):
             v = env.get(key, "")
-            if v and "-prod" in v:
-                errors.append(f"staging {key} references a prod volume name: {v}")
+            if v and v.startswith(STAGING_VOLUME_PREFIX):
+                errors.append(f"production {key} looks like a staging volume: {v!r}")
+    if mode == "staging":
+        if env.get("MONGO_DB") == PROTECTED_DB:
+            errors.append("staging MONGO_DB is the PRODUCTION database name")
+        # R26-06 (п.4): exact fingerprints вместо подстроки "-prod" — исторический
+        # прод-volume "dsbot-media" не содержит "-prod" и раньше проходил гард.
+        for key in ("MONGO_VOLUME", "MEDIA_VOLUME"):
+            v = env.get(key, "")
+            if not v:
+                continue
+            if v in PROTECTED_VOLUMES or v == PROTECTED_PROJECT:
+                errors.append(f"staging {key} references a prod volume (protected "
+                              f"identity, exact match): {v!r}")
+            elif not v.startswith(STAGING_VOLUME_PREFIX):
+                errors.append(f"staging {key} must start with {STAGING_VOLUME_PREFIX!r} "
+                              f"(allowlist form of isolation): {v!r}")
+        project = env.get("DSBOT_PROJECT", "")
+        if project and project not in ALLOWED_STAGING_PROJECTS:
+            errors.append(f"staging DSBOT_PROJECT {project!r} is not in the allowlist "
+                          f"{sorted(ALLOWED_STAGING_PROJECTS)}")
         port = env.get("WEB_HOST_PORT", "")
         if port == "":
             errors.append("staging WEB_HOST_PORT must be set explicitly (different from prod 8000)")
