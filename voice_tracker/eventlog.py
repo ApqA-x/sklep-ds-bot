@@ -9,14 +9,31 @@ event_inbox — состояние обработки конкретным consu
              received → processing(lease+fence) → completed | quarantined.
              Ack = completed после устойчивого результата хендлера (T09.5);
              transient failure освобождает lease для следующей попытки (E03);
-             исчерпание max_deliver или poison → quarantine с причиной (E08).
+             исчерпание max_deliver или poison → карантин с причиной (E08).
+event_sweep_state — курсор догрузки consumer'а (R26-01): позиция (createdAt, _id)
+             последней просмотренной строки журнала. Продвижение только вперёд;
+             незавершённые за курсором добирает retry-проход по inbox, а не
+             повторный скан префикса журнала.
 
-Sweep (sweep_pending) — «доставка из журнала»: consumer, пропустивший wire-момент
-(NATS upsert-only, рестарт сервиса, простой), добирает необработанные события по
-createdAt — это E01/E02 без JetStream-тома и без переключения транспорта.
+Sweep (sweep_pending, R26-01/E01) — три прохода за тик:
+  forward — события СТРОГО за курсором, сортировка (createdAt,_id), страница
+            bounded (scan_limit). Курсор двигается за последний просмотренный ряд,
+            у которого есть inbox-строка любого состояния (completed/quarantined —
+            терминальны; processing/received — их завершением владеет inbox-путь);
+  retry   — inbox-строки consumer'а в received / истёкший processing независимо
+            от курсора: повторные попытки старых событий не исчезают за
+            high-water mark;
+  gap     — окно (курсор − gap_seconds, курсор]: ловит строки, вставленные с
+            «опоздавшим» createdAt (задержка записи/часов).
+Каждый проход ограничен по числу операций и памяти; весь синхронный Mongo I/O
+исполняется через asyncio.to_thread (L06: тик не блокирует event loop).
+pending_stats — несколько indexed count/limit-1 запросов вместо полного N+1
+обхода журнала; missing/received/expired processing в backlog, active processing
+и карантин — отдельными полями.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -30,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 COLL_EVENT_LOG = "event_log"
 COLL_EVENT_INBOX = "event_inbox"
+COLL_SWEEP_STATE = "event_sweep_state"
 
 STATE_RECEIVED = "received"
 STATE_PROCESSING = "processing"
@@ -38,6 +56,9 @@ STATE_QUARANTINED = "quarantined"
 
 DEFAULT_LEASE_SECONDS = 120
 DEFAULT_MAX_DELIVER = 8
+# R26-01: потолок строк страницы за тик и ширина окна опозданий вставки.
+DEFAULT_SCAN_LIMIT = 2000
+DEFAULT_GAP_SECONDS = 120.0
 
 
 def _utc_now() -> datetime:
@@ -115,37 +136,45 @@ async def publish_durable(
     payload = value if isinstance(value, dict) else json.loads(
         json.dumps(_plain(value), ensure_ascii=False, default=str)
     )
-    eid = record(db, subject, payload, event_id=event_id)
+    eid = await asyncio.to_thread(record, db, subject, payload, event_id=event_id)
     try:
         await bus.publish_json(subject, value, message_id=eid)
-        db[COLL_EVENT_LOG].update_one(
-            {"_id": eid}, {"$set": {"publishedAt": _utc_now(), "publishError": None}}
+        await asyncio.to_thread(
+            db[COLL_EVENT_LOG].update_one,
+            {"_id": eid}, {"$set": {"publishedAt": _utc_now(), "publishError": None}},
         )
     except Exception as err:  # noqa: BLE001 — журнал уже устойчив, транспорт догонит
-        db[COLL_EVENT_LOG].update_one(
-            {"_id": eid}, {"$set": {"publishedAt": None, "publishError": str(err)[:300]}}
+        await asyncio.to_thread(
+            db[COLL_EVENT_LOG].update_one,
+            {"_id": eid}, {"$set": {"publishedAt": None, "publishError": str(err)[:300]}},
         )
         logger.warning("event publish deferred subject=%s id=%s: %s", subject, eid, err)
     return eid
 
 
+def _unpublished_rows(db: Any, subject: str, limit: int) -> list[dict]:
+    return list(
+        db[COLL_EVENT_LOG].find({"subject": subject, "publishedAt": None}).sort([("createdAt", 1)]).limit(limit)
+    )
+
+
 async def republish_pending(bus: Any, db: Any, subject: str, *, limit: int = 50) -> int:
     """Повторная доставка устойчивых, но не подтверждённых транспортом событий.
     Тот же event_id → тот же message_id → потребители дедуплицируют (E02)."""
-    rows = list(
-        db[COLL_EVENT_LOG].find({"subject": subject, "publishedAt": None}).sort("createdAt", 1).limit(limit)
-    )
+    rows = await asyncio.to_thread(_unpublished_rows, db, subject, limit)
     republished = 0
     for row in rows:
         try:
             await bus.publish_json(subject, row["payload"], message_id=row["_id"])
-            db[COLL_EVENT_LOG].update_one(
-                {"_id": row["_id"]}, {"$set": {"publishedAt": _utc_now(), "publishError": None}}
+            await asyncio.to_thread(
+                db[COLL_EVENT_LOG].update_one,
+                {"_id": row["_id"]}, {"$set": {"publishedAt": _utc_now(), "publishError": None}},
             )
             republished += 1
         except Exception as err:  # noqa: BLE001 — попробуем в следующем свипе
-            db[COLL_EVENT_LOG].update_one(
-                {"_id": row["_id"]}, {"$set": {"publishError": str(err)[:300]}}
+            await asyncio.to_thread(
+                db[COLL_EVENT_LOG].update_one,
+                {"_id": row["_id"]}, {"$set": {"publishError": str(err)[:300]}},
             )
             logger.warning("event republish failed subject=%s id=%s: %s", subject, row["_id"], err)
             break
@@ -342,8 +371,11 @@ async def deliver(
     max_deliver: int = DEFAULT_MAX_DELIVER,
 ) -> str:
     """Единая точка исполнения: wire-путь и sweep идут через один claim, поэтому
-    гонка «доставка по сети + догрузка из журнала» не даёт двойного эффекта."""
-    claimed = claim(db, event_id, consumer, subject)
+    гонка «доставка по сети + догрузка из журнала» не даёт двойного эффекта.
+
+    Результат complete() проверяется: потерянный при takeover fence НЕ отдаётся как
+    «completed» — иначе caller удвоил бы эффект, считая доставку подтверждённой."""
+    claimed = await asyncio.to_thread(claim, db, event_id, consumer, subject)
     if claimed is None:
         return "skipped"
     try:
@@ -351,9 +383,259 @@ async def deliver(
         if inspect.isawaitable(result):
             await result
     except Exception as err:  # noqa: BLE001 — классификация в fail_attempt
-        return fail_attempt(db, claimed, f"{type(err).__name__}: {err}", max_deliver=max_deliver)
-    complete(db, claimed)
+        return await asyncio.to_thread(
+            fail_attempt, db, claimed, f"{type(err).__name__}: {err}", max_deliver=max_deliver
+        )
+    done = await asyncio.to_thread(complete, db, claimed)
+    if not done:
+        logger.warning(
+            "inbox fence lost at complete (takeover during handler) inbox=%s consumer=%s event=%s",
+            claimed.inbox_id,
+            consumer,
+            event_id,
+        )
+        return "fence_lost"
     return "completed"
+
+
+# ------------------------------------------------------------- sweep checkpoint
+
+
+def _state_key(consumer: str, subjects: list[str]) -> str:
+    digest = hashlib.sha256("\x1f".join([consumer, *sorted(subjects)]).encode("utf-8")).hexdigest()
+    return f"{consumer}\x1f{digest[:24]}"
+
+
+def _load_position(db: Any, key: str) -> tuple[datetime, str] | None:
+    """Позиция курсора (createdAt, _id). Повреждённая (не-datetime/не-строка) —
+    трактуется как «курсора нет»: полный replay, идемпотентность держит inbox."""
+    doc = db[COLL_SWEEP_STATE].find_one({"_id": key})
+    if not doc:
+        return None
+    position = doc.get("position") or {}
+    created = _as_utc(position.get("createdAt"))
+    event_id = position.get("eventId")
+    if created is None or not isinstance(event_id, str):
+        if doc.get("position") is not None:
+            logger.warning("sweep checkpoint corrupted key=%s — полный replay с начала журнала", key)
+        return None
+    return created, event_id
+
+
+def _forward_filter(subjects: list[str], position: tuple[datetime, str] | None) -> dict:
+    base: dict[str, Any] = {"subject": {"$in": list(subjects)}}
+    if position is None:
+        return base
+    created, event_id = position
+    base["$or"] = [
+        {"createdAt": {"$gt": created}},
+        {"createdAt": created, "_id": {"$gt": event_id}},
+    ]
+    return base
+
+
+def _save_position(db: Any, key: str, row_created: datetime, row_id: str, subjects: list[str]) -> None:
+    """Advance-only: повторная запись с той же/более старой позицией безвредна
+    (идемпотентно), более новая не перетирается фильтром $or ниже."""
+    now = _utc_now()
+    res = db[COLL_SWEEP_STATE].update_one(
+        {
+            "_id": key,
+            "$or": [
+                {"position": None},
+                {"position.createdAt": {"$lt": row_created}},
+                {"position.createdAt": row_created, "position.eventId": {"$lt": row_id}},
+            ],
+        },
+        {
+            "$set": {
+                "position": {"createdAt": row_created, "eventId": row_id},
+                "subjects": sorted(subjects),
+                "updatedAt": now,
+            }
+        },
+    )
+    if res.matched_count == 1:
+        return
+    existing = db[COLL_SWEEP_STATE].find_one({"_id": key}, {"position": 1})
+    if existing is None:
+        try:
+            db[COLL_SWEEP_STATE].insert_one(
+                {
+                    "_id": key,
+                    "position": {"createdAt": row_created, "eventId": row_id},
+                    "subjects": sorted(subjects),
+                    "createdAt": now,
+                    "updatedAt": now,
+                }
+            )
+        except Exception as err:  # noqa: BLE001 — гонка: победил другой advance
+            if not _is_duplicate(err):
+                raise
+        return
+    position = existing.get("position") or {}
+    if _as_utc(position.get("createdAt")) is None or not isinstance(position.get("eventId"), str):
+        # повреждённый курсор (не-datetime/не-строка): advance-фильтр по нему не
+        # сравнивает — чиним безусловно, иначе replay-позиция не восстановится никогда
+        db[COLL_SWEEP_STATE].update_one(
+            {"_id": key},
+            {
+                "$set": {
+                    "position": {"createdAt": row_created, "eventId": row_id},
+                    "subjects": sorted(subjects),
+                    "updatedAt": now,
+                }
+            },
+        )
+
+
+def _fetch_forward_page(
+    db: Any, subjects: list[str], position: tuple[datetime, str] | None, limit: int
+) -> list[dict]:
+    return list(
+        db[COLL_EVENT_LOG]
+        .find(_forward_filter(subjects, position), {"subject": 1, "createdAt": 1})
+        .sort([("createdAt", 1), ("_id", 1)])
+        .limit(limit)
+    )
+
+
+def _inbox_projection(db: Any, consumer: str, event_ids: list[str]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    if not event_ids:
+        return out
+    ids = [inbox_id(e, consumer) for e in event_ids]
+    for doc in db[COLL_EVENT_INBOX].find(
+        {"_id": {"$in": ids}},
+        {"state": 1, "leaseExpiresAt": 1, "attempts": 1, "eventId": 1, "subject": 1},
+    ):
+        out[doc["_id"]] = doc
+    return out
+
+
+def _retry_candidates(db: Any, consumer: str, subjects: list[str], now: datetime, limit: int) -> list[dict]:
+    """Retry-проход: незавершённые inbox-строки consumer'а (received или истёкший
+    processing) — они за курсором навсегда, и без этого прохода повторная попытка
+    исчезла бы за high-water mark (R26-01.2)."""
+    cursor = db[COLL_EVENT_INBOX].find(
+        {
+            "consumer": consumer,
+            "subject": {"$in": list(subjects)},
+            "$or": [
+                {"state": STATE_RECEIVED},
+                {"state": STATE_PROCESSING, "leaseExpiresAt": {"$lte": now}},
+            ],
+        },
+        {"eventId": 1, "subject": 1, "state": 1, "leaseExpiresAt": 1},
+    ).sort([("createdAt", 1)]).limit(limit)
+    return list(cursor)
+
+
+def _full_event(db: Any, event_id: str) -> dict | None:
+    return db[COLL_EVENT_LOG].find_one({"_id": event_id}, {"subject": 1, "payload": 1})
+
+
+def _quarantine_orphan(db: Any, consumer: str, row: dict, error: str) -> str:
+    """Inbox-строка указывает на отсутствующий в журнале event (удалённый/повреждённый
+    курсор-источник): claim + карантин с причиной — bounded, наблюдаемо, не вечно."""
+    claimed = claim(db, row["eventId"], consumer, row.get("subject", ""))
+    if claimed is None:
+        return "skipped"
+    return fail_attempt(db, claimed, error, poison=True)
+
+
+def _payload_bytes(payload: Any) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _pending_stats_sync(db: Any, consumer: str, subjects: list[str], *, cap: int = 10000) -> dict[str, Any]:
+    """Бюджетная метрика (R26-01.5/6): несколько indexed запросов вместо обхода
+    всего журнала с find_one на строку. pending = реальная незавершённая работа:
+    missing inbox (анти-join, ограниченный потолком cap) + received + истёкший
+    processing; активные попытки и карантин — отдельными полями."""
+    now = _utc_now()
+    key = _state_key(consumer, subjects)
+    position = _load_position(db, key)
+    fwd = _forward_filter(subjects, position)
+    inbox_coll = db[COLL_EVENT_INBOX]
+    # один агрегат: страница за курсором (индекс subject+createdAt+_id), correlated
+    # lookup inbox consumer'а, считаем строки без inbox-строки и самую старую из них
+    missing = 0
+    oldest_missing: datetime | None = None
+    pipeline = [
+        {"$match": fwd},
+        {"$sort": {"createdAt": 1, "_id": 1}},
+        {"$limit": cap},
+        {
+            "$lookup": {
+                "from": COLL_EVENT_INBOX,
+                "let": {"eid": "$_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$and": [
+                                    {"$eq": ["$eventId", "$$eid"]},
+                                    {"$eq": ["$consumer", consumer]},
+                                ]
+                            }
+                        }
+                    },
+                    {"$limit": 1},
+                ],
+                "as": "_mine",
+            }
+        },
+        {"$match": {"_mine": {"$size": 0}}},
+        {
+            "$facet": {
+                "count": [{"$count": "c"}],
+                "oldest": [{"$group": {"_id": None, "oldest": {"$min": "$createdAt"}}}],
+            }
+        },
+    ]
+    for res in db[COLL_EVENT_LOG].aggregate(pipeline):
+        facet = res or {}
+        counts = facet.get("count") or []
+        missing = int(counts[0]["c"]) if counts else 0
+        oldest_rows = facet.get("oldest") or []
+        if oldest_rows:
+            oldest_missing = _as_utc(oldest_rows[0].get("oldest"))
+    received = inbox_coll.count_documents({"consumer": consumer, "state": STATE_RECEIVED})
+    expired = inbox_coll.count_documents(
+        {"consumer": consumer, "state": STATE_PROCESSING, "leaseExpiresAt": {"$lte": now}}
+    )
+    active = inbox_coll.count_documents(
+        {"consumer": consumer, "state": STATE_PROCESSING, "leaseExpiresAt": {"$gt": now}}
+    )
+    completed = inbox_coll.count_documents({"consumer": consumer, "state": STATE_COMPLETED})
+    quarantined = inbox_coll.count_documents({"consumer": consumer, "state": STATE_QUARANTINED})
+    oldest = oldest_missing
+    retry_filter = {
+        "consumer": consumer,
+        "$or": [
+            {"state": STATE_RECEIVED},
+            {"state": STATE_PROCESSING, "leaseExpiresAt": {"$lte": now}},
+        ],
+    }
+    for row in inbox_coll.find(retry_filter).sort([("createdAt", 1)]).limit(1):
+        created = _as_utc(row.get("createdAt"))
+        if created is not None and (oldest is None or created < oldest):
+            oldest = created
+        break
+    backlog = missing + received + expired
+    return {
+        "consumer": consumer,
+        "processed": completed,
+        "quarantined": quarantined,
+        "backlog": backlog,
+        "missingInbox": missing,
+        "missingCapped": missing >= cap,
+        "received": received,
+        "expiredProcessing": expired,
+        "activeProcessing": active,
+        "oldestPendingAgeSeconds": (now - oldest).total_seconds() if oldest else 0.0,
+    }
 
 
 async def sweep_pending(
@@ -364,29 +646,122 @@ async def sweep_pending(
     *,
     limit: int = 200,
     max_deliver: int = DEFAULT_MAX_DELIVER,
+    scan_limit: int = DEFAULT_SCAN_LIMIT,
+    gap_seconds: float = DEFAULT_GAP_SECONDS,
 ) -> int:
-    """E01: доставка пропущенных/незавершённых событий из журнала по createdAt.
-    Возвращает число реально исполненных (закейченных) доставок."""
+    """E01/R26-01: полная догрузка журнала. Возвращает число реально исполненных
+    (закейченных) доставок за тик. Продвижение — курсором (createdAt,_id) через
+    event_sweep_state; страницы и число DB-операций за тик ограничены; I/O вне
+    event loop (to_thread)."""
+    key = _state_key(consumer, subjects)
+    now = _utc_now()
+    position = await asyncio.to_thread(_load_position, db, key)
     delivered = 0
-    rows = (
-        db[COLL_EVENT_LOG].find({"subject": {"$in": subjects}}).sort("createdAt", 1).limit(limit)
-    )
-    for row in rows:
-        existing = db[COLL_EVENT_INBOX].find_one({"_id": inbox_id(row["_id"], consumer)})
-        if existing is not None:
-            state = existing.get("state")
-            if state in (STATE_COMPLETED, STATE_QUARANTINED, STATE_PROCESSING):
-                if state != STATE_PROCESSING:
-                    continue
-                expires = _as_utc(existing.get("leaseExpiresAt"))
-                if expires is None or expires > _utc_now():
-                    continue  # активная попытка не трогаем
-            # received или истёкший processing → deliver сам решит по CAS
-        payload = json.dumps(row["payload"], separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        outcome = await deliver(db, consumer, row["_id"], row["subject"], payload, handler, max_deliver=max_deliver)
-        if outcome == "completed":
+
+    # 1) retry-проход: non-terminal inbox consumer'а, независимо от курсора.
+    retries = await asyncio.to_thread(_retry_candidates, db, consumer, subjects, now, limit)
+    retry_budget = limit
+    for row in retries:
+        if retry_budget <= 0:
+            break
+        retry_budget -= 1
+        event = await asyncio.to_thread(_full_event, db, row["eventId"])
+        if event is None:
+            await asyncio.to_thread(
+                _quarantine_orphan, db, consumer, row, "orphan inbox: event absent from journal"
+            )
+            continue
+        outcome = await deliver(
+            db, consumer, row["eventId"], event.get("subject", row.get("subject", "")),
+            _payload_bytes(event["payload"]), handler, max_deliver=max_deliver,
+        )
+        if outcome != "skipped":
             delivered += 1
+
+    # 2) forward-проход: страница за курсором; терминальные/активные inbox-строки
+    # пропускаются пакетно (без per-row find_one), курсор двигается за последний
+    # просмотренный ряд с inbox-строкой.
+    page = await asyncio.to_thread(_fetch_forward_page, db, subjects, position, scan_limit)
+    if page:
+        existing = await asyncio.to_thread(_inbox_projection, db, consumer, [r["_id"] for r in page])
+        last_ok: dict | None = None
+        forward_budget = limit
+        for row in page:
+            doc = existing.get(inbox_id(row["_id"], consumer))
+            if doc is not None:
+                state = doc.get("state")
+                if state in (STATE_COMPLETED, STATE_QUARANTINED):
+                    last_ok = row
+                    continue
+                if state == STATE_PROCESSING:
+                    expires = _as_utc(doc.get("leaseExpiresAt"))
+                    if expires is None or expires > _utc_now():
+                        last_ok = row  # активная попытка: завершение гарантирует retry-проход
+                        continue
+                # received / истёкший processing → deliver решит по CAS
+            if forward_budget <= 0:
+                break
+            forward_budget -= 1
+            event = await asyncio.to_thread(_full_event, db, row["_id"])
+            if event is None:  # журнал меняется между страницей и чтением — повторим в след. тик
+                break
+            outcome = await deliver(
+                db, consumer, row["_id"], event.get("subject", row["subject"]),
+                _payload_bytes(event["payload"]), handler, max_deliver=max_deliver,
+            )
+            if outcome == "skipped":
+                last_ok = row
+                continue
+            delivered += 1
+            last_ok = row
+        if last_ok is not None:
+            await asyncio.to_thread(
+                _save_position, db, key, _as_utc(last_ok["createdAt"]) or _utc_now(), str(last_ok["_id"]), subjects
+            )
+
+    # 3) gap-проход: окно (курсор − gap_seconds, курсор] — опоздавшие вставки с
+    # «старым» createdAt; для них нет inbox-строки → forward их уже не увидит.
+    position_after = await asyncio.to_thread(_load_position, db, key)
+    if position_after is not None and gap_seconds > 0:
+        created, event_id = position_after
+        gap_filter = {
+            "subject": {"$in": list(subjects)},
+            "createdAt": {"$gt": created - timedelta(seconds=gap_seconds), "$lte": created},
+        }
+        window = await asyncio.to_thread(
+            lambda: list(
+                db[COLL_EVENT_LOG].find(gap_filter, {"subject": 1, "createdAt": 1})
+                .sort([("createdAt", 1), ("_id", 1)])
+                .limit(scan_limit)
+            )
+        )
+        if window:
+            known = {r["_id"] for r in page}
+            need = [r for r in window if r["_id"] not in known]
+            if need:
+                docs = await asyncio.to_thread(_inbox_projection, db, consumer, [r["_id"] for r in need])
+                for row in need:
+                    if inbox_id(row["_id"], consumer) in docs:
+                        continue
+                    if delivered >= limit:
+                        break
+                    event = await asyncio.to_thread(_full_event, db, row["_id"])
+                    if event is None:
+                        continue
+                    outcome = await deliver(
+                        db, consumer, row["_id"], event.get("subject", row["subject"]),
+                        _payload_bytes(event["payload"]), handler, max_deliver=max_deliver,
+                    )
+                    if outcome != "skipped":
+                        delivered += 1
     return delivered
+
+
+def pending_stats(db: Any, consumer: str, subjects: list[str]) -> dict[str, Any]:
+    """E01 «пропуск не маскируется» + R26-01.5: честный backlog без N+1 обхода.
+    Синхронная функция (тесты и вызывающий код дергают напрямую); из event loop
+    сервисов вызывается через asyncio.to_thread."""
+    return _pending_stats_sync(db, consumer, subjects)
 
 
 class DurablePublisher:
@@ -424,29 +799,6 @@ class DurablePublisher:
                 # это одно устойчивое событие с одним id
                 event_id = deterministic_event_id("session-closed", session_id)
         await publish_durable(self.bus, self.db, subject, value, event_id=event_id)
-
-
-def pending_stats(db: Any, consumer: str, subjects: list[str]) -> dict[str, Any]:
-    """E01 «пропуск не маскируется»: измеряемая отсталость потребителя."""
-    now = _utc_now()
-    processed = db[COLL_EVENT_INBOX].count_documents({"consumer": consumer, "state": STATE_COMPLETED})
-    quarantined = db[COLL_EVENT_INBOX].count_documents({"consumer": consumer, "state": STATE_QUARANTINED})
-    oldest: datetime | None = None
-    backlog = 0
-    for subject in subjects:
-        for row in db[COLL_EVENT_LOG].find({"subject": subject}).sort("createdAt", 1):
-            if db[COLL_EVENT_INBOX].find_one({"_id": inbox_id(row["_id"], consumer)}) is None:
-                backlog += 1
-                created = _as_utc(row.get("createdAt"))
-                if created is not None and (oldest is None or created < oldest):
-                    oldest = created
-    return {
-        "consumer": consumer,
-        "processed": processed,
-        "quarantined": quarantined,
-        "backlog": backlog,
-        "oldestPendingAgeSeconds": (now - oldest).total_seconds() if oldest else 0.0,
-    }
 
 
 def _is_duplicate(err: Exception) -> bool:

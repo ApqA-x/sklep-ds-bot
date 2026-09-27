@@ -1031,6 +1031,52 @@
       "unique": true
     },
     {
+      "collection": "event_log",
+      "keys": [
+        [
+          "subject",
+          1
+        ],
+        [
+          "createdAt",
+          1
+        ],
+        [
+          "_id",
+          1
+        ]
+      ],
+      "name": "event_log_subject_createdAt_id",
+      "owner": "runner",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "event_inbox",
+      "keys": [
+        [
+          "consumer",
+          1
+        ],
+        [
+          "state",
+          1
+        ],
+        [
+          "createdAt",
+          1
+        ]
+      ],
+      "name": "event_inbox_consumer_state_createdAt",
+      "owner": "runner",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
       "collection": "voice_session_participants",
       "keys": [
         [

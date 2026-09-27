@@ -257,7 +257,13 @@ async def main() -> None:
             ):
                 try:
                     n = await eventlog.sweep_pending(
-                        repo.db, "stalker", [subject], handler, max_deliver=cfg.event_max_deliver
+                        repo.db,
+                        "stalker",
+                        [subject],
+                        handler,
+                        max_deliver=cfg.event_max_deliver,
+                        scan_limit=cfg.event_sweep_scan_limit,
+                        gap_seconds=cfg.event_sweep_gap_seconds,
                     )
                     if n:
                         logger.info("stalker event sweep subject=%s delivered=%s", subject, n)

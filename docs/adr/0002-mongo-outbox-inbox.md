@@ -37,11 +37,22 @@ Plan T09 требует: устойчивое принятие событий, �
    → received (повторит sweep или повторная доставка), ≥ → quarantined с причиной.
    Битый конверт/подпись → `quarantine_poison` по sha256 от сырых байт (уникальный id, без каскада).
    Завершённое событие повторно `deliver()` → `skipped` (идемпотентно).
-4. **Порядок** (T09.5): sweep идёт по `createdAt` (индекс `event_log (subject, createdAt)`;
-   состояние потребителя — индекс `event_inbox (consumer, state)`), т.е.
-   восстановление после простоя chronological; live-порядок внутри одного потребителя обеспечивает
+4. **Порядок и догрузка** (T09.5 / R26-01): sweep — **курсорный** (миграция M5):
+   позиция `(createdAt,_id)` последней просмотренной строки хранится в
+   `event_sweep_state` (ключ на `(consumer, subjects)`); forward-выборка идёт строго
+   за курсором индексом `event_log (subject, createdAt, _id)` страницей ≤
+   `EVENT_SWEEP_SCAN_LIMIT`; терминальные/активные inbox-строки пропускаются пакетно
+   (без per-row find_one), курсор двигается только за ряды, покрытые inbox-строкой.
+   Незавершённые за курсором добирает **retry-проход** по inbox
+   (`received`/истёкший `processing`) — повторные попытки старых событий не
+   исчезают за high-water mark; опоздавшие вставки с «протухшим» createdAt ловит
+   **gap-проход** (окно `EVENT_SWEEP_GAP_SECONDS`, по умолчанию 120 s; 0 = выключен).
+   Тик ограничен и по числу доставок (`limit`), и по числу DB-операций; весь
+   синхронный Mongo I/O — вне event loop (`asyncio.to_thread`).
+   Восстановление после простоя chronological; live-порядок внутри одного потребителя обеспечивает
    один подписчик на subject + однопоточный обработчик. Cross-process порядок не гарантируется —
-   см. границу гарантий.
+   см. границу гарантий. `deliver()` проверяет результат `complete()`: потерянный при
+   takeover fence не отдаётся как completed (`fence_lost`).
 5. **Конверт v1** (T09.7/E07): `bus.Envelope` получил поле `v` (schema). `decode_envelope`
    отвергает не-1 (`unsupported envelope schema`) и старше `max_age_seconds` (конфиг
    `EVENT_MAX_AGE_SECONDS`, по умолчанию 3600). HMAC и issuer-проверка сохранены.
@@ -76,5 +87,6 @@ Plan T09 требует: устойчивое принятие событий, �
   ротация/архив — T10 (там же индексы миграционным раннером).
 - Боевая миграция (T18): перед переключением оба инбокса пусты, wire и sweep включают
   одновременно через один `deliver()`; откат — выключить sweep-таски, legacy-deduper путь цел.
-- Конфиг: `EVENT_MAX_AGE_SECONDS`, `EVENT_SWEEP_INTERVAL_SECONDS`, `EVENT_MAX_DELIVER`
-  (runtime.load_config, все положительны, иначе fallback).
+- Конфиг: `EVENT_MAX_AGE_SECONDS`, `EVENT_SWEEP_INTERVAL_SECONDS`, `EVENT_MAX_DELIVER`,
+  `EVENT_SWEEP_GAP_SECONDS`, `EVENT_SWEEP_SCAN_LIMIT` (runtime.load_config, все положительны,
+  иначе fallback; GAP допускает 0 = выключен).

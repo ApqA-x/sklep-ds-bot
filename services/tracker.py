@@ -77,8 +77,12 @@ async def main() -> None:
                     [domain.SUBJECT_VOICE_EVENT],
                     handle,
                     max_deliver=cfg.event_max_deliver,
+                    scan_limit=cfg.event_sweep_scan_limit,
+                    gap_seconds=cfg.event_sweep_gap_seconds,
                 )
-                stats = eventlog.pending_stats(repo.db, "tracker", [domain.SUBJECT_VOICE_EVENT])
+                stats = await asyncio.to_thread(
+                    eventlog.pending_stats, repo.db, "tracker", [domain.SUBJECT_VOICE_EVENT]
+                )
                 if n or stats["backlog"] or stats["quarantined"]:
                     logger.info("tracker event sweep delivered=%s %s", n, stats)
                 supervisor.beat("tracker-event-sweep")

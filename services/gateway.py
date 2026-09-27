@@ -2715,6 +2715,8 @@ async def main() -> None:
                     [domain.SUBJECT_SUMMARY_READY],
                     handle_summary,
                     max_deliver=cfg.event_max_deliver,
+                    scan_limit=cfg.event_sweep_scan_limit,
+                    gap_seconds=cfg.event_sweep_gap_seconds,
                 )
                 if n:
                     logger.info("gateway event sweep delivered=%s", n)

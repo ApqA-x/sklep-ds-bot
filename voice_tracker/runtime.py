@@ -84,6 +84,9 @@ class Config:
     event_max_age_seconds: int = 3600
     event_sweep_interval_seconds: int = 15
     event_max_deliver: int = 8
+    # R26-01: ширина окна gap-прохода (0 = выключен) и потолок строк страницы
+    event_sweep_gap_seconds: int = 120
+    event_sweep_scan_limit: int = 2000
 
 
 def load_config(env: Any = None) -> Config:
@@ -108,6 +111,10 @@ def load_config(env: Any = None) -> Config:
         source, "EVENT_SWEEP_INTERVAL_SECONDS", cfg.event_sweep_interval_seconds
     )
     cfg.event_max_deliver = _getenv_int(source, "EVENT_MAX_DELIVER", cfg.event_max_deliver)
+    cfg.event_sweep_gap_seconds = _getenv_int(
+        source, "EVENT_SWEEP_GAP_SECONDS", cfg.event_sweep_gap_seconds, allow_zero=True
+    )
+    cfg.event_sweep_scan_limit = _getenv_int(source, "EVENT_SWEEP_SCAN_LIMIT", cfg.event_sweep_scan_limit)
     cfg.media_min_free_bytes = _getenv_int(
         source, "MEDIA_MIN_FREE_BYTES", cfg.media_min_free_bytes, allow_zero=True
     )

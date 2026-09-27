@@ -109,8 +109,12 @@ async def main() -> None:
             [domain.SUBJECT_SESSION_CLOSED],
             _session_closed_handler(service),
             max_deliver=cfg.event_max_deliver,
+            scan_limit=cfg.event_sweep_scan_limit,
+            gap_seconds=cfg.event_sweep_gap_seconds,
         )
-        stats = eventlog.pending_stats(repo.db, "writer", [domain.SUBJECT_SESSION_CLOSED])
+        stats = await asyncio.to_thread(
+            eventlog.pending_stats, repo.db, "writer", [domain.SUBJECT_SESSION_CLOSED]
+        )
         logger.info(
             "writer sweep republished=%s delivered=%s backlog=%s oldestPendingAgeSeconds=%.0f quarantined=%s",
             republished,
