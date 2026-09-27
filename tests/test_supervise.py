@@ -213,7 +213,8 @@ def test_nats_and_discord_state_are_getattr_safe() -> None:
             raise RuntimeError("latency before connection")
 
     ds = supervise.discord_state(DeadDiscord())
-    assert ds == {"closed": True, "latencyMs": None}
+    # нет is_ready на клиенте → getattr-safe: ready=None (не секрет и не «ready»)
+    assert ds == {"closed": True, "ready": None, "latencyMs": None}
 
     class AliveDiscord:
         latency = 0.1234
@@ -221,8 +222,25 @@ def test_nats_and_discord_state_are_getattr_safe() -> None:
         def is_closed(self) -> bool:
             return False
 
+        def is_ready(self) -> bool:
+            return True
+
     ds2 = supervise.discord_state(AliveDiscord())
-    assert ds2 == {"closed": False, "latencyMs": 123.4}
+    assert ds2 == {"closed": False, "ready": True, "latencyMs": 123.4}
+
+    class ConnectingDiscord:
+        """R26-10 r2: reconnecting-клиент ещё не closed, но и не ready."""
+
+        latency = 0.2
+
+        def is_closed(self) -> bool:
+            return False
+
+        def is_ready(self) -> bool:
+            return False
+
+    ds3 = supervise.discord_state(ConnectingDiscord())
+    assert ds3 == {"closed": False, "ready": False, "latencyMs": 200.0}
 
 
 # ---------------------------------------------------------------- healthcheck
@@ -365,7 +383,7 @@ def _deps_for(contract: hc.HealthContract) -> dict:
     if "nats" in contract.deps:
         deps["nats"] = {"connected": True, "reconnecting": False, "closed": False}
     if "discord" in contract.deps:
-        deps["discord"] = {"closed": False, "latencyMs": 40.0}
+        deps["discord"] = {"closed": False, "ready": True, "latencyMs": 40.0}
     return deps
 
 
@@ -1014,3 +1032,137 @@ def test_v26_10_3_noncritical_loops_never_gate_readiness() -> None:
             _set_loop(doc, name, **changes)
             ok, detail = evaluate(doc, now, 90.0, contract)
             assert ok, (name, changes, detail)
+
+
+# ============================================================ R26-10 review r2
+# ДЕФЕКТ 1: closed=False ≠ ready (discord gateway).
+# ДЕФЕКТ 2: будущие timestamps обходят freshness/progress-гейты и startup grace.
+
+
+class _NotReadyDiscord:
+    """Сессия в reconnect/waiting: ещё не closed, но гейт не готов."""
+
+    latency = 0.05
+
+    def is_closed(self) -> bool:
+        return False
+
+    def is_ready(self) -> bool:
+        return False
+
+
+def test_v26_10_r2_discord_not_ready_fails_closed_despite_open_gateway() -> None:
+    # (1) discord_state публикует явный ready=False
+    state = supervise.discord_state(_NotReadyDiscord())
+    assert state["closed"] is False and state["ready"] is False
+    # (2) fresh heartbeat + deps из такого состояния → not-ready
+    now = datetime.now(UTC)
+    for worker in ("gateway", "activity", "stalker", "commands", "dsbot-controlplane"):
+        contract = hc.contract_for(worker)
+        assert contract is not None and "discord" in contract.deps
+        doc = _healthy_doc(contract, now)
+        doc["deps"]["discord"] = state
+        ok, detail = evaluate(doc, now, 90.0, contract)
+        assert not ok, f"{worker}: {detail}"
+        assert "discord" in detail and "ready" in detail
+    # ready=True при closed=False — по-прежнему healthy (позитив не сломан)
+    contract = hc.contract_for("gateway")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    assert evaluate(doc, now, 90.0, contract)[0]
+
+
+def test_v26_10_r2_discord_snapshot_without_ready_is_unknown_and_invalid() -> None:
+    # старый/битый снапшот без поля ready → fail-closed (не «deps ok» молча)
+    now = datetime.now(UTC)
+    contract = hc.contract_for("stalker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["discord"] = {"closed": False, "latencyMs": 40.0}  # ready missing
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "ready state unknown" in detail
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["discord"] = {"closed": False, "ready": None, "latencyMs": None}
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "ready state unknown" in detail
+
+
+def test_v26_10_r2_future_updated_at_fails_closed() -> None:
+    now = datetime.now(UTC)
+    future = now + timedelta(days=1)
+    # возраст «-86400s» не может означать «свежо» — проверка возраста только
+    # для не-future timestamp'ов
+    ok, detail = evaluate({"updated_at": future}, now, 90.0)
+    assert not ok and "timestamp in future" in detail and "updated_at" in detail
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    doc = _healthy_doc(contract, future)  # весь док «из завтрашнего дня»
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "timestamp in future" in detail
+
+
+def test_v26_10_r2_future_started_at_does_not_extend_grace_forever() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("activity")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    doc["started_at"] = now + timedelta(days=1)  # grace = (now - started) = -86400s
+    for entry in doc["loops"]:
+        entry["lastTickAt"] = None  # и без прогресса — grace не должен спасать
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "timestamp in future" in detail and "started_at" in detail
+
+
+def test_v26_10_r2_future_lastTickAt_fails_closed() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    _set_loop(
+        doc,
+        "tracker-event-sweep",
+        tick=(now + timedelta(days=1)).isoformat(timespec="seconds"),
+    )
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "timestamp in future" in detail
+    assert "lastTickAt" in detail and "tracker-event-sweep" in detail
+    # и во время startup grace future-тик тоже не принимается
+    grace_doc = _healthy_doc(contract, now, started_age=10)
+    _set_loop(
+        grace_doc,
+        "tracker-event-sweep",
+        tick=(now + timedelta(days=1)).isoformat(timespec="seconds"),
+    )
+    ok, detail = evaluate(grace_doc, now, 90.0, contract)
+    assert not ok and "timestamp in future" in detail
+    # и для non-critical петли с max_progress… (гейта нет, но clock всё равно
+    # недостоверен): снапшот с future-тиком не проходит
+    gcontract = hc.contract_for("gateway")
+    assert gcontract is not None
+    gdoc = _healthy_doc(gcontract, now)
+    _set_loop(
+        gdoc,
+        "gateway-invite-snapshot-refresh",
+        tick=(now + timedelta(days=1)).isoformat(timespec="seconds"),
+    )
+    ok, detail = evaluate(gdoc, now, 90.0, gcontract)
+    assert not ok and "timestamp in future" in detail
+
+
+def test_v26_10_r2_small_clock_skew_stays_ready() -> None:
+    # NTP-порядок (|skew| <= MAX_CLOCK_SKEW_SECONDS) не роняет readiness:
+    # слегка «из будущего» updated_at/lastTickAt/started_at — норма
+    now = datetime.now(UTC)
+    contract = hc.contract_for("gateway")
+    assert contract is not None
+    skew = timedelta(seconds=10)
+    assert skew.total_seconds() <= hc.MAX_CLOCK_SKEW_SECONDS
+    doc = _healthy_doc(contract, now, started_age=600)
+    doc["updated_at"] = now + skew
+    doc["started_at"] = now - timedelta(seconds=600) + skew
+    for entry in doc["loops"]:
+        if entry["lastTickAt"] is not None:
+            entry["lastTickAt"] = (now + skew).isoformat(timespec="seconds")
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert ok, detail
+    assert "fresh" in detail

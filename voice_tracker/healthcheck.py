@@ -33,6 +33,9 @@ SERVER_SELECTION_TIMEOUT_MS = 1500
 CONNECT_TIMEOUT_MS = 3000
 SOCKET_TIMEOUT_MS = 5000
 DEFAULT_STARTUP_GRACE_SECONDS = 120.0
+# R26-10 r2: снапшот с timestamp в будущем (boot сбитых часов воркера) не должен
+# обходить freshness/progress-гейты; допуск — порядок NTP-дрейфа
+MAX_CLOCK_SKEW_SECONDS = 30.0
 # heartbeat-цикл пишет каждые ~15s; три пропущенных тика — уже не «жив»
 HEARTBEAT_LOOP_PROGRESS_AGE_SECONDS = 60.0
 # sweep-циклы: tracker/activity/stalker спят EVENT_SWEEP_INTERVAL_SECONDS (15s),
@@ -183,6 +186,22 @@ def _safe_label(text: str, limit: int = 64) -> str:
     return cleaned[:limit] or "unknown"
 
 
+def _future_timestamp_error(parsed: datetime, now: datetime, field: str) -> str | None:
+    """R26-10 r2: timestamp позже now + допустимого skew — снапшот недостоверен.
+
+    Fail-closed: future updated_at делает heartbeat «вечно свежим», future
+    started_at растягивает startup grace на неопределённый срок, future
+    lastTickAt обходит progress-гейт. Малый future-skew (|skew| <= лимит) —
+    допустимый дрейф часов, не ошибка."""
+    skew = (parsed - now).total_seconds()
+    if skew > MAX_CLOCK_SKEW_SECONDS:
+        return (
+            f"timestamp in future field={_safe_label(field)} "
+            f"skew={int(skew)}s limit={int(MAX_CLOCK_SKEW_SECONDS)}s"
+        )
+    return None
+
+
 def _evaluate_loops(
     doc: dict[str, Any], now: datetime, contract: HealthContract, in_grace: bool
 ) -> tuple[bool, str]:
@@ -206,6 +225,15 @@ def _evaluate_loops(
             return False, f"loop invalid running name={_safe_label(loop.name)}"
         if isinstance(failures, bool) or not isinstance(failures, int):
             return False, f"loop invalid consecutiveFailures name={_safe_label(loop.name)}"
+        # R26-10 r2: future lastTickAt (сверх skew) никогда не станет stale —
+        # отсекаем до progress-гейта и независимо от startup grace
+        raw_tick = entry.get("lastTickAt")
+        if raw_tick is not None:
+            parsed_tick = _as_utc(raw_tick)
+            if parsed_tick is not None:
+                future = _future_timestamp_error(parsed_tick, now, f"lastTickAt.{loop.name}")
+                if future is not None:
+                    return False, future
         if loop.critical:
             if not running:
                 return False, f"required loop not running name={_safe_label(loop.name)}"
@@ -243,6 +271,14 @@ def _evaluate_deps(doc: dict[str, Any], contract: HealthContract) -> tuple[bool,
         elif name == "discord":
             if state.get("closed") is not False:
                 return False, "discord gateway not open"
+            # R26-10.1: «не closed» ≠ «ready». Failed session, который ещё не
+            # закрыт, остаётся closed=False — гейт открывает только is_ready().
+            # missing/None = старый или битый снапшот без ready-сигнала → fail-closed.
+            ready = state.get("ready")
+            if ready is None:
+                return False, "discord gateway ready state unknown"
+            if ready is not True:
+                return False, "discord gateway not ready"
         else:
             return False, f"unknown dep in contract name={_safe_label(name)}"
     return True, ""
@@ -262,12 +298,21 @@ def evaluate(
     updated = _as_utc(doc.get("updated_at"))
     if updated is None:
         return False, "heartbeat missing updated_at"
+    future = _future_timestamp_error(updated, now, "updated_at")
+    if future is not None:
+        return False, future
     age = (now - updated).total_seconds()
     if age > max_age_seconds:
         return False, f"heartbeat stale age={int(age)}s limit={int(max_age_seconds)}s"
     if contract is None:
         return True, f"heartbeat fresh age={int(age)}s"
-    started = _as_utc(doc.get("started_at")) or updated
+    started = _as_utc(doc.get("started_at"))
+    if started is not None:
+        future = _future_timestamp_error(started, now, "started_at")
+        if future is not None:
+            return False, future
+    else:
+        started = updated
     in_grace = (now - started).total_seconds() <= contract.startup_grace_seconds
     ok, detail = _evaluate_loops(doc, now, contract, in_grace)
     if not ok:

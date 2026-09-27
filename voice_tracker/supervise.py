@@ -329,14 +329,20 @@ def nats_state(conn: Any) -> dict[str, Any]:
 
 
 def discord_state(client: Any) -> dict[str, Any]:
-    """Состояние Discord-gateway: закрыт ли клиент и последний измеренный latency.
+    """Состояние Discord-gateway: закрыт ли клиент, готов ли и последний latency.
 
+    R26-10 r2: closed=False ≠ ready — клиент в reconect/waiting может быть ещё
+    не closed, но гейт не готов; healthcheck гейтит readiness по ready.
     Это НЕ пользовательские события: gateway сам держит heartbeat-пинг Discord."""
     out: dict[str, Any] = {}
     try:
         out["closed"] = bool(client.is_closed())
     except Exception:
         out["closed"] = None
+    try:
+        out["ready"] = bool(client.is_ready())
+    except Exception:
+        out["ready"] = None
     try:
         out["latencyMs"] = round(float(client.latency) * 1000.0, 1)
     except Exception:
