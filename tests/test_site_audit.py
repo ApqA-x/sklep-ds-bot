@@ -123,26 +123,54 @@ def test_safe_record_writes_reason_on_failure():
 
 
 def test_stage_distinguishes_invocation_rejection_effect():
-    # O10/T08.11: вызов, отказ и подтверждённый эффект — разные факты журнала
-    assert site_audit.classify_stage(True, "trusted", "add") == site_audit.STAGE_EFFECT
+    # O10/T08.11: вызов, отказ и подтверждённый эффект — разные факты журнала.
+    # R26-04 п.6: имя мутирующего маршрута само по себе эффект не доказывает —
+    # stage="effect" только при effect_proved=True.
+    assert site_audit.classify_stage(True, "trusted", "add") == site_audit.STAGE_INVOCATION
+    assert site_audit.classify_stage(True, "trusted", "add", effect_proved=True) == site_audit.STAGE_EFFECT
+    assert site_audit.classify_stage(False, "trusted", "add", effect_proved=True) == site_audit.STAGE_REJECTED
     assert site_audit.classify_stage(True, "trusted", "list") == site_audit.STAGE_INVOCATION
+    assert site_audit.classify_stage(True, "trusted", "list", effect_proved=True) == site_audit.STAGE_INVOCATION
     assert site_audit.classify_stage(False, "trusted", "add") == site_audit.STAGE_REJECTED
     assert site_audit.classify_stage(False, "jump", "") == site_audit.STAGE_REJECTED
 
     db = _FakeDb()
+    # R26-04 п.6: mutating route по умолчанию (без effect_proved) — invocation, не effect
     site_audit.safe_record_command_audit(
         db, guild_id="g", actor_user_id="u", actor_name="n",
         root="settings", command="summary-set", options=[],
     )
-    assert db.audit.docs[0]["stage"] == "effect"
+    assert db.audit.docs[0]["stage"] == "invocation"
+    site_audit.safe_record_command_audit(
+        db, guild_id="g", actor_user_id="u", actor_name="n",
+        root="settings", command="summary-set", options=[], effect_proved=True,
+    )
+    assert db.audit.docs[1]["stage"] == "effect"
     site_audit.safe_record_command_audit(
         db, guild_id="g", actor_user_id="u", actor_name="n",
         root="jump", command="", options=[], ok=False, reason=site_audit.REASON_PERMISSIONS,
     )
-    assert db.audit.docs[1]["stage"] == "rejected"
+    assert db.audit.docs[2]["stage"] == "rejected"
     # явная запись без stage — обратно совместимый invocation
     site_audit.record_command_audit(
         db, guild_id="g", actor_user_id="u", actor_name="n",
         root="dashboard", command="", after={"command": "/dashboard"}, ok=True,
     )
-    assert db.audit.docs[2]["stage"] == "invocation"
+    assert db.audit.docs[3]["stage"] == "invocation"
+
+
+def test_reject_reason_for_result_maps_dispatch_rejection_strings():
+    # R26-04 п.6: строки-отказы диспатчера — общий источник истины в site_audit
+    assert site_audit.reject_reason_for_result("Insufficient permissions.") == site_audit.REASON_PERMISSIONS
+    assert site_audit.reject_reason_for_result("Unknown command.") == site_audit.REASON_UNKNOWN
+    assert site_audit.reject_reason_for_result("Unknown unmute command.") == site_audit.REASON_UNKNOWN
+    assert site_audit.reject_reason_for_result("Unknown trusted command.") == site_audit.REASON_UNKNOWN
+    assert site_audit.reject_reason_for_result("Unknown stalker command.") == site_audit.REASON_UNKNOWN
+    assert site_audit.reject_reason_for_result("Command failed. Check service logs.") == site_audit.REASON_ERROR
+
+
+def test_reject_reason_for_result_passes_through_success_and_non_strings():
+    assert site_audit.reject_reason_for_result("Added <@1> to trusted users list.") is None
+    assert site_audit.reject_reason_for_result("Unknown trusted command") is None  # без точки — не отказ
+    assert site_audit.reject_reason_for_result(object()) is None
+    assert site_audit.reject_reason_for_result(None) is None

@@ -15,11 +15,23 @@ REASON_ERROR = "error"
 REASON_REJECTED = "rejected"
 
 # T08.11 (O10): журнал отличает вызов команды от отказа и от подтверждённого эффекта.
-# "effect" пишется только для заведомо мутирующих маршрутов, успешных в диспатчере;
-# классификация консервативная: неизвестный маршрут остаётся "invocation".
+# R26-04 п.6: "Не утверждать подтверждённый effect на основании одного имени mutating
+# route" — stage="effect" требует отдельного доказательства (effect_proved), которое
+# считается в диспатчере, а не в классификаторе.
 STAGE_INVOCATION = "invocation"
 STAGE_REJECTED = "rejected"
 STAGE_EFFECT = "effect"
+
+# R26-04 п.6: строки-отказы, которые возвращает диспатчер вместо исключения.
+# Общий источник истины для services/commands.py (он больше не держит свой словарь).
+COMMAND_REJECTION_REASONS: dict[str, str] = {
+    "Insufficient permissions.": REASON_PERMISSIONS,
+    "Unknown command.": REASON_UNKNOWN,
+    "Unknown unmute command.": REASON_UNKNOWN,
+    "Unknown trusted command.": REASON_UNKNOWN,
+    "Unknown stalker command.": REASON_UNKNOWN,
+    "Command failed. Check service logs.": REASON_ERROR,
+}
 
 MUTATING_ROUTES = frozenset(
     {
@@ -41,10 +53,18 @@ MUTATING_ROUTES = frozenset(
 )
 
 
-def classify_stage(ok: bool, root: str, command: str) -> str:
+def reject_reason_for_result(result: object) -> str | None:
+    if not isinstance(result, str):
+        return None
+    return COMMAND_REJECTION_REASONS.get(result)
+
+
+def classify_stage(ok: bool, root: str, command: str, *, effect_proved: bool = False) -> str:
     if not ok:
         return STAGE_REJECTED
-    if (root, command) in MUTATING_ROUTES:
+    # R26-04 п.6: имя мутирующего маршрута само по себе эффект не доказывает —
+    # без effect_proved успешный mutating route остаётся "invocation".
+    if effect_proved and (root, command) in MUTATING_ROUTES:
         return STAGE_EFFECT
     return STAGE_INVOCATION
 
@@ -140,6 +160,7 @@ def safe_record_command_audit(
     channel_id: str = "",
     reason: str = "",
     ok: bool = True,
+    effect_proved: bool = False,
 ) -> None:
     if db is None or guild_id == "":
         return
@@ -154,7 +175,7 @@ def safe_record_command_audit(
             command=command,
             after=after,
             ok=ok,
-            stage=classify_stage(ok, root, command),
+            stage=classify_stage(ok, root, command, effect_proved=effect_proved),
         )
     except Exception:
         logger.warning("site audit write failed guild=%s command=/%s", guild_id, root, exc_info=True)
