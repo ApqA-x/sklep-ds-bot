@@ -28,6 +28,11 @@ R26-07: фикстура рендера приведена к форме auth-р
 MONGO_URI ботов/web РОВНО из значений MONGO_BOT_URI/MONGO_WEB_URI выбранного
 env-файла (их сверяет validate_compose, когда файл читается), одноразовый
 mongo-bootstrap под профилем `bootstrap`.
+Review R26-07 (blocker 2): в фикстуре есть и одноразовый schema-migrate под
+профилем `migrate` (MONGO_URI ровно из MONGO_MIGRATION_URI, MONGO_DB, без
+общего env_file): controlplane в рендере под профилем, поэтому validate_compose
+обязан видеть в нём ОБА profile-сервиса — отсутствие runner'а он считает
+пропажей единственной легальной точки `migrate up`/`status` (preflight → red).
 """
 from __future__ import annotations
 
@@ -202,6 +207,10 @@ exit 0
 FIXTURE_MONGO_BOT_URI = "mongodb://dsbot_app:pw-app@mongo:27017/?authSource=voice_tracker_staging"
 FIXTURE_MONGO_WEB_URI = "mongodb://dsbot_web:pw-web@mongo:27017/?authSource=voice_tracker_staging"
 FIXTURE_MONGO_ADMIN_URI = "mongodb://dsbot_root:pw-root@mongo:27017/admin?authSource=admin"
+# review R26-07 (blocker 2): credentials одноразового runner'а schema-migrate —
+# той же рабочей БД, что бот/web (validate_env: authSource обязан равняться MONGO_DB)
+FIXTURE_MONGO_MIGRATION_URI = (
+    "mongodb://dsbot_migration:pw-mig@mongo:27017/?authSource=voice_tracker_staging")
 
 
 def _fixture_env_values(envfile: str) -> dict[str, str]:
@@ -225,12 +234,14 @@ def _rendered_fixture(envfile: str) -> dict:
     """Форма вывода `docker compose config --format json` (env_file — список
     объектов {"path","service"}; валидатор принимает и list[str]) — валидный
     staging-релиз: egress, единый env, name=dsbot-staging; R26-07 — mongod под
-    --auth, MONGO_URI ботов/web ровно из env-ключей MONGO_BOT_URI/MONGO_WEB_URI
-    и одноразовый mongo-bootstrap под профилем bootstrap."""
+    --auth, MONGO_URI ботов/web ровно из env-ключей MONGO_BOT_URI/MONGO_WEB_URI,
+    одноразовый mongo-bootstrap под профилем bootstrap и одноразовый
+    schema-migrate под профилем migrate (review R26-07, blocker 2)."""
     egress = ["dsbot-data", "dsbot-egress"]
     env_values = _fixture_env_values(envfile)
     bot_uri = env_values.get("MONGO_BOT_URI") or FIXTURE_MONGO_BOT_URI
     web_uri = env_values.get("MONGO_WEB_URI") or FIXTURE_MONGO_WEB_URI
+    mig_uri = env_values.get("MONGO_MIGRATION_URI") or FIXTURE_MONGO_MIGRATION_URI
 
     def infra(name: str, image: str) -> dict:
         return {
@@ -287,6 +298,19 @@ def _rendered_fixture(envfile: str) -> dict:
         "MONGO_DB": "voice_tracker_staging",
     }
     services["mongo-bootstrap"] = boot
+    # Review R26-07 (blocker 2): одноразовый schema-раннер — единственная легальная
+    # точка `migrate up`/`migrate status`. Тот же контракт, что в живом рендере:
+    # профиль migrate, restart "no", dsbot-data БЕЗ network_mode (безпарольный
+    # loopback — право только mongo-bootstrap), MONGO_URI ровно MONGO_MIGRATION_URI
+    # + MONGO_DB и БЕЗ общего env_file (раннеру не нужны чужие секреты).
+    mig = infra("schema-migrate", f"ghcr.io/apqa-x/sklep-ds-bot/gateway@sha256:{HEX64}")
+    mig["restart"] = "no"
+    mig["profiles"] = ["migrate"]
+    mig["environment"] = {
+        "MONGO_URI": mig_uri,
+        "MONGO_DB": "voice_tracker_staging",
+    }
+    services["schema-migrate"] = mig
     services["web"] = infra("web", f"ghcr.io/apqa-x/sklep-ds-bot-web@sha256:{HEX64}")
     services["web"]["networks"] = egress
     # R26-07: web — фактическое значение MONGO_WEB_URI (dsbot_web, без DDL-роли)

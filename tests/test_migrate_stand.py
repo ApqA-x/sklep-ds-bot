@@ -228,6 +228,37 @@ def test_m4_audit_state_unique_precheck_and_idempotent(db) -> None:
     assert migrate.check_rollback(db, 3) == []
 
 
+# ------------------------------------------------------------------ M7 (R26-07 review)
+
+
+def test_m7_revision_backfill_in_up_and_repeat_is_noop(db) -> None:
+    """M7: CRUD-backfill revision живёт в runner'е (startup рантайма — verify-only).
+    Применяется однократно, существующие значения не трогает, повтор — skip-done."""
+    db[migrate.GUILD_SETTINGS].insert_many([
+        {"_id": "g1", "guildId": "1"},
+        {"_id": "g2", "guildId": "2", "revision": 5},
+    ])
+    plan = migrate.plan_and_apply(db, apply=False, only=7)
+    assert plan["actions"][0]["action"] == "would-apply"
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g1"}).get("revision") is None  # plan не пишет
+
+    result = migrate.plan_and_apply(db, apply=True, only=7)
+    assert result["actions"][0]["action"] == "applied"
+    assert result["actions"][0]["report"]["backfilled"] == 1
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g1"})["revision"] == 0
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g2"})["revision"] == 5
+
+    again = migrate.plan_and_apply(db, apply=True, only=7)
+    assert again["actions"][0]["action"] == "skip-done"  # статус-документ чинить нечем
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g2"})["revision"] == 5
+
+    # полный up поверх — идемпотентен и по M7 в том числе
+    migrate.plan_and_apply(db, apply=True)
+    full = migrate.migration_status(db)
+    assert full[7]["status"] == "done"
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g1"})["revision"] == 0
+
+
 # ------------------------------------------------------------------ DB06
 
 

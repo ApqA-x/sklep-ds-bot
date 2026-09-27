@@ -29,8 +29,9 @@ deploy/
 - **Egress (V26-17):** `dsbot-data` — internal (всё межсервисное);
   `gateway`/`commands`/`activity`/`stalker`/`web` дополнительно состоят в
   `dsbot-egress` (обычная bridge = NAT) для Discord REST/Gateway/OAuth.
-  `mongo`/`nats`/`tracker`/`writer`/`controlplane` наружу не имеют; порты
-  mongo/nats хосту не публикуются.
+  `mongo`/`nats`/`tracker`/`writer`/`controlplane`/`schema-migrate` наружу не
+  имеют (runner'у нужен только `mongo` из внутренней сети); порты mongo/nats
+  хосту не публикуются.
 - Секреты живут только в env-файле на хосте (`deploy/<profile>/.env`, chmod 600),
   в git — только `.example`. Значения не печатаются ни одним скриптом.
 - **web без общего env_file (п.5):** container-env web собирается интерполяцией
@@ -58,19 +59,47 @@ deploy/
 ## Mongo auth (R26-07)
 mongod проекта работает под `--auth`; все runtime-URI аутентифицированные и
 живут в env-файле: `MONGO_BOT_URI` (dsbot_app) для бот-сервисов, `MONGO_WEB_URI`
-(dsbot_web) для web, `MONGO_ADMIN_URI`/`MONGO_BACKUP_URI`/`MONGO_RESTORE_URI` —
-админ-гейты и backup/restore. Валидаторы отвергают безпарольный
-`mongodb://mongo…` и расхождение render-значений с env-ключами.
-Начальные права на **пустом томе** — один раз под профилем `bootstrap`
-(localhost exception только внутри mongo-контейнера):
-`docker compose -p <project> -f <compose-файл> --env-file <env> --profile bootstrap run
---rm mongo-bootstrap python -m voice_tracker.migrate users --bootstrap`
-(пароли — `DB_USER_*`/`DB_PASS_ROOT` из того же env-файла), затем `migrate up`
-под `dsbot_migration` и штатный запуск: runtime стартует с
+(dsbot_web) для web, `MONGO_MIGRATION_URI` (dsbot_migration, единственная роль с
+DDL) для compose-сервиса `schema-migrate`, `MONGO_ADMIN_URI`/`MONGO_BACKUP_URI`/
+`MONGO_RESTORE_URI` — админ-гейты и backup/restore. Валидаторы отвергают
+безпарольный `mongodb://mongo…` и расхождение render-значений с env-ключами.
+
+Оба одноразовых job'а — под ЯВНЫМИ профилями (`bootstrap`, `migrate`), с
+`restart: "no"`: в обычный `up` не входят и в `status.sh` не обязательны.
+Порядок на чистой БД — строго команда за командой (полная форма; из случайного
+cwd не запускать):
+
+```bash
+# 1) начальные права на ПУСТОМ томе — localhost exception mongod принимает
+#    только с 127.0.0.1, поэтому mongo-bootstrap идёт в сетевом namespace
+#    mongo (network_mode: service:mongo). Безпарольный mongodb://127.0.0.1:27017
+#    — исключительное право ЭТОГО сервиса и ровно команды users --bootstrap.
+docker compose -p dsbot-prod -f deploy/production/compose.yml \
+  --env-file deploy/production/.env \
+  --profile bootstrap run --rm mongo-bootstrap \
+  python -m voice_tracker.migrate users --bootstrap
+
+# 2) схема (DDL) — под dsbot_migration, credentials ровно MONGO_MIGRATION_URI;
+#    MONGO_DB раннер берёт из того же env-файла (--db не перебивать)
+docker compose -p dsbot-prod -f deploy/production/compose.yml \
+  --env-file deploy/production/.env \
+  --profile migrate run --rm schema-migrate \
+  python -m voice_tracker.migrate up
+
+# 3) статус схемы (read-only) — тем же сервисом
+docker compose -p dsbot-prod -f deploy/production/compose.yml \
+  --env-file deploy/production/.env \
+  --profile migrate run --rm schema-migrate \
+  python -m voice_tracker.migrate status
+```
+
+Пароли — `DB_USER_*`/`DB_PASS_ROOT` из того же env-файла; в вывод идут только
+имена созданных сущностей. Повторный запуск команды 1 чинит drift грантов
+(`ensure_users`). Штатный запуск: runtime стартует с
 `DSBOT_SCHEMA_MODE=verify` (только сверка схемы, DDL runner'у; `bootstrap` —
-исключительно dev/первый прогон job-runner'а). Повторный запуск команды чинит
-drift грантов (`ensure_users`). Ротация пароля: `updateUser pwd` → править
-URI в env → рестарт сервисов. Модель, роли и обоснование — `docs/adr/0005-mongo-auth-roles.md`.
+исключительно dev/первый прогон job-runner'а). Ротация пароля: `updateUser pwd`
+→ править URI в env → рестарт сервисов. Модель, роли и обоснование —
+`docs/adr/0005-mongo-auth-roles.md`.
 
 ## Первый запуск (Linux-хост)
 1. Установить docker engine + compose plugin; `systemctl enable --now docker`
@@ -82,12 +111,18 @@ URI в env → рестарт сервисов. Модель, роли и обо
    platform-вариант каждого образа (п.9).
 4. `scripts/linux_init.sh production` — тома + **проверка записи в media от
    ожидаемого uid/gid** (P05: факт, а не имя volume) + mongo-том.
-5. `scripts/deploy.sh production` — план (dry-run), затем `scripts/deploy.sh
+5. Первый запуск на **пустом** томе — два одноразовых job'а до приложений
+   (команды целиком — раздел «Mongo auth (R26-07)»): `up -d mongo` (каркас),
+   затем профиль `bootstrap` → `migrate users --bootstrap` (localhost
+   exception), затем профиль `migrate` → `migrate up` (DDL под
+   `dsbot_migration`) и `migrate status` (сверка). Без шага прав mongod под
+   `--auth` не пустит ни runner'а, ни приложения.
+6. `scripts/deploy.sh production` — план (dry-run), затем `scripts/deploy.sh
    production --apply` (pull по digest + up).
-6. `scripts/status.sh production` — web `/api/readyz`, heartbeat'ы сервисов.
-7. Проверка web-media-ro: из контейнера web запись в `/data/media` обязаны быть
+7. `scripts/status.sh production` — web `/api/readyz`, heartbeat'ы сервисов.
+8. Проверка web-media-ro: из контейнера web запись в `/data/media` обязаны быть
    невозможны (`ro`-монт); чтение — работать.
-8. `scripts/make_manifest.sh production` — зафиксировать, что именно работает.
+9. `scripts/make_manifest.sh production` — зафиксировать, что именно работает.
    В include-отчёт релиза: SHA обоих приложений (из OCI-меток), digest'ы,
    schemaVersion/манифест-чексумма/event версия, дата, платформа, previous.
 

@@ -28,6 +28,11 @@
 # mongo-bootstrap под ЯВНЫМ профилем bootstrap (в обычный up не входит, иначе
 # ломает повторные прогоны): localhost exception mongod принимает подключение
 # только с 127.0.0.1 — поэтому bootstrap идёт в сетевом namespace mongo-контейнера.
+# Схема-раннер (review R26-07, blocker 2) — ОДНОРАЗОВЫЙ же сервис schema-migrate
+# под ЯВНЫМ профилем migrate: MONGO_URI=${MONGO_MIGRATION_URI} (dsbot_migration,
+# единственная роль с DDL) + MONGO_DB; годится и для `migrate up`, и для
+# `migrate status`. Безпарольный loopback остаётся исключительным правом
+# mongo-bootstrap (localhost exception): под ним runner не ходит.
 #
 # Все project/file/env пути задаёт scripts/deploy.sh; из случайного cwd не запускать.
 # Значения секретов живут только в env-файле хоста (chmod 600), не в git.
@@ -103,6 +108,32 @@ services:
       MONGO_DB: ${MONGO_DB:?}
     user: "${DSBOT_UID:?}:${DSBOT_GID:?}"
     profiles: ["bootstrap"]
+
+  # R26-07 (review, blocker 2): ОДНОРАЗОВЫЙ job миграции схемы — единственная
+  # легальная точка `migrate up`/`migrate status` на проде. Явный профиль
+  # migrate (в обычный up не входит) + restart "no" (не resident):
+  #   docker compose --profile migrate run --rm schema-migrate python -m voice_tracker.migrate up
+  #   docker compose --profile migrate run --rm schema-migrate python -m voice_tracker.migrate status
+  # Credentials — ровно MONGO_MIGRATION_URI (dsbot_migration: CRUD +
+  # createIndex/dropIndex/createCollection/collMod). Runtime-URI (dsbot_app/
+  # dsbot_web) без DDL-роли для runner негодны, admin/root — избыточны (DB06).
+  # env_file НЕ подключается: раннеру нужны только MONGO_URI/MONGO_DB
+  # (интерполяция из выбранного env-файла), весь остальной секрет-набор env
+  # в контейнер одноразового прогона не мигрирует (ср. web, R26-06 п.5).
+  # Хост `mongo` из URI резолвится только в internal dsbot-data; egress не нужен.
+  schema-migrate:
+    image: "${BOOTSTRAP_IMAGE:?python image with voice_tracker + pymongo}"
+    restart: "no"
+    networks:
+      - dsbot-data
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URI: "${MONGO_MIGRATION_URI:?authenticated migration URI (dsbot_migration, DDL role) — env file}"
+      MONGO_DB: ${MONGO_DB:?}
+    user: "${DSBOT_UID:?}:${DSBOT_GID:?}"
+    profiles: ["migrate"]
 
   nats:
     image: ${NATS_IMAGE:?pin nats:2.10-alpine by digest in env file}

@@ -171,7 +171,9 @@ class Repository:
         )
         self.chat_messages.create_index([("guildId", 1), ("sentAt", -1)], name="chat_guildId_sentAt")
 
-        # T06: идемпотентный backfill revision для старых документов (существующих не трогает)
+        # T06: идемпотентный backfill revision для старых документов (существующих не трогает).
+        # Только для dev-стенда/job-runner'а (этот путь); на проде тот же шаг делает
+        # migration runner (M7 `guild-settings-revision-backfill`), а startup — verify-only.
         self.guild_settings.update_many({"revision": {"$exists": False}}, {"$set": {"revision": 0}})
         # T10: startup проверяет контракт индексов (сверка по спецификации, без drop);
         # несовместимость не скрывается — это материал для migration runner (DB02).
@@ -184,19 +186,20 @@ class Repository:
         report.raise_if_incompatible()
 
     def verify_startup(self) -> None:
-        """R26-07 (DB03): startup рантайма — только сверка схемы, никакого DDL.
+        """R26-07 (DB03): startup рантайма — ТОЛЬКО read-only сверка схемы.
 
         Боевые роли Mongo намеренно не имеют createIndex/dropIndex/dropCollection,
-        поэтому единственный легальный путь к DDL — `python -m voice_tracker.migrate up`
-        под migration-ролью. Здесь же допустимо ровно два действия: CRUD-backfill
-        revision (тем же запросом, что и в ensure_indexes) и read-only verify_db,
-        несовместимость которого не скрывается, а поднимается вверх.
+        поэтому единственный легальный путь к изменению схемы — `python -m
+        voice_tracker.migrate up` под migration-ролью. Здесь ровно одно действие:
+        read-only verify_db, несовместимость которого не скрывается, а поднимается
+        вверх. Ни одной записи: CRUD-backfill revision (T06), который раньше жил
+        здесь, — это миграция мимо runner'а; он перенесён в шаг M7
+        (`guild-settings-revision-backfill`) того же `migrate up`. Путь записи в
+        guild_settings (save_settings при revision==0) отсутствия поля не боится.
 
         ensure_indexes остаётся режимом dev-стенда / job-runner'а
         (DSBOT_SCHEMA_MODE=bootstrap) и на этом пути не вызывается.
         """
-        # T06: идемпотентный backfill revision для старых документов (существующих не трогает)
-        self.guild_settings.update_many({"revision": {"$exists": False}}, {"$set": {"revision": 0}})
         report = schema.verify_db(self.db, owners=("bot", "shared"))
         if report.under_other_name:
             logging.getLogger(__name__).info(

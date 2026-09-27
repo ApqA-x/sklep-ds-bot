@@ -5,17 +5,24 @@
 печатаются никогда. staging не должен указывать на прод-тома/прод-базу (P03).
 
 R26-07: mongod поднят с --auth — env-файл обязан нести аутентифицированные URI
-(MONGO_BOT_URI/MONGO_WEB_URI/MONGO_ADMIN_URI/MONGO_BACKUP_URI/MONGO_RESTORE_URI),
+(MONGO_BOT_URI/MONGO_WEB_URI/MONGO_ADMIN_URI/MONGO_MIGRATION_URI/
+MONGO_BACKUP_URI/MONGO_RESTORE_URI),
 пароли пользователей плана migrate.py (DB_USER_ROOT/DB_PASS_ROOT и
 DB_USER_<USERNAME в ВЕРХНИЙ РЕГИСТР> — ровно так читает USER_PLAN), образ
 bootstrap-job'а (BOOTSTRAP_IMAGE, digest) и DSBOT_SCHEMA_MODE ∈ {verify, bootstrap}.
 Набор одинаков у production и staging: staging репетирует ровно тот прогон, что
 пойдёт на прод (изоляция же — прод-специфичные проверки томов/базы/порта ниже).
-Review R26-07 (blocker 1): пользователи плана (app/web/backup/restore) создаются
-ensure_users В РАБОЧЕЙ БД, поэтому authSource их URI обязан равняться MONGO_DB —
-роль backup/restore, живущая в admin, туда пользователя не переносит, и
+Review R26-07 (blocker 1): пользователи плана (app/web/migration/backup/restore)
+создаются ensure_users В РАБОЧЕЙ БД, поэтому authSource их URI обязан равняться
+MONGO_DB — роль backup/restore, живущая в admin, туда пользователя не переносит, и
 authSource=admin даёт Authentication failed на живом mongod (доказано стендом).
 MONGO_ADMIN_URI из правила исключён: root создаётся localhost exception в admin.
+Review R26-07 (blocker 2): MONGO_MIGRATION_URI — credentials единственный
+легальный для compose-сервиса schema-migrate (`migrate up`/`migrate status`);
+его отсутствие или безпарольное значение = runner на проде не запускается,
+поэтому ключ обязателен и проверяется наравне с runtime-URI. Начальный
+localhost-exception bootstrap (mongo-bootstrap, mongodb://127.0.0.1 внутри
+сетевого namespace mongod) этого не касается: там пользователь ещё не создан.
 """
 from __future__ import annotations
 
@@ -57,10 +64,13 @@ IMAGE_KEYS = [
 # R26-07: контракт Mongo --auth. Нужны ОБОИМ профилям: и production, и staging
 # compose интерполируют ${MONGO_BOT_URI}/${MONGO_WEB_URI} и сервис mongo-bootstrap
 # (${BOOTSTRAP_IMAGE}); staging репетирует ровно тот прогон, что пойдёт на прод.
+# Review R26-07 (blocker 2): MONGO_MIGRATION_URI — credentials compose-сервиса
+# schema-migrate (`migrate up`/`migrate status`), обязателен там же.
 MONGO_URI_KEYS = [
     "MONGO_BOT_URI",
     "MONGO_WEB_URI",
     "MONGO_ADMIN_URI",
+    "MONGO_MIGRATION_URI",
     "MONGO_BACKUP_URI",
     "MONGO_RESTORE_URI",
 ]
@@ -81,7 +91,10 @@ DSBOT_SCHEMA_MODES = {"verify", "bootstrap"}
 # Review R26-07 (blocker 1): эти пользователи создаются ensure_users в рабочей
 # БД (client[MONGO_DB]) — authSource их URI обязан быть MONGO_DB. MONGO_ADMIN_URI
 # (root, localhost exception) исключён: он аутентифицируется в admin.
-WORKDB_AUTH_URI_KEYS = ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_BACKUP_URI", "MONGO_RESTORE_URI")
+# Review R26-07 (blocker 2): dsbot_migration — тоже пользователь рабочей БД
+# (USER_PLAN в migrate.py), его URI читает compose-сервис schema-migrate.
+WORKDB_AUTH_URI_KEYS = ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_MIGRATION_URI",
+                        "MONGO_BACKUP_URI", "MONGO_RESTORE_URI")
 AUTHSOURCE_RE = re.compile(r"[?&]authSource=([^&]*)")
 # path-база URI без authSource: scheme://<userinfo>@host[:port]/<db>[?…]
 URI_PATH_DB_RE = re.compile(r"^mongodb(?:\+srv)?://[^@]*@[^/?]+/([^?]+)")
@@ -147,9 +160,9 @@ def check(path: str, mode: str) -> list[str]:
             errors.append(f"{key}: must be an authenticated mongodb://<user>@<host> URI "
                           "(mongod runs with --auth, R26-07)")
 
-    # Review R26-07 (blocker 1): app/web/backup/restore создаются migrate.py в
-    # рабочей БД, поэтому их URI обязан аутентифицироваться против MONGO_DB
-    # (authSource=<MONGO_DB> или path-база <MONGO_DB>). Формат URI уже
+    # Review R26-07 (blocker 1): app/web/migration/backup/restore создаются
+    # migrate.py в рабочей БД, поэтому их URI обязан аутентифицироваться против
+    # MONGO_DB (authSource=<MONGO_DB> или path-база <MONGO_DB>). Формат URI уже
     # проверен выше; значения в сообщения не попадают.
     workdb = env.get("MONGO_DB", "").strip()
     if workdb:

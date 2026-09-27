@@ -29,9 +29,15 @@ mongod работал без `--auth`, ролевая модель была де
    runner-роль; `createCollection` runtime не нужен — коллекции существуют к
    моменту первой записи (их создал runner; implicit-create не входит в план).
    `getMore` в плане нет сознательно: отдельной серверной привилегией
-   continuation курсора не является (авторизуется правами исходной
-   `find`/`aggregate`), а `createRole` на mongo:7 отвергает её как
-   `Unrecognized action: getMore` (живой прогон r2607-стенда).
+   continuation курсора не является (авторизуется правами исходной операции
+   чтения), а `createRole` на mongo:7 отвергает её как
+   `Unrecognized action: getMore` (живой прогон r2607-стенда). По той же причине
+   в плане нет и `aggregate`: отдельного action `aggregate` в модели
+   авторизации Mongo не существует — только-читающая агрегация авторизуется
+   правом `find` на коллекции, им покрыты и серверный `aggregate` в precheck
+   дублей (M3/M4), и `count_documents` в M7; `createRole` на mongo:7 отвергает
+   `aggregate` как `Unrecognized action: aggregate` (живой прогон стенда
+   2026-09-27).
    Декларативно план сверяют unit-тесты, enforcement доказывает auth-стенд
    (п.7).
 2. **DDL — только runner'у.** Runtime стартует в режиме verify:
@@ -40,17 +46,52 @@ mongod работал без `--auth`, ролевая модель была де
    T10 без единой DDL-команды. `bootstrap`-режим — только dev / первый прогон
    job-runner'а. Рабочий порядок на чистой БД: bootstrap прав → `migrate up`
    под `dsbot_migration` → запуск приложений под verify.
+   Точка входа миграций — ОДНОРАЗОВЫЙ compose-сервис `schema-migrate` (review
+   R26-07, blocker 2): профиль `migrate` (в обычный `up` не входит),
+   `restart: "no"`, `dsbot-data` БЕЗ `network_mode` (хост `mongo` резолвится
+   только во внутренней сети), `image` = `BOOTSTRAP_IMAGE`, без общего
+   `env_file` — ровно `MONGO_URI=${MONGO_MIGRATION_URI}` и `MONGO_DB`
+   интерполяцией из выбранного env-файла. Миграции НЕ запускаются из app-
+   контейнеров: бот-URI (`dsbot_app`) и web-URI (`dsbot_web`) DDL-роли не имеют
+   (это и есть DB06), а `MONGO_ADMIN_URI`/root для runner'а избыточны; тот же
+   прогон, что «работал» на стенде без `--auth`, на live даёт Unauthorized.
+   Команды (полная форма, прод; staging — те же профили с `-p dsbot-staging`):
+
+   ```bash
+   docker compose -p dsbot-prod -f deploy/production/compose.yml \
+     --env-file deploy/production/.env \
+     --profile migrate run --rm schema-migrate \
+     python -m voice_tracker.migrate up        # аналогично status / plan
+   ```
+
+   `--db` не передают: `MONGO_DB` приходит из env-файла (подмена в командной
+   строке обошла бы сверку render↔env).
 3. **Начальные права — localhost exception на пустом томе.** `mongod --auth`
    до появления первого пользователя принимает одно неаутентифицированное
    соединение с 127.0.0.1, создающее админа. Для этого в compose есть
    ОДНОРАЗОВЫЙ сервис `mongo-bootstrap`: `network_mode: service:mongo`
    (localhost exception только из сетевого namespace mongo), профиль `bootstrap`
    (в обычный `up` не входит — иначе ломал бы повторные up), `restart: "no"`
-   (одноразовый job). Запуск: `docker compose ... --profile bootstrap run
-   mongo-bootstrap python -m voice_tracker.migrate users --bootstrap` — пароли
-   берутся из env-файла (`DB_USER_ROOT`/`DB_PASS_ROOT` — имя/пароль root;
+   (одноразовый job), `MONGO_URI: mongodb://127.0.0.1:27017` без credentials.
+   Запуск (полная форма для прода; staging — тот же прогон с другими
+   `project`/`-f`/`--env-file` по `deploy/staging/`):
+
+   ```bash
+   docker compose -p dsbot-prod -f deploy/production/compose.yml \
+     --env-file deploy/production/.env \
+     --profile bootstrap run --rm mongo-bootstrap \
+     python -m voice_tracker.migrate users --bootstrap
+   ```
+
+   Пароли берутся из env-файла (`DB_USER_ROOT`/`DB_PASS_ROOT` — имя/пароль root;
    пароли пользователей плана — `DB_USER_<USERNAME в ВЕРХНИЙ РЕГИСТР>`), в
-   вывод идут только имена созданных сущностей.
+   вывод идут только имена созданных сущностей. Повторный прогон идемпотентен:
+   когда localhost exception закрыта, `bootstrap_users` переходит на admin-URI
+   (root-учётка либо `MONGO_ADMIN_URI`) и делает обычную grants-сверку
+   `ensure_users`. Безпарольный loopback — исключительное право этого сервиса
+   и ровно этой команды: у любого другого сервиса `127.0.0.1` в `MONGO_URI`
+   означает чужой сетевой namespace вне контракта и отвергается
+   `validate_compose.py`.
 4. **Grants-репарация идемпотентна и локаут-безопасна.** `ensure_users` после
    createUser/upsert-пути сверяет grants через `usersInfo`, а состав кастомных
    ролей — через `rolesInfo`: избыточные роли (например leftover встроенной

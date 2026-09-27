@@ -41,7 +41,9 @@
 3. **Mongo (решение R26-07 принято и зафиксировано в коде — ADR-0005)**: контейнер этого же
    проекта на internal-сети, без published ports, но **под `--auth`**
    (`deploy/production/compose.yml`). Все URI приходят из env-файла:
-   `MONGO_BOT_URI`/`MONGO_WEB_URI` (runtime, без DDL-роли), `MONGO_ADMIN_URI`
+   `MONGO_BOT_URI`/`MONGO_WEB_URI` (runtime, без DDL-роли), `MONGO_MIGRATION_URI`
+   (compose-сервис `schema-migrate`, профиль `migrate` — единственная легальная
+   точка `migrate up`/`status`), `MONGO_ADMIN_URI`
    (гейты mongosh), `MONGO_BACKUP_URI`/`MONGO_RESTORE_URI` (backup/restore);
    начальные права на пустом томе создаёт `python -m voice_tracker.migrate
    users --bootstrap` (localhost exception, профиль compose `bootstrap`;
@@ -155,10 +157,17 @@ docker compose -p dsbot-prod -f deploy/production/compose.yml \
 
 Сразу после подъёма **пустого** тома — одноразовый bootstrap прав (R26-07,
 ADR-0005; без него mongod под `--auth` не пустит ни гейты `restore.sh`, ни
-приложения): той же командой добавить `--profile bootstrap run --rm
-mongo-bootstrap python -m voice_tracker.migrate users --bootstrap`
-(localhost exception изнутри mongo-контейнера, пароли — `DB_USER_*`/
-`DB_PASS_ROOT` из env).
+приложения, ни сам runner). localhost exception mongod принимает только с
+127.0.0.1, поэтому `mongo-bootstrap` идёт в сетевом namespace mongo
+(`network_mode: service:mongo`), под явным профилем `bootstrap`; пароли —
+`DB_USER_*`/`DB_PASS_ROOT` из того же env-файла:
+
+```bash
+docker compose -p dsbot-prod -f deploy/production/compose.yml \
+  --env-file deploy/production/.env \
+  --profile bootstrap run --rm mongo-bootstrap \
+  python -m voice_tracker.migrate users --bootstrap
+```
 
 Репетиция в режиме `rehearsal` (по умолчанию): цели генерируются прогоном —
 БД `voice_tracker_production_rehearsal_<runid>` (строгий allowlist
@@ -226,21 +235,31 @@ deploy/backup/restore.sh production --mode cutover \
    `python -m voice_tracker.migrate check` в репозитории НЕ существует**
    (`docs/runbook-backup.md` называет так схемную сверку вообще); фактические
    subcommand'ы `voice_tracker/migrate.py`: `status | plan | up | snapshot |
-   export-manifest | users | check-rollback`. Применение к восстановленной БД
-   (Mongo недоступна с хоста — internal-сеть, поэтому из контейнера образа,
-   полная форма compose-команды):
+   export-manifest | users | check-rollback`. Единственная легальная точка для
+   них на проде — compose-сервис `schema-migrate` под явным профилем `migrate`
+   (review R26-07, blocker 2): его `MONGO_URI` интерполируется ровно из
+   `MONGO_MIGRATION_URI` (`dsbot_migration` — единственная роль с DDL), а
+   `MONGO_DB` — из env-файла, активированного шагом 4, поэтому `--db` в команде
+   не нужен и перебивать его нельзя. Поднимать для этого `gateway` (или любой
+   app-сервис) НЕЛЬЗЯ: бот-URI = `dsbot_app` без DDL-роли, и прогон, «работавший»
+   на стенде без auth, на live `--auth` даёт Unauthorized; подмена URI сервиса на
+   runtime/admin-URI отсекается и render-контрактом `validate_compose.py`.
+   Mongo недоступна с хоста (internal-сеть), поэтому из одноразового контейнера
+   того же образа (полная форма compose-команды):
 
 ```bash
 docker compose -p dsbot-prod -f deploy/production/compose.yml \
-  --env-file deploy/production/.env run --rm --no-deps -T gateway \
-  python -m voice_tracker.migrate status --db voice_tracker_production
+  --env-file deploy/production/.env \
+  --profile migrate run --rm schema-migrate \
+  python -m voice_tracker.migrate status
 ```
 
    Ожидаем: `latest` = schemaVersion из манифеста точки; ни одной записи
    `running`/`failed` в `migrations` (прерванная миграция на source-хосте —
    блокиратор cutover, разбираться по ADR-0003). `plan` (он же `up --dry-run`)
    показывает, что применялось бы дополнительно — после корректного restore
-   ожидание пусто по DDL.
+   ожидание пусто по DDL; если нет, применяется той же командой, заменив
+   `status` на `up` (тот же сервис, тот же профиль).
 
 ### Шаг 6. Promotion — подъём приложения на Linux
 

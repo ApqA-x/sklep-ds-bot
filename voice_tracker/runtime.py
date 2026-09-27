@@ -91,10 +91,12 @@ class Config:
     # второго gateway; 0 = guard выключен (только по явному решению оператора).
     gateway_singleton_max_age_seconds: int = 90
     # R26-07 (DB06/V26-18): режим работы со схемой на startup. "verify" (по
-    # умолчанию) — только read-only сверка + CRUD-backfill: runtime-роли намеренно
+    # умолчанию) — ТОЛЬКО read-only сверка: runtime-роли намеренно
     # НЕ имеют createIndex/dropIndex/dropCollection, требовать DDL на startup
-    # нельзя. "bootstrap" — полный ensure_indexes (dev-стенд без auth и
-    # job-runner'ный первый запуск); DDL на проде — `migrate up` с migration-ролью.
+    # нельзя, и записей startup тоже не делает (CRUD-backfill revision —
+    # миграция M7 runner'а). "bootstrap" — полный ensure_indexes (dev-стенд без
+    # auth и job-runner'ный первый запуск); DDL на проде — `migrate up` с
+    # migration-ролью (compose-сервис schema-migrate, профиль migrate).
     schema_mode: str = "verify"
 
 

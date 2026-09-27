@@ -1,6 +1,8 @@
 """T10: versioned migration runner для voice_tracker (единственный управляемый
-шаг DDL). Приложения на startup только проверяют совместимость; удаление и
-пересоздание индексов — здесь.
+шаг изменений схемы/данных). Приложения на startup только проверяют совместимость
+(read-only, R26-07 review: ни DDL, ни записей); удаление и пересоздание индексов
+И управляемые CRUD-backfills (M7 guild_settings.revision) — только здесь, под
+migration-ролью.
 
 Команды:
     python -m voice_tracker.migrate status              [--db NAME]
@@ -10,8 +12,14 @@
     python -m voice_tracker.migrate export-manifest --out FILE
     python -m voice_tracker.migrate users               # least-privilege (DB06)
 
+На проде команды запускаются ОДНИМ и тем же compose-путём (профиль `migrate`,
+сервис `schema-migrate`, credentials — MONGO_MIGRATION_URI пользователя
+dsbot_migration), см. deploy/README.md и docs/adr/0005 — не из контейнера
+приложения с runtime-URI.
+
 Идемпотентность: повтор `up` на уже применённой версии — no-op (create_index с
-той же спецификацией noop; статус-документ не трогается). Смена манифеста без
+той же спецификацией noop; CRUD-шаги фильтруются по $exists и не трогают
+уже мигрированные документы; статус-документ не трогается). Смена манифеста без
 новых миграций (checksum) фиксируется в schema_versions, DDL не переигрывается.
 Прерывание (DB04): конкурентный runner отбивается lease-локом schema_lock;
 сбой посередине оставляет статус running — повторный `up` после истечения
@@ -192,6 +200,28 @@ def _apply_ordering_gate_index(db: Any, dry: bool) -> dict:
     return {"index": f"{spec.collection}.{spec.name}", "dryRun": dry}
 
 
+GUILD_SETTINGS = "guild_settings"
+
+
+def _apply_guild_settings_revision_backfill(db: Any, dry: bool) -> dict:
+    """M7 (R26-07 review, blocker 1): идемпотентный CRUD-backfill revision для
+    старых документов guild_settings (существующих не трогает).
+
+    Ранее этот же шаг выполнял startup рантайма (T06 в repository.verify_startup)
+    — то есть скрытая миграция данных мимо runner'а и единственный write на
+    старте. Startup теперь строго read-only (verify-only, DB03), и backfill живёт
+    здесь: под migration-ролью, с lease-локом, статусом в schema_migrations и
+    отчётом. Аддитивен: путь save_settings при revision==0/$exists:false
+    работает и без него, rollback приложения безопасен."""
+    flt = {"revision": {"$exists": False}}
+    pending = db[GUILD_SETTINGS].count_documents(flt)
+    if dry:
+        return {"collection": GUILD_SETTINGS, "pending": pending, "dryRun": True}
+    res = db[GUILD_SETTINGS].update_many(flt, {"$set": {"revision": 0}})
+    return {"collection": GUILD_SETTINGS, "pending": pending,
+            "backfilled": res.modified_count, "dryRun": False}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
@@ -199,6 +229,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "discord-audit-state-unique", _apply_audit_state_index, backward_compatible=True),
     Migration(5, "eventlog-sweep-cursor-indexes", _apply_sweep_cursor_indexes, backward_compatible=True),
     Migration(6, "eventlog-ordering-gate-index", _apply_ordering_gate_index, backward_compatible=True),
+    Migration(7, "guild-settings-revision-backfill", _apply_guild_settings_revision_backfill,
+              backward_compatible=True),
 )
 
 
@@ -365,15 +397,28 @@ def check_rollback(db: Any, to_version: int) -> list[str]:
 # Единственный источник состава привилегий — ROLE_PLAN (тесты сверяют её
 # декларативно, enforcement — интеграционный стенд tests/test_mongo_auth_stand.py).
 # "getMore" в списке нет намеренно: это НЕ отдельная серверная привилегия —
-# continuation курсора авторизуется теми же правами, что исходные find/aggregate.
-# Как отдельное action его не принимает createRole: живой прогон r2607-стенда на
-# mongo:7 дал MongoServerError: Unrecognized action: getMore.
+# continuation курсора авторизуется теми же правами, что исходная операция
+# чтения. Как отдельное action его не принимает createRole: живой прогон
+# r2607-стенда на mongo:7 дал MongoServerError: Unrecognized action: getMore.
 RUNTIME_ROLE_ACTIONS: tuple[str, ...] = (
     "find", "insert", "update", "remove",
     "listCollections", "listIndexes", "collStats", "dbStats", "killCursors",
 )
-# Деструктивного DDL (dropIndex/dropCollection) нет ни у кого, кроме админских
-# путей; runner получает только созидательную часть.
+# Отличие runner'а от runtime — ровно DDL индексов и коллекций: пересборка
+# индекса = dropIndex + createIndex, implicit-create новой коллекции требует
+# createCollection, сверка/смена опций коллекции — collMod. Ни dropCollection,
+# ни dropDatabase, ни userAdmin/grantRole/revokeRole: удаление коллекций —
+# ручной шаг оператора после разбора (DB05), гранты — не дело runner'а.
+# "aggregate" здесь был бы ошибкой ПЛАНА, а не недостающей привилегией: в
+# модели авторизации Mongo отдельного action `aggregate` НЕТ — агрегация,
+# которая только читает, авторизуется правом `find` на коллекции (createRole на
+# mongo:7 отвергает "aggregate" так же, как "getMore": Unrecognized action,
+# живой прогон стенда 2026-09-27). Тем же `find` из RUNTIME_ROLE_ACTIONS
+# покрыты серверная агрегация в _dup_groups (M3/M4) и count_documents в M7 —
+# миграционной роли отдельное право на чтение не нужно, а custom-роль отдаёт
+# серверу ровно переданный список, поэтому «на всякий случай» его расширять
+# нельзя: лишний action — это либо падение createRole, либо незадекларированное
+# расширение прав (DB06).
 MIGRATION_ROLE_EXTRA: tuple[str, ...] = (
     "createIndex", "dropIndex", "createCollection", "collMod",
 )

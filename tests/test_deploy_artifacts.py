@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -59,15 +60,22 @@ def _bot(name: str, envfile: str = ENV_PATH, **over) -> dict:
 
 def _good_cfg(mode: str, envfile: str = ENV_PATH) -> dict:
     egress = ["dsbot-data", "dsbot-egress"]
-    # R26-07: в ОТРЕНДЕРЕННОМ конфиге ${MONGO_BOT_URI}/${MONGO_WEB_URI} схлопнуты
-    # в значения env-файла; фикстура обязана нести ровно их (при недоступном
-    # файле — синтетические аутентифицированные URI той же формы).
+    # R26-07: в ОТРЕНДЕРЕННОМ конфиге ${MONGO_BOT_URI}/${MONGO_WEB_URI}/
+    # ${MONGO_MIGRATION_URI} схлопнуты в значения env-файла; фикстура обязана
+    # нести ровно их (при недоступном файле — синтетические аутентифицированные
+    # URI той же формы).
     env_vals = validate_compose._parse_env_values(envfile) or {}
+    db = env_vals.get("MONGO_DB") or (
+        "voice_tracker_staging" if mode == "staging" else "voice_tracker")
     bot_uri = env_vals.get("MONGO_BOT_URI") or (
         "mongodb://dsbot_app:pw-app@mongo:27017/?authSource=voice_tracker"
     )
     web_uri = env_vals.get("MONGO_WEB_URI") or (
         "mongodb://dsbot_web:pw-web@mongo:27017/?authSource=voice_tracker"
+    )
+    # review R26-07 (blocker 2): credentials одноразового runner-сервиса
+    mig_uri = env_vals.get("MONGO_MIGRATION_URI") or (
+        f"mongodb://dsbot_migration:pw-mig@mongo:27017/?authSource={db}"
     )
     services = {
         "mongo": _svc(command=["--auth"]),
@@ -79,6 +87,14 @@ def _good_cfg(mode: str, envfile: str = ENV_PATH) -> dict:
             network_mode="service:mongo",
             networks=[],
             environment={"MONGO_URI": "mongodb://127.0.0.1:27017"},
+        ),
+        # review R26-07 (blocker 2): одноразовый schema-раннер: профиль migrate,
+        # restart "no", dsbot-data (хост mongo), ровно MONGO_URI+MONGO_DB без env_file.
+        "schema-migrate": _svc(
+            restart="no",
+            profiles=["migrate"],
+            networks=["dsbot-data"],
+            environment={"MONGO_URI": mig_uri, "MONGO_DB": db},
         ),
         "nats": _svc(),
         "gateway": _bot("gateway", envfile, networks=egress,
@@ -194,6 +210,9 @@ def _write_env(tmp: Path, mode: str, name: str | None = None, **over) -> Path:
         "MONGO_BOT_URI": f"mongodb://dsbot_app:pw-app@mongo:27017/?authSource={db}",
         "MONGO_WEB_URI": f"mongodb://dsbot_web:pw-web@mongo:27017/?authSource={db}",
         "MONGO_ADMIN_URI": "mongodb://dsbot_root:pw-root@mongo:27017/admin?authSource=admin",
+        # review R26-07 (blocker 2): MONGO_MIGRATION_URI — credentials compose-
+        # сервиса schema-migrate (`migrate up`/`status`), пользователь рабочей БД
+        "MONGO_MIGRATION_URI": f"mongodb://dsbot_migration:pw-mig@mongo:27017/?authSource={db}",
         # review R26-07 (blocker 1): backup/restore-пользователи созданы в рабочей
         # БД — authSource обязан быть MONGO_DB, не admin (сверяет validate_env)
         "MONGO_BACKUP_URI": f"mongodb://dsbot_backup:pw-bkp@mongo:27017/?authSource={db}",
@@ -352,9 +371,12 @@ def test_v2616_web_has_no_env_file_and_no_backend_keys() -> None:
         "BACKUP_DIR": "/backup",
         "EVENT_SIGNING_SECRET": "nope",
         "MIGRATION_DSN": "mongodb://x",
+        # review R26-07 (blocker 2): credentials runner'а — тоже backend-only
+        "MONGO_MIGRATION_URI": "mongodb://dsbot_migration:pw@mongo:27017/?authSource=voice_tracker",
     }
     errors = "\n".join(validate_compose.check(cfg2, "production"))
     assert "backend-only keys" in errors
+    assert "MONGO_MIGRATION_URI" in errors
 
 
 def test_v2616_yaml_both_composes_use_single_env_placeholder() -> None:
@@ -420,7 +442,7 @@ def test_v2617_egress_network_and_membership_required() -> None:
 
 def test_v2617_yaml_egress_topology() -> None:
     bot_egress = ("gateway", "commands", "activity", "stalker")
-    data_only = ("mongo", "nats", "tracker", "writer", "controlplane")
+    data_only = ("mongo", "nats", "tracker", "writer", "controlplane", "schema-migrate")
     for path in (DEPLOY / "production" / "compose.yml", DEPLOY / "staging" / "compose.staging.yml"):
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
         nets = doc["networks"]
@@ -519,13 +541,135 @@ def test_r2607_bootstrap_service_contract_rejected_variants() -> None:
     assert "one-shot bootstrap must have restart" in errors
 
 
+def test_r2607_bootstrap_loopback_uri_is_exact() -> None:
+    """Passwordless loopback — исключительное право mongo-bootstrap (localhost
+    exception): его MONGO_URI обязан оставаться ровно mongodb://127.0.0.1:27017,
+    а у прочих сервисов любой 127.0.0.1-URI — ошибка (review R26-07, blocker 2)."""
+    cfg = _good_cfg("production")
+    cfg["services"]["mongo-bootstrap"]["environment"]["MONGO_URI"] = (
+        "mongodb://dsbot_migration:pw-mig@127.0.0.1:27017/?authSource=voice_tracker")
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "[mongo-bootstrap] MONGO_URI must be exactly" in errors
+    cfg = _good_cfg("production")
+    cfg["services"]["gateway"]["environment"]["MONGO_URI"] = "mongodb://127.0.0.1:27017"
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "[gateway] MONGO_URI is a loopback URI" in errors
+
+
+def test_r2607_blocker2_schema_migrate_contract_rejected_variants() -> None:
+    """Рендер-контракт schema-migrate (review R26-07, blocker 2) проверяется
+    fail-closed по каждому пункту обвязки."""
+    # отсутствие (когда прочие profile-сервисы в рендере видны) — у runner'а
+    # не остаётся легальной точки migrate up/status
+    cfg = _good_cfg("production")
+    cfg["services"].pop("schema-migrate")
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "schema-migrate" in errors and "missing from render" in errors
+    # без профиля — автозапуск на каждом up
+    cfg = _good_cfg("production")
+    cfg["services"]["schema-migrate"].pop("profiles")
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "must sit behind the \"migrate\" profile" in errors
+    # resident-restart у одноразового job запрещён
+    cfg = _good_cfg("production")
+    cfg["services"]["schema-migrate"]["restart"] = "unless-stopped"
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "one-shot schema-migrate runner must have restart" in errors
+    # безпарольный URI на mongo — только loopback mongo-bootstrap легален
+    cfg = _good_cfg("production")
+    cfg["services"]["schema-migrate"]["environment"]["MONGO_URI"] = "mongodb://mongo:27017"
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "[schema-migrate] MONGO_URI is an unauthenticated mongodb:// URI" in errors
+    assert "MONGO_URI must carry the MONGO_MIGRATION_URI credentials" in errors
+    # loopback-URI (даже без credentials) runner'у запрещён — это не его контракт
+    cfg = _good_cfg("production")
+    cfg["services"]["schema-migrate"]["environment"]["MONGO_URI"] = "mongodb://127.0.0.1:27017"
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "[schema-migrate] MONGO_URI is a loopback URI" in errors
+    assert "MONGO_URI must carry the MONGO_MIGRATION_URI credentials" in errors
+    # нет MONGO_DB — runner не знает целевую базу
+    cfg = _good_cfg("production")
+    cfg["services"]["schema-migrate"]["environment"].pop("MONGO_DB")
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "[schema-migrate] MONGO_DB must be set" in errors
+    # network_mode как у bootstrap — второй безпарольно-loopback-вход в mongod
+    cfg = _good_cfg("production")
+    cfg["services"]["schema-migrate"]["network_mode"] = "service:mongo"
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "network_mode: service:mongo is the" in errors
+    # вне dsbot-data хост `mongo` из URI нерезолвим; в egress сервису нечего делать
+    cfg = _good_cfg("production")
+    cfg["services"]["schema-migrate"]["networks"] = ["dsbot-egress"]
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "must be on dsbot-data" in errors
+    assert "must not be on dsbot-egress" in errors
+    # общий env_file — runner получил бы все секреты вместо двух нужных ключей
+    cfg = _good_cfg("production")
+    cfg["services"]["schema-migrate"]["env_file"] = [
+        {"path": ENV_PATH, "service": "schema-migrate"}]
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "must not get the shared env_file" in errors
+
+
+def test_r2607_blocker2_schema_migrate_uri_must_be_the_env_migration_uri(tmp_path) -> None:
+    """MONGO_URI schema-migrate обязан ровно совпадать с MONGO_MIGRATION_URI,
+    MONGO_DB — с MONGO_DB выбранного env-файла: подмена на runtime-URI (нет DDL —
+    runner не работает) или admin-URI (root — избыточные привилегии, DB06) —
+    падение по ИМЕНИ ключа без раскрытия значений."""
+    selected = _write_env(tmp_path, "staging")
+    cfg = _good_cfg("staging", envfile=str(selected))
+    assert validate_compose.check(cfg, "staging", env_file=str(selected)) == []
+    for wrong in ("mongodb://dsbot_app:pw-app@mongo:27017/?authSource=voice_tracker_staging",
+                  "mongodb://dsbot_root:pw-root@mongo:27017/admin?authSource=admin"):
+        cfg2 = _good_cfg("staging", envfile=str(selected))
+        cfg2["services"]["schema-migrate"]["environment"]["MONGO_URI"] = wrong
+        errors = "\n".join(validate_compose.check(cfg2, "staging", env_file=str(selected)))
+        assert ("[schema-migrate] MONGO_URI does not match the selected env file's "
+                "MONGO_MIGRATION_URI") in errors, errors
+        assert "pw-app" not in errors and "pw-root" not in errors
+    cfg3 = _good_cfg("staging", envfile=str(selected))
+    cfg3["services"]["schema-migrate"]["environment"]["MONGO_DB"] = "voice_tracker"
+    errors = "\n".join(validate_compose.check(cfg3, "staging", env_file=str(selected)))
+    assert ("[schema-migrate] MONGO_DB does not match the selected env file's "
+            "MONGO_DB") in errors
+    assert "[schema-migrate] staging must not write the production DB" in errors
+
+
+def test_r2607_blocker2_yaml_compose_schema_migrate_wiring() -> None:
+    """Форма YAML (оба compose): schema-migrate — ${BOOTSTRAP_IMAGE:?…},
+    restart "no", профиль ["migrate"], networks ["dsbot-data"], без network_mode,
+    env_file, портов и volumes; environment ровно {MONGO_URI, MONGO_DB} с
+    плейсхолдерами ${MONGO_MIGRATION_URI:?…}/${MONGO_DB:?}; depends_on mongo
+    service_healthy. mongo-bootstrap остаётся passwordless loopback
+    (mongodb://127.0.0.1:27017) и migration-URI не получает."""
+    for path in (DEPLOY / "production" / "compose.yml",
+                 DEPLOY / "staging" / "compose.staging.yml"):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        mig = doc["services"]["schema-migrate"]
+        assert mig["image"].startswith("${BOOTSTRAP_IMAGE:?"), path.name
+        assert mig["restart"] == "no", path.name
+        assert mig["profiles"] == ["migrate"], path.name
+        assert mig["networks"] == ["dsbot-data"], path.name
+        assert "network_mode" not in mig and "env_file" not in mig, path.name
+        assert "ports" not in mig and "volumes" not in mig, path.name
+        assert set(mig["environment"]) == {"MONGO_URI", "MONGO_DB"}, path.name
+        assert mig["environment"]["MONGO_URI"].startswith("${MONGO_MIGRATION_URI:?"), path.name
+        assert mig["environment"]["MONGO_DB"] == "${MONGO_DB:?}", path.name
+        assert mig["user"] == "${DSBOT_UID:?}:${DSBOT_GID:?}", path.name
+        assert mig["depends_on"]["mongo"]["condition"] == "service_healthy", path.name
+        boot = doc["services"]["mongo-bootstrap"]
+        assert boot["environment"]["MONGO_URI"] == "mongodb://127.0.0.1:27017", path.name
+        assert "MONGO_MIGRATION_URI" not in str(boot), path.name
+
+
 def test_r2607_profile_filtered_render_tolerates_absent_bootstrap() -> None:
     """Рендеры compose, отсеивающие неактивные profile-сервисы, не показывают ни
-    controlplane, ни mongo-bootstrap — отсутствие не должно быть ложной тревогой
-    (контракт держат YAML-тесты)."""
+    controlplane, ни mongo-bootstrap, ни schema-migrate — отсутствие не должно
+    быть ложной тревогой (контракт держат YAML-тесты)."""
     cfg = _good_cfg("production")
     cfg["services"].pop("mongo-bootstrap")
     cfg["services"].pop("controlplane")
+    cfg["services"].pop("schema-migrate")
     assert validate_compose.check(cfg, "production") == []
 
 
@@ -577,8 +721,9 @@ def test_r2607_env_requires_auth_uris_passwords_and_schema_mode(tmp_path) -> Non
     good = _write_env(tmp_path, "production")
     assert validate_env.check(str(good), "production") == []
     # отсутствие любого нового обязательного ключа — падение
-    for key in ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_ADMIN_URI", "MONGO_BACKUP_URI",
-                "MONGO_RESTORE_URI", "DB_USER_ROOT", "DB_PASS_ROOT", "DB_USER_DSBOT_APP",
+    for key in ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_ADMIN_URI", "MONGO_MIGRATION_URI",
+                "MONGO_BACKUP_URI", "MONGO_RESTORE_URI", "DB_USER_ROOT", "DB_PASS_ROOT",
+                "DB_USER_DSBOT_APP",
                 "DB_USER_DSBOT_WEB", "DB_USER_DSBOT_MIGRATION", "DB_USER_DSBOT_BACKUP",
                 "DB_USER_DSBOT_RESTORE", "BOOTSTRAP_IMAGE", "DSBOT_SCHEMA_MODE"):
         bad = _write_env(tmp_path, "production", name=f".env.miss.{key}", **{key: ""})
@@ -600,12 +745,13 @@ def test_r2607_env_rejects_unauthenticated_uri_value(tmp_path) -> None:
 
 
 def test_r2607_env_plan_user_uris_must_auth_against_working_db(tmp_path) -> None:
-    """Review R26-07 (blocker 1): dsbot_app/dsbot_web/dsbot_backup/dsbot_restore
-    создаются ensure_users В РАБОЧЕЙ БД (роли backup/restore из admin только
+    """Review R26-07 (blocker 1): dsbot_app/dsbot_web/dsbot_migration/dsbot_backup/
+    dsbot_restore создаются ensure_users В РАБОЧЕЙ БД (роли backup/restore из admin только
     ВЫДАНЫ им — пользователя туда не переносят). authSource=admin на этих URI —
     гарантированный Authentication failed на живом mongod; валидатор обязан
     отвергнуть это до деплоя. MONGO_ADMIN_URI (root в admin) — исключение."""
-    for key in ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_BACKUP_URI", "MONGO_RESTORE_URI"):
+    for key in ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_MIGRATION_URI",
+                "MONGO_BACKUP_URI", "MONGO_RESTORE_URI"):
         bad = _write_env(tmp_path, "production", name=f".env.src.{key}",
                          **{key: "mongodb://u:p@mongo:27017/?authSource=admin"})
         errors = "\n".join(validate_env.check(str(bad), "production"))
@@ -657,10 +803,19 @@ def test_r2607_auth_stand_script_contract() -> None:
     authSource=рабочая БД (blocker 1), (c) держать секреты вне stdout, кроме
     eval-блока, и не публиковать прод-порт 27017 на хост."""
     text = (DEPLOY / "scripts" / "r2607_auth_stand.sh").read_text(encoding="utf-8")
+    # Запрет относится только к исполняемому тексту стенда: строковые литералы и
+    # код не бывают комментариями, а шапка обязана объяснять, почему права создаёт
+    # production-код (в т.ч. что `createRole` на mongo:7 отвергает `aggregate`) —
+    # документирующий комментарий не имеет права ронять контракт по подстроке.
+    code = "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().startswith("#"))
     # (a) production-путь начальных прав; ручного создания ролей/грантов нет
-    assert "voice_tracker.migrate users --bootstrap" in text
-    for manual in ("createRole", "createUser", "grantRolesToUser"):
-        assert manual not in text, f"стенд не обязан генерировать права вручную: {manual}"
+    assert "exec python -B -m voice_tracker.migrate users --bootstrap" in code
+    for manual in ("createRole", "createUser", "grantRolesToUser",
+                   "grantRoles", "updateRole", "dropRole", "changeUserPassword"):
+        assert manual not in code, f"стенд не обязан генерировать права вручную: {manual}"
+    # единственный живой mongosh — ожидание готовности кластера, не провижнрование
+    assert code.count("mongosh") == 1 and "'db.adminCommand({ping:1}).ok'" in code
     # (b) полный набор export'ов для eval
     for key in ("TEST_MONGO_ADMIN_URI", "TEST_MONGO_APP_URI", "TEST_MONGO_WEB_URI",
                 "TEST_MONGO_MIGRATION_URI", "TEST_MONGO_BACKUP_URI",
@@ -669,6 +824,91 @@ def test_r2607_auth_stand_script_contract() -> None:
     assert "authSource=$DB'" in text  # backup/restore — против рабочей БД стенда
     # (c) публикация только на стендовый порт loopback; 27017 хоста не используется
     assert '-p "127.0.0.1:${PORT}:27017"' in text and "PORT=27098" in text
+
+
+# Маркерный контракт миграционной фазы: ТОТ ЖЕ список, что сверяет живыми
+# значениями tests/test_mongo_auth_stand.py (R2607_MARKERS). Фиксируется здесь
+# независимо (дублем литерала), чтобы расхождение «скрипт печатает одно, тест
+# читает другое» падало статикой, а не зелёным прогоном без живых проверок.
+R2607_MARKER_CONTRACT: tuple[str, ...] = (
+    "R2607_MIGRATE_UP_RC",
+    "R2607_MIGRATE_STATUS_RC",
+    "R2607_MIGRATE_UP_APPLIED",
+    "R2607_SCHEMA_LATEST",
+    "R2607_SCHEMA_VERSION",
+    "R2607_BACKFILL_STEP",
+    "R2607_BACKFILL_STATUS",
+    "R2607_BACKFILL_PENDING",
+    "R2607_BACKFILL_DONE",
+    "R2607_LEGACY_ID",
+    "R2607_LEGACY_REVISION",
+    "R2607_PASSWORDLESS_RC",
+    "R2607_PASSWORDLESS_DENIED",
+)
+
+
+def test_r2607_auth_stand_marker_contract() -> None:
+    """Review R26-07, blocker 2: миграционная фаза обязана выпускать наружу
+    ПОЛНЫЙ набор несекретных признаков прогона и обязан быть закрытым:
+    (а) whitelist bash = ровно набор, который печатает программа фазы = ровно
+        набор, который читает pytest (иначе маркер «есть в скрипте, но не
+        печатается» или «напечатан, но не в whitelist» роняет стенд);
+    (б) каждый маркер обязателен (completeness-цикл) и проверяется по существу
+        гейтами в bash — стенд не имеет права отдать eval-блок с rc!=0/drift;
+    (в) значения проходят фильтр алфавита и сверку «не равно ни одному паролю»,
+        а в stdout стенда попадают только как export'ы eval-блока."""
+    text = (DEPLOY / "scripts" / "r2607_auth_stand.sh").read_text(encoding="utf-8")
+    m = re.search(r'^R2607_MIG_KEYS="([^"]*)"$', text, re.M)
+    assert m, "стенд обязан держать whitelist маркеров одной строкой R2607_MIG_KEYS=..."
+    whitelist = tuple(m.group(1).split())
+    assert whitelist == R2607_MARKER_CONTRACT, whitelist
+    assert all(re.fullmatch(r"R2607_[A-Z0-9_]+", k) for k in whitelist)
+    assert len(set(whitelist)) == len(whitelist)
+
+    # (а) программа фазы печатает ровно whitelist, ничего сверх него
+    printed = tuple(re.findall(r'print\(f"(R2607_[A-Z0-9_]+)=', text))
+    assert printed == R2607_MARKER_CONTRACT, printed
+
+    # (б) обязательность каждого маркера + гейты по существу
+    assert 'миграционная фаза не вернула обязательный маркер $key' in text
+    for gate in ('[ "$V_UP_RC" = "0" ]',
+                 '[ "$V_STATUS_RC" = "0" ]',
+                 '[ "$V_STATUS" = "done" ]',
+                 '[ "$V_BACKFILLED" -ge 1 ]',
+                 '[ "$V_LEGACY_REV" = "0" ]',
+                 '[ "$V_LATEST" = "$V_SV" ]',
+                 '[ "$V_NEG_RC" != "0" ]',
+                 '[ "$V_NEG_KIND" = "unauthorized" ]'):
+        assert gate in text, gate
+    # applied count сверяется с планом миграций на стороне helper'а (печатается
+    # R2607_MIGRATE_UP_APPLIED), а migrations обязан содержать backfill-шаг
+    assert 'status.migrations не содержит M{BACKFILL_ID}' in text
+    assert 'want = ["applied"] * len(migrate.MIGRATIONS)' in text
+
+    # (в) фильтр значений + анти-секрет-сверка + публикация только eval-блоком
+    assert '*[!A-Za-z0-9_.+-]*) die "маркер $key: значение вне безопасного набора' in text
+    assert 'case "$val" in *"$pw"*) die "маркер $key совпадает с паролем' in text
+    assert "export ${key}='${val}'" in text
+    assert """printf '%s' "$R2607_EXPORTS\"""" in text
+    # безпарольный прогон обязан быть именно CLI-отказом, а не «пропущен за неимением»
+    assert 'neg = run_cli(["status", "--uri", LOCAL_URI, "--db", DB], BASE_ENV)' in text
+
+
+def test_r2607_auth_stand_migration_role_plan_uses_real_actions() -> None:
+    """Живой failure 2026-09-27: Mongo 7 createRole отвергает `aggregate`
+    (Unrecognized action, BadValue code 2) — как и `getMore`. Стендовый текст не
+    имеет права утверждать, что миграционной роли нужен отдельный read-грант:
+    M3/M4 (агрегация precheck'а дублей) и M7 (count_documents) авторизуются
+    find'ом из RUNTIME_ROLE_ACTIONS (ADR-0005 п.1)."""
+    from voice_tracker import migrate
+
+    forbidden = {"aggregate", "getMore"}
+    for role, actions in migrate.ROLE_PLAN.items():
+        assert not (set(actions) & forbidden), (role, sorted(set(actions) & forbidden))
+    text = (DEPLOY / "scripts" / "r2607_auth_stand.sh").read_text(encoding="utf-8")
+    assert not re.search(r"без\s+`?aggregate`?\s+у миграционной роли", text), (
+        "шапка стенда всё ещё обещает падение M3/M4/M7 без aggregate — этого "
+        "гранта в плане нет и быть не может")
 
 
 # ------------------------------------------------------------- compose-файлы как YAML
@@ -696,7 +936,7 @@ def test_compose_sources_have_no_build_no_tags_no_bind(path: Path) -> None:
     assert services["controlplane"]["profiles"] == ["controlplane"]
     assert doc["networks"]["dsbot-data"]["internal"] is True
     for n in ("gateway", "tracker", "writer", "commands", "activity", "stalker", "web",
-              "mongo", "mongo-bootstrap", "nats"):
+              "mongo", "mongo-bootstrap", "schema-migrate", "nats"):
         assert n in services
     # R26-07: web-URI — плейсхолдер env-ключа (аутентифицированный dsbot_web)
     assert services["web"]["environment"]["MONGO_URI"].startswith("${MONGO_WEB_URI:?")

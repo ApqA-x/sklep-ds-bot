@@ -24,6 +24,11 @@
 # запрещён (проверяет validate_compose.py). Начальные права создаёт ОДНОРАЗОВЫЙ
 # mongo-bootstrap под ЯВНЫМ профилем bootstrap (в обычный up не входит; на staging
 # репетируется ровно тот прогон, что пойдёт на прод).
+# Схема-раннер (review R26-07, blocker 2) — ОДНОРАЗОВЫЙ сервис schema-migrate под
+# ЯВНЫМ профилем migrate: MONGO_URI=${MONGO_MIGRATION_URI} (dsbot_migration,
+# единственная роль с DDL) + MONGO_DB; ровно та же форма, что на проде
+# (`migrate up`/`migrate status`). Безпарольный loopback — исключительное право
+# mongo-bootstrap (localhost exception), runner под ним не ходит.
 #
 # Успех на NTFS НЕ подтверждает Linux-права (UID/GID, case sensitivity, atomic
 # rename) — эти проверки отдельные, на Linux-стенде (см. runbook раздел Linux).
@@ -96,6 +101,30 @@ services:
       MONGO_DB: ${MONGO_DB:?}
     user: "${DSBOT_UID:?}:${DSBOT_GID:?}"
     profiles: ["bootstrap"]
+
+  # R26-07 (review, blocker 2): ОДНОРАЗОВЫЙ job миграции схемы — единственная
+  # легальная точка `migrate up`/`migrate status` (на staging репетируется ровно
+  # тот прогон, что пойдёт на прод). Явный профиль migrate + restart "no":
+  #   docker compose --profile migrate run --rm schema-migrate python -m voice_tracker.migrate up
+  #   docker compose --profile migrate run --rm schema-migrate python -m voice_tracker.migrate status
+  # Credentials — ровно MONGO_MIGRATION_URI (dsbot_migration: CRUD +
+  # createIndex/dropIndex/createCollection/collMod); runtime-URI без DDL-роли для
+  # runner негодны, admin/root — избыточны (DB06). env_file НЕ подключается:
+  # раннеру нужны только MONGO_URI/MONGO_DB (ср. web, R26-06 п.5). Хост `mongo`
+  # из URI резолвится только в internal dsbot-data; egress не нужен.
+  schema-migrate:
+    image: "${BOOTSTRAP_IMAGE:?python image with voice_tracker + pymongo}"
+    restart: "no"
+    networks:
+      - dsbot-data
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URI: "${MONGO_MIGRATION_URI:?authenticated migration URI (dsbot_migration, DDL role) — env file}"
+      MONGO_DB: ${MONGO_DB:?}
+    user: "${DSBOT_UID:?}:${DSBOT_GID:?}"
+    profiles: ["migrate"]
 
   nats:
     image: ${NATS_IMAGE:?pin nats:2.10-alpine by digest in env file}

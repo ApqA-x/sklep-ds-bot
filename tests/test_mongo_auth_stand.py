@@ -21,7 +21,13 @@
     production-командой `migrate users --bootstrap` (см. r2607_auth_stand.sh),
     его authenticatedUserRoles на сервере равны ROOT_ROLE_PLAN, root делает
     dropDatabase (штатный restore-cleanup гейт restore.sh), а повторный прогон
-    production bootstrap_users() поверх живого кластера идемпотентен.
+    production bootstrap_users() поверх живого кластера идемпотентен;
+  * review R26-07, blocker 2 (экспорт): deploy-equivalent прогон runner'а
+    доказывается наружу несекретными маркерами `R2607_*` из eval-блока стенда —
+    rc'ы `migrate up`/`status`, число применённых шагов, статус/результат
+    backfill-шага M7, latest vs SCHEMA_VERSION и отказ безпарольного CLI.
+    Маркеры обязаны совпадать с сервером (иначе «доказательство» было бы
+    доверием напечатанному тексту).
 
 Стенд одноразовый (mongo:7 --auth, 127.0.0.1:27098, БД
 voice_tracker_t07auth_<hex>), роли/пользователи — из ROLE_PLAN/USER_PLAN:
@@ -31,14 +37,16 @@ voice_tracker_t07auth_<hex>), роли/пользователи — из ROLE_PL
     deploy/scripts/r2607_auth_stand.sh --down
 
 Без URI в окружении или при недоступном стенде — skip. При ПОДНЯТОМ стенде
-(TEST_MONGO_DB задан) отсутствующий URI-экспорт — FAIL, не skip: живые
-проверки обязательных URI не должны «испаряться» молча (review R26-07,
-blocker 1). guard_mongo_uri/guard_db_name вызываются ПЕРЕД подключением:
+(TEST_MONGO_DB задан) отсутствующий URI-экспорт или отсутствующий маркер
+R2607_* — FAIL, не skip: живые проверки обязательных URI и deploy-equivalent
+прогона runner'а не должны «испаряться» молча (review R26-07, blocker 1/2).
+guard_mongo_uri/guard_db_name вызываются ПЕРЕД подключением:
 чужой/продовой URI или имя БД — AssertionError (падает, а не скипается).
 """
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from urllib.parse import unquote, urlparse
 
@@ -372,3 +380,117 @@ def test_production_bootstrap_idempotent_on_live_cluster(db_name) -> None:
     )
     assert note == "bootstrap:admin-auth", made
     assert made == [note], f"идемпотентный прогон что-то изменил: {made}"
+
+
+# ------------- blocker 2 (экспорт): маркеры R2607_* прогона runner'а под auth
+
+
+# Миграционная фаза стенда (deploy/scripts/r2607_auth_stand.sh) публикует в
+# окружение ТОЛЬКО эти несекретные признаки deploy-equivalent прогона: whitelist
+# имён закреплён в самом скрипте и сверяется статически
+# (tests/test_deploy_artifacts.py::test_r2607_auth_stand_marker_contract), а
+# значения проверяются здесь по существу. Без этого «зелёный» прогон мог бы
+# означать лишь то, что `migrate up` под dsbot_migration вообще не запускался.
+R2607_MARKERS: tuple[str, ...] = (
+    "R2607_MIGRATE_UP_RC",
+    "R2607_MIGRATE_STATUS_RC",
+    "R2607_MIGRATE_UP_APPLIED",
+    "R2607_SCHEMA_LATEST",
+    "R2607_SCHEMA_VERSION",
+    "R2607_BACKFILL_STEP",
+    "R2607_BACKFILL_STATUS",
+    "R2607_BACKFILL_PENDING",
+    "R2607_BACKFILL_DONE",
+    "R2607_LEGACY_ID",
+    "R2607_LEGACY_REVISION",
+    "R2607_PASSWORDLESS_RC",
+    "R2607_PASSWORDLESS_DENIED",
+)
+BACKFILL_MIGRATION_NAME = "guild-settings-revision-backfill"
+
+
+def _backfill_id() -> int:
+    return next(m.id for m in migrate.MIGRATIONS if m.name == BACKFILL_MIGRATION_NAME)
+
+
+def _marker(name: str) -> str:
+    """Значение маркера из eval-блока стенда. Стенд НЕ поднят — skip; стенд
+    поднят (TEST_MONGO_DB задан), а маркера нет — FAIL: миграционная фаза —
+    обязательная часть живого контракта, и её «потеря» не имеет права выглядеть
+    как отсутствие стенда (тот же принцип, что у _uri для URI-экспортов)."""
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    if os.environ.get("TEST_MONGO_DB", "").strip():
+        pytest.fail(f"стенд поднят (TEST_MONGO_DB задан), но {name} отсутствует: "
+                    "миграционная фаза r2607_auth_stand.sh не отдала обязательный "
+                    'маркер — переподними стенд: eval "$(deploy/scripts/r2607_auth_stand.sh up)"')
+    pytest.skip(f"{name} не задан — подними auth-стенд: "
+                'eval "$(deploy/scripts/r2607_auth_stand.sh up)"')
+
+
+def _marker_int(name: str) -> int:
+    raw = _marker(name)
+    assert re.fullmatch(r"-?\d+", raw), f"{name}: ожидалось целое число, получено {raw!r}"
+    return int(raw)
+
+
+def test_r2607_every_marker_is_exported() -> None:
+    """Все 13 маркеров обязаны дойти из stdout стенда до окружения pytest —
+    набор зафиксирован списком выше и whitelist'ом скрипта."""
+    for name in R2607_MARKERS:
+        assert _marker(name), name
+
+
+def test_r2607_deploy_equivalent_cli_returned_zero() -> None:
+    """`migrate up` и `migrate status` под dsbot_migration-URI (тот же вход,
+    что compose-сервис schema-migrate) на живом --auth сервере — rc=0."""
+    assert _marker_int("R2607_MIGRATE_UP_RC") == 0
+    assert _marker_int("R2607_MIGRATE_STATUS_RC") == 0
+
+
+def test_r2607_up_applied_the_whole_plan() -> None:
+    """На чистой стендовой БД применён ВСЁ план миграций (ни skip-done, ни
+    would-apply — серверный контракт, а не ожидание теста)."""
+    assert _marker_int("R2607_MIGRATE_UP_APPLIED") == len(migrate.MIGRATIONS)
+
+
+def test_r2607_backfill_step_done_under_migration_role() -> None:
+    """M7 прошёл под миграционной ролью: done, забэкафил >=1 документ,
+    legacy-документ получил ровно revision=0 (не None и не 1)."""
+    assert _marker("R2607_BACKFILL_STEP") == f"M{_backfill_id()}"
+    assert _marker("R2607_BACKFILL_STATUS") == "done"
+    assert _marker_int("R2607_BACKFILL_PENDING") >= 1
+    assert _marker_int("R2607_BACKFILL_DONE") >= 1
+    assert _marker("R2607_LEGACY_ID").startswith("t07legacy_")
+    assert _marker_int("R2607_LEGACY_REVISION") == 0
+
+
+def test_r2607_latest_matches_schema_version() -> None:
+    """latest из `status` (schema_versions) == SCHEMA_VERSION, и экспорт
+    сверяется с текущим кодом, а не только сам с собой."""
+    assert _marker_int("R2607_SCHEMA_VERSION") == schema.SCHEMA_VERSION
+    assert _marker_int("R2607_SCHEMA_LATEST") == schema.SCHEMA_VERSION
+
+
+def test_r2607_passwordless_cli_denied_by_auth() -> None:
+    """Безпарольный честный loopback после bootstrap отвергнут rc!=0 именно
+    авторизацией: иначе «доказательство auth» было бы ложным (таймаут или
+    отсутствие пакета дали бы тот же ненулевой rc)."""
+    assert _marker_int("R2607_PASSWORDLESS_RC") != 0
+    assert _marker("R2607_PASSWORDLESS_DENIED") == "unauthorized"
+
+
+def test_r2607_markers_agree_with_the_server(db_name, migration_db) -> None:
+    """Сверка маркеров с живым сервером под dsbot_migration: стенд обязан
+    рассказывать правду о состоянии БД, а не печатать правдоподобный текст."""
+    mid = _backfill_id()
+    doc = migration_db[migrate.MIG_COLL].find_one({"_id": mid})
+    assert doc is not None, f"schema_migrations не содержит M{mid}"
+    assert doc["status"] == _marker("R2607_BACKFILL_STATUS"), doc
+    assert int(doc["report"]["backfilled"]) == _marker_int("R2607_BACKFILL_DONE"), doc
+    version = migration_db[migrate.VERSION_COLL].find_one({"_id": "schema"})
+    assert int(version["version"]) == _marker_int("R2607_SCHEMA_LATEST"), version
+    legacy = migration_db[migrate.GUILD_SETTINGS].find_one({"_id": _marker("R2607_LEGACY_ID")})
+    assert legacy is not None, "стендовый legacy-документ исчез из guild_settings"
+    assert legacy["revision"] == _marker_int("R2607_LEGACY_REVISION"), legacy

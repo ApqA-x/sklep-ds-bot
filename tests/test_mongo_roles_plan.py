@@ -228,11 +228,30 @@ class TestRolePlanContract:
         assert actions == set(migrate.RUNTIME_ROLE_ACTIONS)
         assert migrate.ROLE_PLAN[role] == migrate.RUNTIME_ROLE_ACTIONS
 
-    def test_migration_role_is_runtime_crud_plus_constructional_ddl(self) -> None:
+    def test_migration_role_is_runtime_crud_plus_ddl_only(self) -> None:
+        # ТОЧНЫЙ plan роли runner'а: отличие от runtime — ровно DDL-четвёрка,
+        # ничего больше (ни read-действий, ни destructive-удалений коллекций)
+        assert migrate.MIGRATION_ROLE_EXTRA == (
+            "createIndex", "dropIndex", "createCollection", "collMod")
+        assert migrate.ROLE_PLAN["dsbot_migration_role"] == (
+            migrate.RUNTIME_ROLE_ACTIONS + migrate.MIGRATION_ROLE_EXTRA)
         actions = set(migrate.ROLE_PLAN["dsbot_migration_role"])
         assert set(migrate.RUNTIME_ROLE_ACTIONS) <= actions  # весь CRUD runtime-набора
         assert {"createIndex", "dropIndex", "createCollection", "collMod"} <= actions
         assert actions == set(migrate.RUNTIME_ROLE_ACTIONS) | set(migrate.MIGRATION_ROLE_EXTRA)
+
+    @pytest.mark.parametrize("role", tuple(migrate.ROLE_PLAN))
+    def test_plan_uses_only_real_mongo_authorization_actions(self, role: str) -> None:
+        """createRole принимает ТОЛЬКО действия из списка privilege actions Mongo.
+        Живой прогон r2607-стенда на mongo:7 дважды это подтвердил:
+        `Unrecognized action: getMore`, затем `Unrecognized action: aggregate`
+        (BadValue, code 2) — план падал ещё до миграционной фазы. Оба имени тут
+        запрещены: только-читающая агрегация авторизуется правом find, а
+        continuation курсора — правами исходной операции чтения. Значит, это НЕ
+        недостающие гранты, а ошибка плана: «страховка» несуществующим action
+        обрывает bootstrap прав целиком, и стенд падает ещё до `migrate up`."""
+        assert "aggregate" not in migrate.ROLE_PLAN[role]
+        assert "getMore" not in migrate.ROLE_PLAN[role]
 
     def test_migration_role_has_no_admin_or_destructive_actions(self) -> None:
         actions = set(migrate.ROLE_PLAN["dsbot_migration_role"])
@@ -247,7 +266,8 @@ class TestRolePlanContract:
             "find", "insert", "update", "remove",
             "listCollections", "listIndexes", "collStats", "dbStats", "killCursors"}
         # getMore — не серверное action (createRole на mongo:7: Unrecognized action);
-        # continuation курсора наследует права find/aggregate, поэтому его тут нет
+        # continuation курсора авторизуется правом исходного чтения, поэтому его
+        # тут нет (aggregate — см. test_plan_uses_only_real_mongo_authorization_actions)
         assert "getMore" not in migrate.RUNTIME_ROLE_ACTIONS
         assert not (set(migrate.RUNTIME_ROLE_ACTIONS) & FORBIDDEN_FOR_RUNTIME)
 
