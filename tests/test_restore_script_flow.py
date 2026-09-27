@@ -294,6 +294,11 @@ class Harness:
             f"BACKUP_AGE_KEY_FILE={psh(self.age_key)}",
             "MONGO_DB=voice_tracker_production",
             "MONGO_IMAGE=fake/mongo:8.0",
+            # review R26-07 (blocker 1): backup/restore-пользователи созданы в
+            # рабочей БД — authSource=MONGO_DB (в admin аутентифицируется только root)
+            "MONGO_BACKUP_URI=mongodb://dsbot_backup:" "fake-backup-pass" "@127.0.0.1:27017/?authSource=voice_tracker_production",
+            "MONGO_ADMIN_URI=mongodb://dsbot_root:" "fake-root-pass" "@127.0.0.1:27017/admin?authSource=admin",
+            "MONGO_RESTORE_URI=mongodb://dsbot_restore:" "fake-restore-pass" "@127.0.0.1:27017/?authSource=voice_tracker_production",
             "MEDIA_VOLUME=dsbot-media",
             "DSBOT_UID=10001",
             "DSBOT_GID=10001",

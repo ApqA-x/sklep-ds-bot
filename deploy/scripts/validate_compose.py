@@ -18,6 +18,37 @@ R26-06 дополнения:
   - п.4: project name в рендере зафиксирован (production=dsbot-prod,
     staging=dsbot-staging) — изоляция идентичностей P03.
 
+R26-07 дополнения (Mongo --auth):
+  - mongo обязан запускаться с command: ["--auth"];
+  - ни один environment не содержит безпарольный URI на контейнерный mongo
+    (mongodb://mongo[:порт] без credentials) — runtime-URI обязаны приходить из
+    env-файла: bot-сервисы → MONGO_BOT_URI, web → MONGO_WEB_URI (при доступном
+    env-файле значения MONGO_URI сверяются с этими ключами). Исключение —
+    mongodb://127.0.0.1 у mongo-bootstrap: единственный легальный путь
+    localhost exception; loopback-URI больше нигде = ошибка;
+  - mongo-bootstrap: profile "bootstrap", restart "no" (одноразовый job, не
+    автозапуск). Если рендер данной версии compose отсеивает profile-сервисы
+    (ни один сервис не вернул profiles), контракт bootstrap покрывают YAML-тесты.
+
+Review R26-07 (blocker 2): compose-сервис schema-migrate — единственная легальная
+точка `migrate up`/`migrate status`. Проверяется ТОЧНАЯ обвязка, fail-closed:
+profile "migrate" + restart "no" (одноразовый job вне обычного up), на
+dsbot-data без network_mode (хост `mongo` из URI резолвится только во внутренней
+сети; localhost exception — исключительное право mongo-bootstrap), MONGO_URI —
+с credentials и ровно значением MONGO_MIGRATION_URI выбранного env-файла
+(подмена на bot/web/admin-URI = скрытая эскалация или нерабочий runner),
+MONGO_DB — present и равен env-файлу; egress запрещён.
+
+Review R26-07 (blocker 3): runtime deploy-профилей — строго verify-only. Каждый
+BOT_ENVFILE_SERVICES в рендере обязан иметь environment DSBOT_SCHEMA_MODE ровно
+"verify": compose якорит значение в x-bot-env (environment приоритетнее env_file),
+поэтому строка DSBOT_SCHEMA_MODE=bootstrap в выбранном env-файле не может перевести
+бот-сервис в mutating-режим (ensure_indexes = DDL под runtime app-креденшеллами).
+Отсутствие ключа или иное значение в ОТРЕНДЕРЕННОМ конфиге = ошибка (fail-closed);
+сообщение называет сервис и ключ, значение не печатает. bootstrap остаётся
+локальной dev-возможностью вне deploy-профилей. У одноразовых job'ов
+(mongo-bootstrap, schema-migrate) ключа нет и не требуется — это не runtime.
+
 Выход: 0 = инварианты соблюдены; 1 = нарушение (перечислены); 2 = неверный ввод.
 """
 from __future__ import annotations
@@ -29,8 +60,19 @@ import re
 import sys
 
 DIGEST_RE = re.compile(r"^(?:[\w.\-]+/)?[\w.\-/]+@sha256:[0-9a-f]{64}$")
+# R26-07: безпарольный URI на контейнерный mongo (host ровно "mongo", без
+# userinfo) — с --auth нерабочий, а его наличие значит, что секция не мигрировала
+# на env-URI. 127.0.0.1 (localhost exception mongo-bootstrap) сюда не попадает.
+UNAUTHENTICATED_MONGO_URI_RE = re.compile(r"^mongodb://mongo(?::\d+)?(?:[/?].*)?$")
+# Review R26-07 (blocker 2): наличие credentials (scheme://<userinfo>@…).
+AUTHENTICATED_URI_RE = re.compile(r"^mongodb(?:\+srv)?://[^/@]+@")
+# Единственный легальный loopback-URI в compose — mongodb://127.0.0.1[:порт]
+# сервиса mongo-bootstrap (localhost exception mongod принимает только с 127.0.0.1).
+BOOTSTRAP_LOOPBACK_URI = "mongodb://127.0.0.1:27017"
 ALLOWED_SERVICES = {
     "mongo",
+    "mongo-bootstrap",
+    "schema-migrate",
     "nats",
     "gateway",
     "tracker",
@@ -41,8 +83,22 @@ ALLOWED_SERVICES = {
     "web",
     "controlplane",
 }
+# R26-07: одноразовые job'ы начальных прав и миграции схемы — НЕ resident-сервисы:
+# restart "no" + явный профиль (в обычный up не входят).
+BOOTSTRAP_SERVICE = "mongo-bootstrap"
+BOOTSTRAP_PROFILE = "bootstrap"
+# Review R26-07 (blocker 2): schema-migrate — единственный легальный compose-путь
+# `migrate up`/`migrate status`, credentials ровно MONGO_MIGRATION_URI env-файла.
+MIGRATE_SERVICE = "schema-migrate"
+MIGRATE_PROFILE = "migrate"
+MIGRATE_URI_ENV_KEY = "MONGO_MIGRATION_URI"
+ONESHOT_SERVICES = frozenset({BOOTSTRAP_SERVICE, MIGRATE_SERVICE})
 IMAGE_VARS = {
     "mongo": "MONGO_IMAGE",
+    "mongo-bootstrap": "BOOTSTRAP_IMAGE",
+    # review R26-07 (blocker 2): runner живёт в том же python-образе (voice_tracker
+    # + pymongo), отдельный digest-ключ не вводится
+    "schema-migrate": "BOOTSTRAP_IMAGE",
     "nats": "NATS_IMAGE",
     "gateway": "BOT_GATEWAY_IMAGE",
     "tracker": "BOT_TRACKER_IMAGE",
@@ -63,12 +119,20 @@ BOT_ENVFILE_SERVICES = (
     "stalker",
     "controlplane",
 )
+# Review R26-07 (blocker 3): единственно допустимое значение DSBOT_SCHEMA_MODE в
+# рендере runtime-ботов (compose якорит его в x-bot-env, environment > env_file).
+RUNTIME_SCHEMA_MODE = "verify"
 # R26-06/V26-17: Discord REST/Gateway/OAuth требует NAT-egress.
 EGRESS_NETWORK = "dsbot-egress"
 EGRESS_SERVICES = {"gateway", "commands", "activity", "stalker", "web"}
-NO_EGRESS_SERVICES = {"mongo", "nats", "tracker", "writer", "controlplane"}
+# schema-migrate (review R26-07 blocker 2) — наружу не ходит: только mongo из
+# internal-сети; mongo-bootstrap вне списков (network_mode: service:mongo).
+NO_EGRESS_SERVICES = {"mongo", "nats", "tracker", "writer", "controlplane",
+                      MIGRATE_SERVICE}
 # R26-06/п.5: web получает ровно ключи своего конфига (wt-web api/config.py);
 # backend-only ключи в его environment — ошибка topology.
+# Review R26-07 (blocker 2): credentials остальных плановых пользователей
+# (runner/admin/backup/restore) web читать не должен.
 WEB_FORBIDDEN_ENV_KEYS = {
     "BACKUP_DIR",
     "BACKUP_AGE_KEY_FILE",
@@ -78,6 +142,12 @@ WEB_FORBIDDEN_ENV_KEYS = {
     "DSBOT_GID",
     "MONGO_IMAGE",
     "NATS_IMAGE",
+    "MONGO_BOT_URI",
+    "MONGO_WEB_URI",
+    "MONGO_ADMIN_URI",
+    MIGRATE_URI_ENV_KEY,
+    "MONGO_BACKUP_URI",
+    "MONGO_RESTORE_URI",
 }
 EXPECTED_PROJECT = {"production": "dsbot-prod", "staging": "dsbot-staging"}
 
@@ -208,10 +278,18 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
         if name != "web" and _service_ports(svc):
             errors.append(f"[{name}] publishes ports; only web ingress may (P07)")
         restart = svc.get("restart") or svc.get("restart_policy") or ""
-        if not restart or restart in {"no", "never"}:
-            errors.append(f"[{name}] missing restart policy")
+        if name in ONESHOT_SERVICES:
+            # R26-07: одноразовые job'ы (bootstrap прав, миграция схемы) —
+            # resident-политика запрещена в обратную сторону: restart "no"
+            # обязателен (иначе пересоздаётся на каждом up).
+            if restart not in {"no", "never"}:
+                what = "bootstrap" if name == BOOTSTRAP_SERVICE else "schema-migrate runner"
+                errors.append(f"[{name}] one-shot {what} must have restart: \"no\" (R26-07)")
+        else:
+            if not restart or restart in {"no", "never"}:
+                errors.append(f"[{name}] missing restart policy")
         resources = ((svc.get("deploy") or {}).get("resources") or {}).get("limits") or {}
-        if not resources.get("cpus") and not resources.get("memory"):
+        if name not in ONESHOT_SERVICES and not resources.get("cpus") and not resources.get("memory"):
             errors.append(f"[{name}] no resource limits")
         logging_cfg = svc.get("logging") or {}
         options = logging_cfg.get("options") or {}
@@ -283,8 +361,11 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
                 continue
             # Форма рендера compose v5: env_file не виден, содержимое выбранного
             # файла целиком в environment. Инвариант YAML (покрыт тестом): ни
-            # один ключ env-файла не перекрывается явным environment бота
-            # (SERVICE_NAME/MONGO_URI/NATS_URL/MEDIA_DIR в env-файлах отсутствуют),
+            # один ключ env-файла не перекрывается явным environment бота, кроме
+            # закоренного x-bot-env DSBOT_SCHEMA_MODE: verify (review blocker 3;
+            # mismatch файла с bootstrap здесь — запасной fail-closed слой, прямым
+            # сообщением про него пишет отдельная проверка ниже). Ключи
+            # SERVICE_NAME/MONGO_URI/NATS_URL/MEDIA_DIR в env-файлах отсутствуют,
             # поэтому сверяются все ключи файла; service-специфичные ключи
             # environment — лишние, они не проверяются.
             rendered = _environment(svc)
@@ -304,6 +385,24 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
                 errors.append(f"[{name}] env_file does not point at the env file selected "
                               "by the deploy scripts (single source of env, V26-16)")
 
+    # Review R26-07 (blocker 3): runtime — строго verify-only. x-bot-env якорит
+    # DSBOT_SCHEMA_MODE: verify (environment приоритетнее env_file), и каждый
+    # BOT_ENVFILE_SERVICES в рендере обязан это показывать: отсутствие ключа или
+    # иное значение = fail-closed (иначе одна строка env обходит контракт R26-07
+    # и боты поднимают DDL ensure_indexes под runtime app-креденшеллами).
+    # Сообщения — сервис и имя ключа; само значение не печатается.
+    for name in BOT_ENVFILE_SERVICES:
+        svc = services.get(name)
+        if svc is None:
+            continue
+        got = _environment(svc).get("DSBOT_SCHEMA_MODE")
+        if got != RUNTIME_SCHEMA_MODE:
+            reason = "is missing" if got is None else "is not exactly \"verify\""
+            errors.append(f"[{name}] environment.DSBOT_SCHEMA_MODE {reason} — runtime of "
+                          "production/staging deploy profiles is verify-only (R26-07 "
+                          "blocker 3); the key is hard-wired in x-bot-env and no env_file "
+                          "value may switch a bot service into mutating bootstrap mode")
+
     # R26-06/п.5: backend-only ключи не должны попадать в environment web.
     if web:
         bad = sorted(
@@ -320,7 +419,10 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
             if v:
                 env_like[f"{name}.{k}"] = str(v)
     if mode == "staging":
-        for name in ("gateway", "tracker", "writer", "commands", "activity", "stalker", "web"):
+        # schema-migrate (review R26-07 blocker 2) — тоже обязан писать только
+        # staging-базу: MONGO_DB сервиса проверяется наравне с runtime.
+        for name in ("gateway", "tracker", "writer", "commands", "activity", "stalker", "web",
+                     MIGRATE_SERVICE):
             db = env_like.get(f"{name}.MONGO_DB")
             if db is not None and db == "voice_tracker":
                 errors.append(f"[{name}] staging must not write the production DB voice_tracker")
@@ -336,6 +438,122 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
         uri = str(_environment(svc).get("MONGO_URI") or "")
         if "host.docker.internal" in uri:
             errors.append(f"[{name}] MONGO_URI points at host.docker.internal — prod DB migration must be an explicit backup/restore step (T14), not a silent URI")
+
+    # ------------------------------------------------ R26-07: Mongo --auth ----
+    mongo_svc = services.get("mongo") or {}
+    cmd = mongo_svc.get("command")
+    tokens = cmd if isinstance(cmd, list) else str(cmd or "").split()
+    if "--auth" not in [str(t) for t in tokens]:
+        errors.append("[mongo] command must contain --auth (R26-07: runtime URI "
+                      "authentication is meaningless against an auth-less mongod)")
+
+    # безпарольный URI на контейнерный mongo: с --auth нерабочий, а его наличие
+    # в environment значит, что секция не переехала на env-URI (MONGO_BOT_URI /
+    # MONGO_WEB_URI). Сообщения — только ИМЕНА ключей, значения (секреты) не печатаются.
+    # Loopback-URI (127.0.0.1) — исключительное право mongo-bootstrap: mongod
+    # принимает localhost exception только с 127.0.0.1, у остальных сервисов такой
+    # URI означает network_mode: service:mongo вне контракта (review R26-07,
+    # blocker 2).
+    for name, svc in services.items():
+        uri = str(_environment(svc).get("MONGO_URI") or "")
+        if UNAUTHENTICATED_MONGO_URI_RE.match(uri):
+            errors.append(f"[{name}] MONGO_URI is an unauthenticated mongodb:// URI — "
+                          "R26-07 requires the credentialed URI from the env file "
+                          "(MONGO_BOT_URI for bot services, MONGO_WEB_URI for web)")
+        if uri.startswith("mongodb://127.0.0.1") and name != BOOTSTRAP_SERVICE:
+            errors.append(f"[{name}] MONGO_URI is a loopback URI — 127.0.0.1 belongs to "
+                          "mongo-bootstrap only (localhost exception, R26-07); every "
+                          "other service reaches mongo as host `mongo` in dsbot-data")
+
+    # x-bot-env/services обязаны резолвиться ровно в env-ключи своего уровня.
+    # В рендере плейсхолдер ${MONGO_BOT_URI...} схлопнут в значение env-файла,
+    # поэтому при доступном env-файле сверяем значение MONGO_URI с ними.
+    if env_values is not None:
+        for ref_key, names in (("MONGO_BOT_URI", BOT_ENVFILE_SERVICES), ("MONGO_WEB_URI", ("web",))):
+            want = env_values.get(ref_key, "")
+            if not want:
+                continue
+            for name in names:
+                svc = services.get(name)
+                if svc is None:
+                    continue
+                uri = str(_environment(svc).get("MONGO_URI") or "")
+                if uri and uri != want:
+                    errors.append(f"[{name}] MONGO_URI does not match the selected env "
+                                  f"file's {ref_key} (R26-07 least privilege)")
+
+    # mongo-bootstrap: contract одноразового job'а (restart/profile проверены и
+    # выше по циклу, тут — сам факт присутствия в рендере, профиль и точный
+    # passwordless loopback: localhost exception — ЕДИНСТВЕННОЕ назначение
+    # сервиса, никакого authed-URI и никакого env_file-наследия не требуется).
+    boot = services.get(BOOTSTRAP_SERVICE)
+    if boot is None:
+        # рендеры compose, отсеивающие неактивные profile-сервисы, не покажут и
+        # controlplane — тогда отсутствие bootstrap не ложная тревога; контракт
+        # покрывают YAML-тесты test_deploy_artifacts.
+        if any(s.get("profiles") for s in services.values()):
+            errors.append(f"[{BOOTSTRAP_SERVICE}] missing from render while other "
+                          "profiled services are present (R26-07 one-shot bootstrap job)")
+    else:
+        if BOOTSTRAP_PROFILE not in (boot.get("profiles") or []):
+            errors.append(f"[{BOOTSTRAP_SERVICE}] must sit behind the \"{BOOTSTRAP_PROFILE}\" "
+                          "profile — auto-start breaks repeated ups (R26-07)")
+        if str(_environment(boot).get("MONGO_URI") or "") != BOOTSTRAP_LOOPBACK_URI:
+            errors.append(f"[{BOOTSTRAP_SERVICE}] MONGO_URI must be exactly "
+                          f"{BOOTSTRAP_LOOPBACK_URI!r} — the passwordless loopback is the "
+                          "localhost-exception contract of this service and of no other "
+                          "(R26-07, review blocker 2)")
+
+    # ------------------------- review R26-07 (blocker 2): schema-migrate exact wiring
+    # Единственный легальный compose-путь `migrate up`/`migrate status`: профиль
+    # migrate + restart "no" (проверены выше по циклу и здесь), dsbot-data без
+    # network_mode, MONGO_URI — credentials ровно MONGO_MIGRATION_URI выбранного
+    # env-файла, MONGO_DB present и равен env-файлу. Сообщения — только имена
+    # ключей/сервисов, значения (секреты) не печатаются.
+    mig = services.get(MIGRATE_SERVICE)
+    if mig is None:
+        if any(s.get("profiles") for s in services.values()):
+            errors.append(f"[{MIGRATE_SERVICE}] missing from render while other "
+                          "profiled services are present (R26-07 blocker 2: the only "
+                          "legit migrate up/status entry)")
+    else:
+        if MIGRATE_PROFILE not in (mig.get("profiles") or []):
+            errors.append(f"[{MIGRATE_SERVICE}] must sit behind the \"{MIGRATE_PROFILE}\" "
+                          "profile — auto-start breaks repeated ups (R26-07 blocker 2)")
+        mig_env = _environment(mig)
+        mig_uri = str(mig_env.get("MONGO_URI") or "")
+        if not AUTHENTICATED_URI_RE.match(mig_uri):
+            errors.append(f"[{MIGRATE_SERVICE}] MONGO_URI must carry the "
+                          f"{MIGRATE_URI_ENV_KEY} credentials (dsbot_migration, the only "
+                          "role with DDL) — a passwordless URI is legal only on the "
+                          "mongo-bootstrap loopback (R26-07 blocker 2)")
+        if not str(mig_env.get("MONGO_DB") or ""):
+            errors.append(f"[{MIGRATE_SERVICE}] MONGO_DB must be set from the env file — "
+                          "the runner needs its target database (R26-07 blocker 2)")
+        if mig.get("network_mode"):
+            errors.append(f"[{MIGRATE_SERVICE}] must not share another container's "
+                          "network namespace — network_mode: service:mongo is the "
+                          "localhost-exception contract of mongo-bootstrap only "
+                          "(R26-07 blocker 2)")
+        if "dsbot-data" not in _service_networks(mig):
+            errors.append(f"[{MIGRATE_SERVICE}] must be on dsbot-data — its URI host "
+                          "`mongo` resolves only in the internal network "
+                          "(R26-07 blocker 2)")
+        if _env_file_paths(mig):
+            errors.append(f"[{MIGRATE_SERVICE}] must not get the shared env_file — the "
+                          "runner needs exactly MONGO_URI/MONGO_DB via interpolated "
+                          "environment, no secret surplus (R26-07 blocker 2, cf. п.5)")
+        if env_values is not None:
+            want_uri = env_values.get(MIGRATE_URI_ENV_KEY, "")
+            if want_uri and mig_uri and mig_uri != want_uri:
+                errors.append(f"[{MIGRATE_SERVICE}] MONGO_URI does not match the selected "
+                              f"env file's {MIGRATE_URI_ENV_KEY} (R26-07 blocker 2: "
+                              "runtime/admin URIs are either DDL-less or over-privileged)")
+            want_db = env_values.get("MONGO_DB", "")
+            got_db = str(mig_env.get("MONGO_DB") or "")
+            if want_db and got_db and got_db != want_db:
+                errors.append(f"[{MIGRATE_SERVICE}] MONGO_DB does not match the selected "
+                              f"env file's MONGO_DB (R26-07 blocker 2)")
 
     return errors
 

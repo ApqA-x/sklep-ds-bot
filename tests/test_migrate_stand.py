@@ -228,6 +228,37 @@ def test_m4_audit_state_unique_precheck_and_idempotent(db) -> None:
     assert migrate.check_rollback(db, 3) == []
 
 
+# ------------------------------------------------------------------ M7 (R26-07 review)
+
+
+def test_m7_revision_backfill_in_up_and_repeat_is_noop(db) -> None:
+    """M7: CRUD-backfill revision живёт в runner'е (startup рантайма — verify-only).
+    Применяется однократно, существующие значения не трогает, повтор — skip-done."""
+    db[migrate.GUILD_SETTINGS].insert_many([
+        {"_id": "g1", "guildId": "1"},
+        {"_id": "g2", "guildId": "2", "revision": 5},
+    ])
+    plan = migrate.plan_and_apply(db, apply=False, only=7)
+    assert plan["actions"][0]["action"] == "would-apply"
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g1"}).get("revision") is None  # plan не пишет
+
+    result = migrate.plan_and_apply(db, apply=True, only=7)
+    assert result["actions"][0]["action"] == "applied"
+    assert result["actions"][0]["report"]["backfilled"] == 1
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g1"})["revision"] == 0
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g2"})["revision"] == 5
+
+    again = migrate.plan_and_apply(db, apply=True, only=7)
+    assert again["actions"][0]["action"] == "skip-done"  # статус-документ чинить нечем
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g2"})["revision"] == 5
+
+    # полный up поверх — идемпотентен и по M7 в том числе
+    migrate.plan_and_apply(db, apply=True)
+    full = migrate.migration_status(db)
+    assert full[7]["status"] == "done"
+    assert db[migrate.GUILD_SETTINGS].find_one({"_id": "g1"})["revision"] == 0
+
+
 # ------------------------------------------------------------------ DB06
 
 
@@ -243,16 +274,22 @@ def test_db06_least_privilege_users_created_idempotent(db) -> None:
     by_name = {u["user"]: u for u in info["users"]}
     dbname = db.name
     assert {r["db"] for u in by_name.values() for r in u["roles"]} <= {dbname, "admin"}
-    assert all(r == {"role": "readWrite", "db": dbname} for r in by_name["dsbot_app"]["roles"])
-    assert all(r == {"role": "readWrite", "db": dbname} for r in by_name["dsbot_web"]["roles"])
-    assert {"role": "dsbot_migration_role", "db": dbname} in by_name["dsbot_migration"]["roles"]
-    assert by_name["dsbot_backup"]["roles"] == [{"role": "backup", "db": "admin"}]
+    # R26-07: ни встроенной readWrite, ни прочего прошлого состава — grants
+    # ровно из USER_PLAN (сверка через _desired_roles, без дублей литералов)
+    for username in pw:
+        assert by_name[username]["roles"] == migrate._desired_roles(username, dbname), username
 
     roles = db.command("rolesInfo", showPrivileges=True)["roles"]
-    mig_role = next(r for r in roles if r["role"] == "dsbot_migration_role")
-    actions = {a for p in mig_role["privileges"] for a in p["actions"]}
-    assert {"createIndex", "listIndexes", "collMod"} <= actions
-    assert "dropIndex" not in actions and "dropCollection" not in actions  # DDL-разрушение не раздаётся
+    by_role = {r["role"]: r for r in roles}
+    actions_of = {name: {a for p in doc["privileges"] for a in p["actions"]}
+                  for name, doc in by_role.items() if name in migrate.ROLE_PLAN}
+    for role, plan_actions in migrate.ROLE_PLAN.items():
+        assert actions_of[role] == set(plan_actions), role  # состав ровно планом
+    mig = actions_of["dsbot_migration_role"]
+    assert {"createIndex", "dropIndex"} <= mig  # runner пересобирает индексы (R26-07)
+    assert not (mig & {"dropCollection", "userAdmin", "grantRole", "revokeRole"})
+    for runtime_role in ("dsbot_runtime_bot_role", "dsbot_runtime_web_role"):
+        assert not (actions_of[runtime_role] & {"createIndex", "dropIndex", "dropCollection"})
 
 
 # ------------------------------------------------------------------ DB07

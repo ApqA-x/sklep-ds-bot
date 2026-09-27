@@ -99,9 +99,18 @@ def _json_bytes(value: Any) -> bytes:
 
 
 class ControlPlane:
-    def __init__(self, mongo_client: MongoClient, nats: NATS, client: discord.Client | None = None) -> None:
+    def __init__(
+        self,
+        mongo_client: MongoClient,
+        nats: NATS,
+        client: discord.Client | None = None,
+        schema_mode: str = "verify",
+    ) -> None:
         cfg = load_config()
         self.cfg = cfg
+        # R26-07 (DB03): DDL на startup только в явном bootstrap-режиме. Явный аргумент
+        # конструктора — дефолт для stand-in cfg (тесты), боевой Config всегда несёт поле.
+        self.schema_mode = getattr(cfg, "schema_mode", schema_mode)
         self.mongo_client = mongo_client
         self.db = mongo_client[cfg.mongo_db]
         self.repo = Repository(self.db)
@@ -115,7 +124,11 @@ class ControlPlane:
         self.ready = asyncio.Event()
 
     async def start(self) -> None:
-        self.repo.ensure_indexes(None)
+        # R26-07 (DB03): startup по умолчанию verify-only; DDL — только в явном bootstrap-режиме.
+        if self.schema_mode == "bootstrap":
+            self.repo.ensure_indexes(None)
+        else:
+            self.repo.verify_startup()
         await self.nats.subscribe(self.apply_subject, cb=self._handle_apply_msg)
         await self.nats.subscribe(self.ops_subject, cb=self._handle_ops_msg)
         await self._heartbeat_loop_once()

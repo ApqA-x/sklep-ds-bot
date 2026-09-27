@@ -1,6 +1,8 @@
 """T10: versioned migration runner для voice_tracker (единственный управляемый
-шаг DDL). Приложения на startup только проверяют совместимость; удаление и
-пересоздание индексов — здесь.
+шаг изменений схемы/данных). Приложения на startup только проверяют совместимость
+(read-only, R26-07 review: ни DDL, ни записей); удаление и пересоздание индексов
+И управляемые CRUD-backfills (M7 guild_settings.revision) — только здесь, под
+migration-ролью.
 
 Команды:
     python -m voice_tracker.migrate status              [--db NAME]
@@ -10,8 +12,14 @@
     python -m voice_tracker.migrate export-manifest --out FILE
     python -m voice_tracker.migrate users               # least-privilege (DB06)
 
+На проде команды запускаются ОДНИМ и тем же compose-путём (профиль `migrate`,
+сервис `schema-migrate`, credentials — MONGO_MIGRATION_URI пользователя
+dsbot_migration), см. deploy/README.md и docs/adr/0005 — не из контейнера
+приложения с runtime-URI.
+
 Идемпотентность: повтор `up` на уже применённой версии — no-op (create_index с
-той же спецификацией noop; статус-документ не трогается). Смена манифеста без
+той же спецификацией noop; CRUD-шаги фильтруются по $exists и не трогают
+уже мигрированные документы; статус-документ не трогается). Смена манифеста без
 новых миграций (checksum) фиксируется в schema_versions, DDL не переигрывается.
 Прерывание (DB04): конкурентный runner отбивается lease-локом schema_lock;
 сбой посередине оставляет статус running — повторный `up` после истечения
@@ -192,6 +200,28 @@ def _apply_ordering_gate_index(db: Any, dry: bool) -> dict:
     return {"index": f"{spec.collection}.{spec.name}", "dryRun": dry}
 
 
+GUILD_SETTINGS = "guild_settings"
+
+
+def _apply_guild_settings_revision_backfill(db: Any, dry: bool) -> dict:
+    """M7 (R26-07 review, blocker 1): идемпотентный CRUD-backfill revision для
+    старых документов guild_settings (существующих не трогает).
+
+    Ранее этот же шаг выполнял startup рантайма (T06 в repository.verify_startup)
+    — то есть скрытая миграция данных мимо runner'а и единственный write на
+    старте. Startup теперь строго read-only (verify-only, DB03), и backfill живёт
+    здесь: под migration-ролью, с lease-локом, статусом в schema_migrations и
+    отчётом. Аддитивен: путь save_settings при revision==0/$exists:false
+    работает и без него, rollback приложения безопасен."""
+    flt = {"revision": {"$exists": False}}
+    pending = db[GUILD_SETTINGS].count_documents(flt)
+    if dry:
+        return {"collection": GUILD_SETTINGS, "pending": pending, "dryRun": True}
+    res = db[GUILD_SETTINGS].update_many(flt, {"$set": {"revision": 0}})
+    return {"collection": GUILD_SETTINGS, "pending": pending,
+            "backfilled": res.modified_count, "dryRun": False}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
@@ -199,6 +229,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "discord-audit-state-unique", _apply_audit_state_index, backward_compatible=True),
     Migration(5, "eventlog-sweep-cursor-indexes", _apply_sweep_cursor_indexes, backward_compatible=True),
     Migration(6, "eventlog-ordering-gate-index", _apply_ordering_gate_index, backward_compatible=True),
+    Migration(7, "guild-settings-revision-backfill", _apply_guild_settings_revision_backfill,
+              backward_compatible=True),
 )
 
 
@@ -355,56 +387,261 @@ def check_rollback(db: Any, to_version: int) -> list[str]:
     return problems
 
 
-# ------------------------------------------------------------------ users (DB06)
+# ------------------------------------------------------------------ users (DB06/R26-07)
 
-
-USER_PLAN: tuple[tuple[str, str, dict], ...] = (
-    # (username, роль/привилегия, назначения)
-    ("dsbot_app", "readWrite", "бот-сервисы: CRUD бизнес-коллекций, DDL недоступен"),
-    ("dsbot_web", "readWrite", "web API: тот же уровень; операции идут через приложения"),
-    ("dsbot_migration", "custom", "runner: createIndex/listIndexes/collMod + readWrite schema_*"),
-    ("dsbot_backup", "backup", "мониторинг-юзер backup/restore (admin-роль Mongo)"),
+# R26-07 (V26-18): runtime-роли НЕ включают DDL: ни createIndex/dropIndex, ни
+# dropCollection/createCollection, ни userAdmin. createCollection не нужен —
+# сервер создаёт коллекции имплицитно при insert. Встроенная readWrite для
+# app/web больше НЕ используется: она РЕАЛЬНО разрешает createIndex/dropIndex/
+# dropCollection (проверено rolesInfo на Mongo 7), то есть ломала бы DB06.
+# Единственный источник состава привилегий — ROLE_PLAN (тесты сверяют её
+# декларативно, enforcement — интеграционный стенд tests/test_mongo_auth_stand.py).
+# "getMore" в списке нет намеренно: это НЕ отдельная серверная привилегия —
+# continuation курсора авторизуется теми же правами, что исходная операция
+# чтения. Как отдельное action его не принимает createRole: живой прогон
+# r2607-стенда на mongo:7 дал MongoServerError: Unrecognized action: getMore.
+RUNTIME_ROLE_ACTIONS: tuple[str, ...] = (
+    "find", "insert", "update", "remove",
+    "listCollections", "listIndexes", "collStats", "dbStats", "killCursors",
 )
+# Отличие runner'а от runtime — ровно DDL индексов и коллекций: пересборка
+# индекса = dropIndex + createIndex, implicit-create новой коллекции требует
+# createCollection, сверка/смена опций коллекции — collMod. Ни dropCollection,
+# ни dropDatabase, ни userAdmin/grantRole/revokeRole: удаление коллекций —
+# ручной шаг оператора после разбора (DB05), гранты — не дело runner'а.
+# "aggregate" здесь был бы ошибкой ПЛАНА, а не недостающей привилегией: в
+# модели авторизации Mongo отдельного action `aggregate` НЕТ — агрегация,
+# которая только читает, авторизуется правом `find` на коллекции (createRole на
+# mongo:7 отвергает "aggregate" так же, как "getMore": Unrecognized action,
+# живой прогон стенда 2026-09-27). Тем же `find` из RUNTIME_ROLE_ACTIONS
+# покрыты серверная агрегация в _dup_groups (M3/M4) и count_documents в M7 —
+# миграционной роли отдельное право на чтение не нужно, а custom-роль отдаёт
+# серверу ровно переданный список, поэтому «на всякий случай» его расширять
+# нельзя: лишний action — это либо падение createRole, либо незадекларированное
+# расширение прав (DB06).
+MIGRATION_ROLE_EXTRA: tuple[str, ...] = (
+    "createIndex", "dropIndex", "createCollection", "collMod",
+)
+
+# Кастомные роли (создаются в рабочей БД): имя -> ровно набор actions.
+ROLE_PLAN: dict[str, tuple[str, ...]] = {
+    "dsbot_runtime_bot_role": RUNTIME_ROLE_ACTIONS,
+    "dsbot_runtime_web_role": RUNTIME_ROLE_ACTIONS,
+    "dsbot_migration_role": RUNTIME_ROLE_ACTIONS + MIGRATION_ROLE_EXTRA,
+}
+
+# (username, роль, назначения). db="{dbname}" — плейсхолдер рабочей БД;
+# built-in роли (backup/restore/readAnyDatabase) живут в admin (DB06), НО все
+# пользователи плана (включая dsbot_backup/dsbot_restore) создаются в рабочей
+# БД: ensure_users работает на client[db_name]. authSource их URI — MONGO_DB,
+# не admin (review R26-07: admin в env-шаблонах = Authentication failed на
+# живом mongod; роль в admin не переносит туда пользователя).
+USER_PLAN: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
+    ("dsbot_app", (("dsbot_runtime_bot_role", "{dbname}"),),
+     "бот-сервисы: CRUD бизнес-коллекций, DDL недоступен (R26-07)"),
+    ("dsbot_web", (("dsbot_runtime_web_role", "{dbname}"),),
+     "web API: тот же уровень без DDL; операции идут через приложения"),
+    ("dsbot_migration", (("dsbot_migration_role", "{dbname}"),),
+     "runner `migrate up`: CRUD + createIndex/dropIndex/createCollection/collMod"),
+    ("dsbot_backup", (("backup", "admin"),),
+     "mongodump в backup.sh (встроенная роль backup)"),
+    ("dsbot_restore", (("restore", "admin"), ("readAnyDatabase", "admin")),
+     "mongorestore + гейты restore.sh: listDatabases/чтение целей (R26-07)"),
+)
+
+# Состав bootstrap root (localhost exception) — ЕДИНСТВЕННЫЙ источник истины
+# и для bootstrap_users ниже, и для генератора стенда deploy/scripts/
+# r2607_auth_stand.sh (импортирует этот же констант): стенд не может «прятать»
+# расхождение с продакционной комплектацией (review R26-07, blocker 2:
+# bootstrap_users создавал root только с userAdminAnyDatabase, чего не хватает
+# ни на createRole по плану, ни на штатный restore-cleanup dropDatabase).
+# root — НЕ runtime-credential: только `migrate users --bootstrap`/`migrate
+# users` (репарация grants) и mongosh-гейты restore.sh. Учтены granter-ограничения
+# Mongo (эмпирически подтверждены живым прогоном стенда на mongo:7):
+#   * userAdminAnyDatabase — createUser/grantRole/createRole на любой БД (ensure_users);
+#   * readWriteAnyDatabase — привилегии find/insert/update/remove, которыми грантер
+#     обязан владеть для createRole кастомных ролей плана (CRUD-часть);
+#   * dbAdminAnyDatabase  — createIndex/dropIndex/createCollection/collMod
+#     (createRole migration-роли) + dropDatabase: у встроенной dbAdmin на mongo:7
+#     есть это действие (docs v7.0, список actions dbAdmin) — им делает cleanup
+#     таргет-БД restore.sh под MONGO_ADMIN_URI;
+#   * backup / restore    — выдача тех же ролей dsbot_backup/dsbot_restore без
+#     Unauthorized (грантер владеет ролью) + listDatabases-гейт restore.sh;
+#   * clusterMonitor      — кластерная диагностика для тех же admin-гейтов.
+# Комплектация закреплена unit-тестом точного состава
+# (tests/test_mongo_roles_plan.py::TestRootRolePlan) и доказывается живым
+# стендом (tests/test_mongo_auth_stand.py: dropDatabase root'а, bootstrap_users
+# поверх стендового кластера, auth backup/restore URI).
+ROOT_ROLE_PLAN: tuple[tuple[str, str], ...] = (
+    ("userAdminAnyDatabase", "admin"),
+    ("readWriteAnyDatabase", "admin"),
+    ("dbAdminAnyDatabase", "admin"),
+    ("backup", "admin"),
+    ("restore", "admin"),
+    ("clusterMonitor", "admin"),
+)
+
+
+def root_roles_doc() -> list[dict]:
+    """ROOT_ROLE_PLAN в форме серверного документа createUser.roles."""
+    return [{"role": role, "db": db} for role, db in ROOT_ROLE_PLAN]
 
 
 def _already_exists(exc: Exception) -> bool:
     return getattr(exc, "code_name", "") == "AlreadyExists" or "already exists" in str(exc).lower()
 
 
-def ensure_users(db: Any, *, passwords: dict[str, str]) -> list[str]:
-    """Least-privilege пользователи (DB06). Идемпотентен: существующих не трогает.
-    Роли: app/web — встроенная readWrite на свою БД (без createIndex — DDL не их),
-    migration — кастомная роль с createIndex/listIndexes/collMod/read,
-    backup — встроенная роль backup (admin). Сервер без --auth создаёт записи,
-    но не enforcement: проверка отказа DDL — T13 на изолированном Mongo."""
+def _unauthorized(exc: Exception) -> bool:
+    return getattr(exc, "code", None) == 13 or getattr(exc, "code_name", "") == "Unauthorized" \
+        or "unauthorized" in str(exc).lower()
+
+
+def _desired_roles(username: str, dbname: str) -> list[dict]:
+    entry = next((u for u in USER_PLAN if u[0] == username), None)
+    if entry is None:
+        raise ValueError(f"пользователь {username!r} вне USER_PLAN")
+    return [{"role": role, "db": db if db != "{dbname}" else dbname} for role, db in entry[1]]
+
+
+def _role_privileges(role: str, dbname: str) -> list[dict]:
+    return [{"resource": {"db": dbname, "collection": ""}, "actions": sorted(ROLE_PLAN[role])}]
+
+
+def ensure_roles(db: Any) -> list[str]:
+    """Кастомные роли из ROLE_PLAN: создать, а при дрейфе состава — ПЕРЕЗАПИСАТЬ
+    (updateRole заменяет privileges и roles целиком). Молча принимать чужой
+    набор (например leftover createIndex у runtime-роли) нельзя — это=DB06 (R26-07)."""
     dbname = db.name
     made: list[str] = []
-    try:
-        db.command("createRole", "dsbot_migration_role",
-                   privileges=[{"resource": {"db": dbname, "collection": ""},
-                                "actions": ["createIndex", "listIndexes", "collMod", "find",
-                                            "insert", "update", "remove"]}],
-                   roles=[{"role": "read", "db": dbname}])
-        made.append("role:dsbot_migration_role")
-    except Exception as exc:
-        if not _already_exists(exc):
-            raise
-    for username, kind, _note in USER_PLAN:
-        pwd = passwords.get(username)
-        if not pwd:
-            continue
-        roles = {
-            "readWrite": [{"role": "readWrite", "db": dbname}],
-            "custom": [{"role": "dsbot_migration_role", "db": dbname}],
-            "backup": [{"role": "backup", "db": "admin"}],
-        }[kind]
+    for role in ROLE_PLAN:
+        privileges = _role_privileges(role, dbname)
         try:
-            db.command("createUser", username, pwd=pwd, roles=roles)
-            made.append(f"user:{username}")
+            db.command("createRole", role, privileges=privileges, roles=[])
+            made.append(f"role:{role}")
+            continue
         except Exception as exc:
             if not _already_exists(exc):
                 raise
+        info = db.command("rolesInfo", [{"role": role, "db": dbname}], showPrivileges=True)
+        docs = [r for r in info.get("roles", []) if r.get("role") == role and r.get("db") == dbname]
+        if docs and _role_matches_plan(docs[0], role, dbname):
+            continue
+        db.command("updateRole", role, privileges=privileges, roles=[])
+        made.append(f"role-repaired:{role}")
     return made
+
+
+def _role_matches_plan(doc: Any, role: str, dbname: str) -> bool:
+    """Состав роли ровно как в ROLE_PLAN: один privilege на (db, "") с точным
+    набором actions, без унаследованных ролей (иначе leftover readWrite утёк бы
+    в привилегии мимо плана)."""
+    if list(doc.get("roles") or []):
+        return False
+    expected_actions = set(ROLE_PLAN[role])
+    privileges = doc.get("privileges") or []
+    if len(privileges) != 1:
+        return False
+    res = privileges[0].get("resource") or {}
+    if res.get("db") != dbname or res.get("collection") != "":
+        return False
+    return set(privileges[0].get("actions") or []) == expected_actions
+
+
+def _users_info(db: Any) -> dict[str, dict]:
+    info = db.command("usersInfo")
+    return {u["user"]: u for u in info.get("users", [])}
+
+
+def ensure_users(db: Any, *, passwords: dict[str, str]) -> list[str]:
+    """Least-privilege пользователи (DB06) ЯВНОЙ сверкой grants (R26-07).
+
+    Идемпотентность усиленная: после createUser/upsert-пути роли существующих
+    пользователей сверяются через usersInfo, а состав кастомных ролей — через
+    rolesInfo. Избыточные роли (например leftover встроенной readWrite с её
+    createIndex/dropIndex/dropCollection) — ОТЗЫВАЮТСЯ (revokeRolesFromUser),
+    недостающие выдаются (grantRolesToUser); серверных команд grantRoles/
+    revokeRoles не существует, имя пользователя передаётся первым позиционным
+    аргументом. Съехавший состав роли — чинится updateRole. Молчать
+    про drift нельзя: без этого шага DB06 держится только на честном слове.
+    Локаут-безопасно: изменяются ТОЛЬКО пользователи плана dsbot_*; root/admin
+    никогда не понижаются (их нет в USER_PLAN, а реверк идёт поимённо).
+    Пароли существующих пользователей не ротируются (ротация — отдельный шаг
+    оператора: updateUser pwd + смена URI в env-файле)."""
+    dbname = db.name
+    made: list[str] = ensure_roles(db)
+    existing = _users_info(db)
+    for username, _roles, _note in USER_PLAN:
+        desired = _desired_roles(username, dbname)
+        want = {(r["role"], r["db"]) for r in desired}
+        have = {(r["role"], r["db"]) for r in (existing.get(username) or {}).get("roles", [])}
+        if username not in existing:
+            pwd = passwords.get(username)
+            if not pwd:
+                continue  # секрета нет — создать нельзя; это не секрет, имя печатать можно
+            try:
+                db.command("createUser", username, pwd=pwd, roles=desired)
+                made.append(f"user:{username}")
+                have = want
+            except Exception as exc:
+                if not _already_exists(exc):
+                    raise
+        excess = sorted(have - want)
+        missing = sorted(want - have)
+        if excess:
+            db.command("revokeRolesFromUser", username,
+                       roles=[{"role": r, "db": d} for r, d in excess])
+            made.extend(f"revoke:{username}:{r}" for r, _d in excess)
+        if missing:
+            db.command("grantRolesToUser", username,
+                       roles=[{"role": r, "db": d} for r, d in missing])
+            made.extend(f"grant:{username}:{r}" for r, _d in missing)
+    return made
+
+
+def bootstrap_users(*, local_uri: str, db_name: str, passwords: dict[str, str],
+                    root_user: str, root_pass: str,
+                    admin_uri: str = "") -> tuple[list[str], str]:
+    """`migrate users --bootstrap` (R26-07 шаг 1): первый пользователь на ПУСТОМ
+    mongod --auth через localhost exception (подключение с localhost без
+    credentials создаёт первого админа), затем роли+пользователи плана под ним.
+
+    Состав root — строго ROOT_ROLE_PLAN (та же константа, из которой генерится
+    r2607-стенд): userAdminAnyDatabase одна не покрывает ни createRole ролей
+    плана (грантер обязан владеть выдаваемыми привилегиями), ни dropDatabase
+    штатного restore-cleanup (review R26-07, blocker 2).
+
+    Идемпотентность: если localhost exception уже закрыта (Unauthorized 13 —
+    на кластере есть пользователи), подключаемся admin-URI (явный MONGO_ADMIN_URI
+    или собранный из root-учётки) и продолжаем обычный ensure_users со сверкой
+    grants. Секреты не возвращаются и не печатаются — только имена созданных."""
+    import urllib.parse
+
+    import pymongo
+
+    note = "bootstrap:root-created"
+    try:
+        client = pymongo.MongoClient(local_uri, serverSelectionTimeoutMS=5000)
+        try:
+            client.admin.command("createUser", root_user, pwd=root_pass,
+                                 roles=root_roles_doc())
+        finally:
+            client.close()
+    except Exception as exc:
+        if not (_unauthorized(exc) or _already_exists(exc)):
+            raise
+        note = "bootstrap:admin-auth"  # exception закрыта или root уже есть — идемпотентно
+
+    uri = admin_uri
+    if not uri:
+        loc = urllib.parse.urlparse(local_uri)
+        netloc = f"{urllib.parse.quote_plus(root_user)}:{urllib.parse.quote_plus(root_pass)}@{loc.hostname}:{loc.port or 27017}"
+        uri = f"mongodb://{netloc}/admin?authSource=admin"
+    client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
+    try:
+        made = ensure_users(client[db_name], passwords=passwords)
+    finally:
+        client.close()
+    return ([note] + made), note
 
 
 # ------------------------------------------------------------------ CLI
@@ -428,6 +665,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--to-version", type=int)
     parser.add_argument("--out")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--bootstrap", action="store_true",
+                        help="users: пустой mongod --auth через localhost exception (R26-07)")
     args = parser.parse_args(argv)
 
     if args.command == "export-manifest":
@@ -437,6 +676,25 @@ def main(argv: list[str] | None = None) -> int:
             fh.write(schema.manifest_json())
         print(f"manifest checksum={schema.manifest_checksum()} → {args.out}")
         return 0
+
+    if args.command == "users" and args.bootstrap:
+        root_user = os.environ.get("DB_USER_ROOT", "").strip()
+        root_pass = os.environ.get("DB_PASS_ROOT", "")
+        if not root_user or not root_pass:
+            # имена переменных — не секрет; значения не печатаем никогда
+            parser.error("users --bootstrap требует DB_USER_ROOT и DB_PASS_ROOT в окружении")
+        passwords = {u: os.environ[f"DB_USER_{u.upper()}"] for u, _r, _n in USER_PLAN
+                     if os.environ.get(f"DB_USER_{u.upper()}")}
+        made, _note = bootstrap_users(
+            local_uri=args.uri, db_name=args.db, passwords=passwords,
+            root_user=root_user, root_pass=root_pass,
+            admin_uri=os.environ.get("MONGO_ADMIN_URI", "").strip(),
+        )
+        # только имена созданных/починенных сущностей — без секретов (DB06)
+        print(json.dumps({"created": made}, ensure_ascii=False))
+        return 0
+    if args.bootstrap:
+        parser.error("--bootstrap применим только к users")
 
     client, db = _connect(args.uri, args.db)
     try:

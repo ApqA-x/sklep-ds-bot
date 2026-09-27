@@ -105,9 +105,13 @@ state_write() { # state_write PHASE
 has_phase() { case " $REACHED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # один безопасный вызов: строка --eval — фиксированный литерал, НИКАКОЙ
-# интерполяции имён БД в JS (инъекция через имя цели исключена структурно)
+# интерполяции имён БД в JS (инъекция через имя цели исключена структурно).
+# R26-07: mongod под --auth — listDatabases требует привилегий, гейт идёт по
+# MONGO_ADMIN_URI из env-файла (значение секретно, в вывод не попадает).
 list_databases() {
-  compose exec -T mongo mongosh --quiet --eval \
+  [ -n "${MONGO_ADMIN_URI:-}" ] \
+    || die "MONGO_ADMIN_URI not set (R26-07: mongosh gates need admin credentials)"
+  compose exec -T mongo mongosh --quiet --uri "$MONGO_ADMIN_URI" --eval \
     'db.adminCommand({listDatabases:1}).databases.map(d=>d.name).join(" ")'
 }
 
@@ -136,7 +140,11 @@ cleanup_owned_targets() {
   if [ -n "$INTO_DB" ] && db_name_is_safe "$INTO_DB" && [ "$STATE_STARTED" = 1 ] \
      && host_python "$TARGETS" state-check --state "$STATE" --run-id "$RUNID" \
           --db "$INTO_DB" --need-phase db-restored >/dev/null 2>&1; then
-    if compose exec -T mongo mongosh --quiet --eval \
+    # R26-07: drop под --auth — только admin-сессией; в cleanup-ветке НЕ die
+    # (иначе затёрла бы исходную причину отказа в finish/trap): пустой URI или
+    # сбой mongosh → warn + all_ok=0, цель остаётся под наблюдением.
+    if [ -n "${MONGO_ADMIN_URI:-}" ] && compose exec -T mongo mongosh --quiet \
+         --uri "$MONGO_ADMIN_URI" --eval \
          "db.getSiblingDB('$INTO_DB').dropDatabase()" >/dev/null; then
       info "cleanup: rehearsal-БД $INTO_DB удалена"
     else
@@ -371,9 +379,13 @@ if ! has_phase db-restored; then
   PHASE=db-gate-rerace
   db_must_be_absent   # double-check гонки непосредственно перед записью в БД
   PHASE=mongorestore
+  # R26-07: mongod под --auth — восстановлению нужен URI с ролями restore+
+  # readAnyDatabase (dsbot_restore из env-файла); значение не печатается.
+  [ -n "${MONGO_RESTORE_URI:-}" ] \
+    || die "MONGO_RESTORE_URI not set (R26-07: mongorestore needs restore role)"
   info "restore mongodump-архива: $SRC_DB → $INTO_DB (цель гарантированно пуста — обход без drop)"
   age_decrypt_stream "$RUN_DIR/mongo.archive.age" \
-    | compose exec -T mongo mongorestore --quiet --archive \
+    | compose exec -T mongo mongorestore --quiet --uri "$MONGO_RESTORE_URI" --archive \
         --nsInclude "${SRC_DB}.*" --nsFrom "${SRC_DB}.*" --nsTo "${INTO_DB}.*"
   state_write db-restored >/dev/null
 else

@@ -1,17 +1,19 @@
 """T01.2: guard интеграционного стенда — fail-closed на прод-ресурсы.
 
 Проверка в коде (а не «только переменная shell»: её можно забыть/подставить
-чужую): стенд — это выделенный порт 27099 проекта dsbot-teststand и БД с
-явным тестовым именем. Любое совпадение с известными прод/dev-ресурсами —
-AssertionError, тест не выполняется, а падает.
+чужую): стенд — это порт из allowlist стендовых и БД с явным тестовым
+именем. Любое совпадение с известными прод/dev-ресурсами — AssertionError,
+тест не выполняется, а падает.
 """
 from __future__ import annotations
 
 import re
 from urllib.parse import urlparse
 
-# единственный разрешённый наряд для интеграционных тестов (docker-compose.test.yml в wt-dsbot)
-TEST_MONGO_PORT = 27099
+# Разрешённые стендовые порты (R26-07): 27099 — общий стенд без auth
+# (docker-compose.test.yml в wt-dsbot), 27098 — одноразовый auth-стенд
+# mongod --auth (deploy/scripts/r2607_auth_stand.sh + tests/test_mongo_auth_stand.py).
+ALLOWED_TEST_PORTS = {27099, 27098}
 TEST_MONGO_HOSTS = {"127.0.0.1", "localhost"}
 
 # известные НЕ-стендовые инстансы: 27017 — прод Windows-mongod, 27018 — dev-стенд веба
@@ -29,8 +31,9 @@ def guard_mongo_uri(uri: str) -> None:
     port = parsed.port or 27017
     if port in PRODUCTION_PORTS:
         raise AssertionError(f"stand guard: порт {port} — известный прод/dev инстанс, тестам сюда нельзя")
-    if port != TEST_MONGO_PORT:
-        raise AssertionError(f"stand guard: ожидался стендовый порт {TEST_MONGO_PORT}, получен {port}")
+    if port not in ALLOWED_TEST_PORTS:
+        raise AssertionError(
+            f"stand guard: порт {port} не в allowlist стендовых {sorted(ALLOWED_TEST_PORTS)}")
 
 
 def guard_db_name(name: str, pattern: re.Pattern[str] = DEFAULT_DB_RE) -> None:

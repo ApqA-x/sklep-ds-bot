@@ -51,3 +51,29 @@ def test_load_uses_defaults_when_env_is_empty(monkeypatch: pytest.MonkeyPatch) -
     assert cfg.mongo_uri == "mongodb://localhost:27017"
     assert cfg.mongo_db == "voice_tracker"
     assert cfg.nats_url == "nats://localhost:4222"
+
+
+# R26-07 (DB03): режим работы со схемой на startup. Боевые роли Mongo не имеют DDL,
+# поэтому verify-only обязан быть дефолтом, а bootstrap — только явным решением.
+def test_schema_mode_defaults_to_verify() -> None:
+    assert load_config({}).schema_mode == "verify"
+
+
+def test_schema_mode_reads_bootstrap() -> None:
+    assert load_config({"DSBOT_SCHEMA_MODE": "bootstrap"}).schema_mode == "bootstrap"
+    # регистр и пробелы не превращают явное решение в опечатку
+    assert load_config({"DSBOT_SCHEMA_MODE": " BOOTSTRAP "}).schema_mode == "bootstrap"
+    assert load_config({"DSBOT_SCHEMA_MODE": "verify"}).schema_mode == "verify"
+
+
+def test_schema_mode_rejects_unknown_value_without_leaking_it() -> None:
+    junk = "bootstrap-please-mongodb://user:pass@host"
+
+    with pytest.raises(ValueError) as excinfo:
+        load_config({"DSBOT_SCHEMA_MODE": junk})
+
+    message = str(excinfo.value)
+    assert "DSBOT_SCHEMA_MODE" in message
+    assert "verify" in message and "bootstrap" in message
+    # значение не поднимается в текст ошибки: в env рядом лежат секреты
+    assert junk not in message and "pass" not in message

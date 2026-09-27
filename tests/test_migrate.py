@@ -1,4 +1,5 @@
-"""T10 unit: логика migration runner без сети (plan, rollback-preflight, dedup-классификация)."""
+"""T10 unit: логика migration runner без сети (plan, rollback-preflight,
+dedup-классификация, M7 revision-backfill)."""
 
 from __future__ import annotations
 
@@ -15,28 +16,51 @@ class FakeCol:
         self.docs: list[dict] = docs if docs is not None else []
         self.indexes: list[tuple] = []
         self.deleted: list[dict] = []
+        self.updated: list[tuple] = []
 
     def create_index(self, keys, **kw) -> str:
         self.indexes.append((tuple(keys), tuple(sorted(kw.items(), key=lambda kv: str(kv[0])))))
         return kw.get("name") or ""
 
+    @staticmethod
+    def _match_doc(d: dict, flt: dict) -> bool:
+        for k, v in flt.items():
+            if isinstance(v, dict):
+                if "$exists" in v and bool(k in d) != bool(v["$exists"]):
+                    return False
+                if "$in" in v and d.get(k) not in v["$in"]:
+                    return False
+                if not any(m in v for m in ("$exists", "$in")):
+                    return False
+            elif d.get(k) != v:
+                return False
+        return True
+
     def find(self, flt: dict, _proj=None):
-        out = []
+        return [d for d in self.docs if self._match_doc(d, flt)]
+
+    def count_documents(self, flt: dict) -> int:
+        return sum(1 for d in self.docs if self._match_doc(d, flt))
+
+    def update_many(self, flt: dict, update: dict, **_kwargs):
+        modified = 0
         for d in self.docs:
-            ok = True
-            for k, v in flt.items():
-                if isinstance(v, dict) and "$in" in v:
-                    ok = ok and d.get(k) in v["$in"]
-                else:
-                    ok = ok and d.get(k) == v
-            if ok:
-                out.append(d)
-        return out
+            if not self._match_doc(d, flt):
+                continue
+            changed = False
+            for k, v in (update.get("$set") or {}).items():
+                if d.get(k) != v:
+                    d[k] = v
+                    changed = True
+            if changed:
+                modified += 1
+                self.updated.append((dict(flt), dict(update), d["_id"]))
+        return type("R", (), {"modified_count": modified})()
 
     def find_one(self, flt: dict):
         if "_id" in flt and not isinstance(flt["_id"], dict):
             return next((d for d in self.docs if d["_id"] == flt["_id"]), None)
-        found = self.find({k: v for k, v in flt.items() if not isinstance(v, dict)})
+        found = self.find(flt)
         return found[0] if found else None
 
     def delete_many(self, flt: dict):
@@ -80,7 +104,7 @@ def test_plan_reports_would_apply_for_all_pending_migrations() -> None:
     result = migrate.plan_and_apply(db, apply=False)
     assert result["dryRun"] is True
     assert [a["action"] for a in result["actions"]] == ["would-apply"] * len(migrate.MIGRATIONS)
-    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6]
+    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7]
     # dry-run ничего не создал
     assert db.cols.get(schema.OP) is None or db.cols[schema.OP].indexes == []
 
@@ -158,3 +182,47 @@ def test_m3_merges_only_identical_duplicates_then_builds_unique() -> None:
     assert report["mergedDeleted"] == 1
     assert [d["_id"] for d in da.docs] == ["a"]  # keep=min по str(_id)
     assert any("unique" in str(kw) for _, kw in da.indexes)
+
+
+# ------------------------------------------------------- M7 revision-backfill
+
+
+def test_m7_backfills_only_docs_without_revision() -> None:
+    """R26-07 review (blocker 1): backfill переехал со startup рантайма в runner.
+    Существующие значения revision не трогаются (фильтр $exists:false)."""
+    db = FakeDB()
+    gs = db[migrate.GUILD_SETTINGS]
+    gs.docs = [{"_id": "g1", "guildId": "1"}, {"_id": "g2", "guildId": "2", "revision": 7}]
+    report = migrate._apply_guild_settings_revision_backfill(db, dry=False)
+    assert gs.find_one({"_id": "g1"})["revision"] == 0
+    assert gs.find_one({"_id": "g2"})["revision"] == 7  # существующее не перезаписано
+    assert report["backfilled"] == 1 and report["pending"] == 1 and report["dryRun"] is False
+
+
+def test_m7_is_idempotent_and_dry_run_writes_nothing() -> None:
+    db = FakeDB()
+    gs = db[migrate.GUILD_SETTINGS]
+    gs.docs = [{"_id": "g1", "guildId": "1"}]
+
+    dry = migrate._apply_guild_settings_revision_backfill(db, dry=True)
+    assert dry["dryRun"] is True and dry["pending"] == 1
+    assert "revision" not in gs.docs[0] and gs.updated == []  # dry-run — ноль записей
+
+    first = migrate._apply_guild_settings_revision_backfill(db, dry=False)
+    assert first["backfilled"] == 1
+    again = migrate._apply_guild_settings_revision_backfill(db, dry=False)
+    assert again["backfilled"] == 0 and again["pending"] == 0
+    assert gs.docs[0] == {"_id": "g1", "guildId": "1", "revision": 0}
+    assert len(gs.updated) == 1  # второй прогон не тронул ни одного документа
+
+
+def test_m7_is_registered_as_additive_migration_and_skipped_when_done() -> None:
+    mig7 = next((m for m in migrate.MIGRATIONS if m.id == 7), None)
+    assert mig7 is not None and mig7.name == "guild-settings-revision-backfill"
+    assert mig7.backward_compatible is True  # старый код работает и без revision (DB07)
+
+    db = FakeDB()
+    db[migrate.MIG_COLL].docs = [{"_id": 7, "name": mig7.name, "status": "done",
+                                  "checksum": migrate.migration_checksum(mig7)}]
+    plan = migrate.plan_and_apply(db, apply=False, only=7)
+    assert plan["actions"] == [{"id": 7, "name": mig7.name, "action": "skip-done"}]

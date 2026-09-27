@@ -94,7 +94,11 @@ async def main() -> None:
 
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
-    repo.ensure_indexes(None)
+    # R26-07 (DB03): startup по умолчанию verify-only; DDL — только в явном bootstrap-режиме.
+    if getattr(cfg, "schema_mode", "verify") == "bootstrap":
+        repo.ensure_indexes(None)
+    else:
+        repo.verify_startup()
 
     bus, service = await _start_with_retry(cfg, repo)
 

@@ -320,6 +320,10 @@ async def test_main_subscribes_before_start(monkeypatch: pytest.MonkeyPatch) -> 
         def ensure_indexes(self, _ctx: object) -> None:
             calls.append("ensure_indexes")
 
+        # R26-07 (DB03): startup по умолчанию — verify-only ветка.
+        def verify_startup(self) -> None:
+            calls.append("verify_startup")
+
     class FakeNats:
         async def connect(self, _url: str) -> None:
             calls.append("nats_connect")
