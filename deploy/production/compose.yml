@@ -33,6 +33,10 @@
 # единственная роль с DDL) + MONGO_DB; годится и для `migrate up`, и для
 # `migrate status`. Безпарольный loopback остаётся исключительным правом
 # mongo-bootstrap (localhost exception): под ним runner не ходит.
+# Review R26-07 (blocker 3): runtime — verify-only: x-bot-env явно фиксирует
+# DSBOT_SCHEMA_MODE: verify (environment > env_file), поэтому env-файл не может
+# включить в бот-сервисах DDL-режим bootstrap; bootstrap — локальный dev вне
+# этого deploy-профиля.
 #
 # Все project/file/env пути задаёт scripts/deploy.sh; из случайного cwd не запускать.
 # Значения секретов живут только в env-файле хоста (chmod 600), не в git.
@@ -59,6 +63,14 @@ x-bot-env: &bot-env
   MONGO_URI: "${MONGO_BOT_URI:?authenticated bot URI (dsbot_app, no DDL role) — env file}"
   NATS_URL: nats://nats:4222
   MEDIA_DIR: /data/media
+  # Review R26-07 (blocker 3): runtime deploy-профиля — строго verify-only.
+  # environment приоритетнее env_file, поэтому строка DSBOT_SCHEMA_MODE=bootstrap
+  # в выбранном env-файле больше не может перевести бот-сервисы в mutating-режим
+  # (ensure_indexes = DDL под runtime app-креденшеллами). bootstrap остаётся
+  # локальной dev-возможностью вне deploy-профилей; validate_env отвергает его в
+  # env-файлах production/staging, а факт в рендере сверяет validate_compose.
+  # Одноразовые job'ы (mongo-bootstrap, schema-migrate) этот якорь НЕ получают.
+  DSBOT_SCHEMA_MODE: verify
 
 services:
   mongo:

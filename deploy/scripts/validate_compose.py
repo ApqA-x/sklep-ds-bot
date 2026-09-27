@@ -39,6 +39,16 @@ dsbot-data без network_mode (хост `mongo` из URI резолвится �
 (подмена на bot/web/admin-URI = скрытая эскалация или нерабочий runner),
 MONGO_DB — present и равен env-файлу; egress запрещён.
 
+Review R26-07 (blocker 3): runtime deploy-профилей — строго verify-only. Каждый
+BOT_ENVFILE_SERVICES в рендере обязан иметь environment DSBOT_SCHEMA_MODE ровно
+"verify": compose якорит значение в x-bot-env (environment приоритетнее env_file),
+поэтому строка DSBOT_SCHEMA_MODE=bootstrap в выбранном env-файле не может перевести
+бот-сервис в mutating-режим (ensure_indexes = DDL под runtime app-креденшеллами).
+Отсутствие ключа или иное значение в ОТРЕНДЕРЕННОМ конфиге = ошибка (fail-closed);
+сообщение называет сервис и ключ, значение не печатает. bootstrap остаётся
+локальной dev-возможностью вне deploy-профилей. У одноразовых job'ов
+(mongo-bootstrap, schema-migrate) ключа нет и не требуется — это не runtime.
+
 Выход: 0 = инварианты соблюдены; 1 = нарушение (перечислены); 2 = неверный ввод.
 """
 from __future__ import annotations
@@ -109,6 +119,9 @@ BOT_ENVFILE_SERVICES = (
     "stalker",
     "controlplane",
 )
+# Review R26-07 (blocker 3): единственно допустимое значение DSBOT_SCHEMA_MODE в
+# рендере runtime-ботов (compose якорит его в x-bot-env, environment > env_file).
+RUNTIME_SCHEMA_MODE = "verify"
 # R26-06/V26-17: Discord REST/Gateway/OAuth требует NAT-egress.
 EGRESS_NETWORK = "dsbot-egress"
 EGRESS_SERVICES = {"gateway", "commands", "activity", "stalker", "web"}
@@ -348,8 +361,11 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
                 continue
             # Форма рендера compose v5: env_file не виден, содержимое выбранного
             # файла целиком в environment. Инвариант YAML (покрыт тестом): ни
-            # один ключ env-файла не перекрывается явным environment бота
-            # (SERVICE_NAME/MONGO_URI/NATS_URL/MEDIA_DIR в env-файлах отсутствуют),
+            # один ключ env-файла не перекрывается явным environment бота, кроме
+            # закоренного x-bot-env DSBOT_SCHEMA_MODE: verify (review blocker 3;
+            # mismatch файла с bootstrap здесь — запасной fail-closed слой, прямым
+            # сообщением про него пишет отдельная проверка ниже). Ключи
+            # SERVICE_NAME/MONGO_URI/NATS_URL/MEDIA_DIR в env-файлах отсутствуют,
             # поэтому сверяются все ключи файла; service-специфичные ключи
             # environment — лишние, они не проверяются.
             rendered = _environment(svc)
@@ -368,6 +384,24 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
             elif env_file and _canon_path(p) != _canon_path(env_file):
                 errors.append(f"[{name}] env_file does not point at the env file selected "
                               "by the deploy scripts (single source of env, V26-16)")
+
+    # Review R26-07 (blocker 3): runtime — строго verify-only. x-bot-env якорит
+    # DSBOT_SCHEMA_MODE: verify (environment приоритетнее env_file), и каждый
+    # BOT_ENVFILE_SERVICES в рендере обязан это показывать: отсутствие ключа или
+    # иное значение = fail-closed (иначе одна строка env обходит контракт R26-07
+    # и боты поднимают DDL ensure_indexes под runtime app-креденшеллами).
+    # Сообщения — сервис и имя ключа; само значение не печатается.
+    for name in BOT_ENVFILE_SERVICES:
+        svc = services.get(name)
+        if svc is None:
+            continue
+        got = _environment(svc).get("DSBOT_SCHEMA_MODE")
+        if got != RUNTIME_SCHEMA_MODE:
+            reason = "is missing" if got is None else "is not exactly \"verify\""
+            errors.append(f"[{name}] environment.DSBOT_SCHEMA_MODE {reason} — runtime of "
+                          "production/staging deploy profiles is verify-only (R26-07 "
+                          "blocker 3); the key is hard-wired in x-bot-env and no env_file "
+                          "value may switch a bot service into mutating bootstrap mode")
 
     # R26-06/п.5: backend-only ключи не должны попадать в environment web.
     if web:

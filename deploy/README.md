@@ -95,9 +95,12 @@ docker compose -p dsbot-prod -f deploy/production/compose.yml \
 
 Пароли — `DB_USER_*`/`DB_PASS_ROOT` из того же env-файла; в вывод идут только
 имена созданных сущностей. Повторный запуск команды 1 чинит drift грантов
-(`ensure_users`). Штатный запуск: runtime стартует с
-`DSBOT_SCHEMA_MODE=verify` (только сверка схемы, DDL runner'у; `bootstrap` —
-исключительно dev/первый прогон job-runner'а). Ротация пароля: `updateUser pwd`
+(`ensure_users`). Штатный запуск: runtime deploy-профилей — строго verify-only
+(review R26-07, blocker 3): env-файл обязано нести `DSBOT_SCHEMA_MODE=verify`
+(validate_env отвергает любое другое значение), а compose якорит
+`DSBOT_SCHEMA_MODE: verify` в `x-bot-env` (environment приоритетнее env_file),
+так что env-строка не может включить ботам DDL; `bootstrap` — только локальный
+dev вне deploy-профилей. Ротация пароля: `updateUser pwd`
 → править URI в env → рестарт сервисов. Модель, роли и обоснование —
 `docs/adr/0005-mongo-auth-roles.md`.
 

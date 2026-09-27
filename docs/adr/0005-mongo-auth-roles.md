@@ -43,9 +43,14 @@ mongod работал без `--auth`, ролевая модель была де
 2. **DDL — только runner'у.** Runtime стартует в режиме verify:
    `DSBOT_SCHEMA_MODE=verify` (дефолт; неизвестное значение — падение старта,
    fail-closed) → `repository.verify_startup`: каноническая сверка индексов
-   T10 без единой DDL-команды. `bootstrap`-режим — только dev / первый прогон
-   job-runner'а. Рабочий порядок на чистой БД: bootstrap прав → `migrate up`
-   под `dsbot_migration` → запуск приложений под verify.
+   T10 без единой DDL-команды. `bootstrap`-режим — только локальный dev вне
+   deploy-профилей (review R26-07, blocker 3): `validate_env.py` принимает в
+   env-файлах production/staging ровно `verify`, а compose якорит
+   `DSBOT_SCHEMA_MODE: verify` в `x-bot-env` (environment приоритетнее
+   env_file), и `validate_compose.py` сверяет это в рендере — одна строка env
+   больше не может перевести runtime в DDL. Рабочий порядок на чистой БД:
+   bootstrap прав → `migrate up` под `dsbot_migration` → запуск приложений
+   под verify.
    Точка входа миграций — ОДНОРАЗОВЫЙ compose-сервис `schema-migrate` (review
    R26-07, blocker 2): профиль `migrate` (в обычный `up` не входит),
    `restart: "no"`, `dsbot-data` БЕЗ `network_mode` (хост `mongo` резолвится

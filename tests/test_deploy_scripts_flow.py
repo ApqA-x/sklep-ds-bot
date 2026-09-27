@@ -259,11 +259,14 @@ def _rendered_fixture(envfile: str) -> dict:
         svc["env_file"] = [{"path": envfile, "service": name}]
         # R26-07: MONGO_URI — фактическое значение MONGO_BOT_URI выбранного
         # env-файла (dsbot_app, без DDL-роли); controlplane тоже бот-уровня.
+        # Review R26-07 (blocker 3): x-bot-env якорит DSBOT_SCHEMA_MODE: verify
+        # (environment > env_file) — в живом рендере ключ виден у каждого бота.
         svc["environment"] = {
             "MONGO_URI": bot_uri,
             "NATS_URL": "nats://nats:4222",
             "MEDIA_DIR": "/data/media",
             "SERVICE_NAME": name,
+            "DSBOT_SCHEMA_MODE": "verify",
         }
         return svc
 

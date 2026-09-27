@@ -113,7 +113,12 @@ def _good_cfg(mode: str, envfile: str = ENV_PATH) -> dict:
         ),
     }
     for name in validate_compose.BOT_ENVFILE_SERVICES:
-        services[name].setdefault("environment", {})["MONGO_URI"] = bot_uri
+        bot_env = services[name].setdefault("environment", {})
+        bot_env["MONGO_URI"] = bot_uri
+        # review R26-07 (blocker 3): x-bot-env якорит DSBOT_SCHEMA_MODE: verify и в
+        # старой форме рендера, и в схлопнутой v5 (environment побеждает env_file) —
+        # фикстура обязана моделировать ровно это.
+        bot_env["DSBOT_SCHEMA_MODE"] = validate_compose.RUNTIME_SCHEMA_MODE
     services["web"]["environment"]["MONGO_URI"] = web_uri
     return {
         "name": validate_compose.EXPECTED_PROJECT[mode],
@@ -341,7 +346,10 @@ def test_v2616_env_file_keys_are_not_overridden_by_bot_environment() -> None:
     """Инвариант, на котором держится слияние-проверка V26-16 в v5-рендерe:
     ни один ключ env-файла НЕ перекрывается явным environment бота (иначе в
     схлопнутом рендере значение из файла честно отличалось бы). Сервис-специфичные
-    SERVICE_NAME/MONGO_URI/NATS_URL/MEDIA_DIR обязаны отсутствовать в env-файлах."""
+    SERVICE_NAME/MONGO_URI/NATS_URL/MEDIA_DIR обязаны отсутствовать в env-файлах.
+    Review R26-07 (blocker 3): единственное разрешённое перекрытие —
+    DSBOT_SCHEMA_MODE: verify из x-bot-env (runtime verify-only важнее единого
+    источника env: env_file не имеет права включать ботам DDL-режим)."""
     bot_services = ("gateway", "tracker", "writer", "commands", "activity", "stalker", "controlplane")
     for compose_path, example in (
         (DEPLOY / "production" / "compose.yml", DEPLOY / "production" / "env.example"),
@@ -353,9 +361,12 @@ def test_v2616_env_file_keys_are_not_overridden_by_bot_environment() -> None:
         for key in ("SERVICE_NAME", "MONGO_URI", "NATS_URL", "MEDIA_DIR", "WEB_ENV"):
             assert key not in env_keys, (example.name, key)
         for name in bot_services:
-            explicit = set((doc["services"][name].get("environment") or {}))
-            clash = sorted(explicit & set(env_keys))
+            explicit = doc["services"][name].get("environment") or {}
+            clash = sorted(set(explicit) & set(env_keys) - {"DSBOT_SCHEMA_MODE"})
             assert not clash, (compose_path.name, name, clash)
+            # перекрытие единственное и ровно фиксированное (не интерполяция из env)
+            assert explicit.get("DSBOT_SCHEMA_MODE") == validate_compose.RUNTIME_SCHEMA_MODE, (
+                compose_path.name, name)
 
 
 def test_v2616_web_has_no_env_file_and_no_backend_keys() -> None:
@@ -693,6 +704,50 @@ def test_r2607_bot_uri_must_be_the_env_bot_uri(tmp_path) -> None:
     assert "pw-mig" not in errors and "pw-app" not in errors
 
 
+def test_r2607_rendered_runtime_schema_mode_pinned_verify(tmp_path) -> None:
+    """Review R26-07 (blocker 3): в ОТРЕНДЕРЕННОМ конфиге каждый runtime-бот обязан
+    нести environment DSBOT_SCHEMA_MODE ровно "verify": без этого правка якоря или
+    строка env_file переводят runtime в mutating bootstrap (DDL под app-креденшеллами).
+    bootstrap-значение и пропажа ключа падают; сообщения называют сервис и ключ."""
+    for mode in ("production", "staging"):
+        assert validate_compose.check(_good_cfg(mode), mode) == []
+        cfg = _good_cfg(mode)
+        cfg["services"]["writer"]["environment"]["DSBOT_SCHEMA_MODE"] = "bootstrap"
+        cfg["services"]["controlplane"]["environment"].pop("DSBOT_SCHEMA_MODE")
+        errors = "\n".join(validate_compose.check(cfg, mode))
+        assert '[writer] environment.DSBOT_SCHEMA_MODE is not exactly "verify"' in errors
+        assert '[controlplane] environment.DSBOT_SCHEMA_MODE is missing' in errors
+        # заодно: v5-рендер (env_file схлопнут в environment) с корректным
+        # env-файлом проходит, а bootstrap в environment вместо якорного verify —
+        # падает той же инвариант-петлёй
+        selected = _write_env(tmp_path, mode, name=f".env.pin.{mode}")
+        cfg2 = _good_cfg(mode, envfile=str(selected))
+        for name in validate_compose.BOT_ENVFILE_SERVICES:
+            cfg2["services"][name].pop("env_file")
+        assert validate_compose.check(cfg2, mode, env_file=str(selected)) == []
+        cfg2["services"]["tracker"]["environment"]["DSBOT_SCHEMA_MODE"] = "bootstrap"
+        errors = "\n".join(validate_compose.check(cfg2, mode, env_file=str(selected)))
+        assert '[tracker] environment.DSBOT_SCHEMA_MODE is not exactly "verify"' in errors
+
+
+def test_r2607_yaml_bot_env_anchor_hardwires_verify() -> None:
+    """Review R26-07 (blocker 3): в x-bot-env (&bot-env) добавлен литерал
+    DSBOT_SCHEMA_MODE: verify (не интерполяция), поэтому ни один из семи runtime-ботов
+    не получает bootstrap из env_file; одноразовые job'ы (mongo-bootstrap,
+    schema-migrate) якорь не наследуют и ключа не имеют."""
+    bot_services = ("gateway", "tracker", "writer", "commands", "activity", "stalker", "controlplane")
+    for path in (DEPLOY / "production" / "compose.yml",
+                 DEPLOY / "staging" / "compose.staging.yml"):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert doc["x-bot-env"]["DSBOT_SCHEMA_MODE"] == "verify", path.name
+        assert "${" not in str(doc["x-bot-env"]["DSBOT_SCHEMA_MODE"]), path.name
+        for name in bot_services:
+            assert doc["services"][name]["environment"]["DSBOT_SCHEMA_MODE"] == "verify", (
+                path.name, name)
+        assert "DSBOT_SCHEMA_MODE" not in doc["services"]["mongo-bootstrap"]["environment"], path.name
+        assert "DSBOT_SCHEMA_MODE" not in doc["services"]["schema-migrate"]["environment"], path.name
+
+
 def test_r2607_yaml_compose_auth_uris_and_bootstrap() -> None:
     """Форма YAML: mongod с --auth; x-bot-env → ${MONGO_BOT_URI...}, web →
     ${MONGO_WEB_URI...}; безпарольный URI на mongo-контейнер не встречается и в
@@ -779,14 +834,30 @@ def test_r2607_env_plan_user_uris_must_auth_against_working_db(tmp_path) -> None
     assert validate_env.check(str(encoded), "production") == []
 
 
-def test_r2607_env_rejects_unknown_schema_mode(tmp_path) -> None:
-    env = _write_env(tmp_path, "production", DSBOT_SCHEMA_MODE="garbage")
-    errors = "\n".join(validate_env.check(str(env), "production"))
-    assert "DSBOT_SCHEMA_MODE" in errors
-    # bootstrap допустим (dev/первый job-runner прогон), verify допустим
-    assert validate_env.check(str(_write_env(tmp_path, "production",
-                                             name=".env.boot", DSBOT_SCHEMA_MODE="bootstrap")),
-                              "production") == []
+def test_r2607_env_rejects_non_verify_schema_mode(tmp_path) -> None:
+    """Review R26-07 (blocker 3): deploy-профили production/staging принимают
+    РОВНО DSBOT_SCHEMA_MODE=verify. bootstrap — mutating-режим runtime'а
+    (ensure_indexes = DDL под app-креденшеллами) — остаётся локальной
+    dev-возможностью вне deploy-профилей (voice_tracker/runtime.py его не
+    трогает), поэтому здесь он отвергается наравне с мусором; пустое значение
+    ловится required-проверкой. Сообщения — без значений (рядом секреты)."""
+    for mode in ("production", "staging"):
+        assert validate_env.check(str(_write_env(tmp_path, mode, name=f".env.ok.{mode}")),
+                                  mode) == []
+        for junk in ("bootstrap", "BOOTSTRAP", "Verify", "garbage", "bootstrap "):
+            bad = _write_env(tmp_path, mode, name=f".env.bad.{mode}.{junk.strip() or junk}",
+                             DSBOT_SCHEMA_MODE=junk)
+            errors = validate_env.check(str(bad), mode)
+            joined = "\n".join(errors)
+            assert 'DSBOT_SCHEMA_MODE must be exactly "verify"' in joined, (mode, junk)
+        # значение в сообщение не поднимается (в env рядом лежат секреты);
+        # «bootstrap» в тексте — фиксированная документация правила, не эхо
+        echoed = _write_env(tmp_path, mode, name=".env.echo", DSBOT_SCHEMA_MODE="s3cr3t-mode")
+        joined = "\n".join(validate_env.check(str(echoed), mode))
+        assert "s3cr3t-mode" not in joined
+        empty = _write_env(tmp_path, mode, name=f".env.empty.{mode}", DSBOT_SCHEMA_MODE="")
+        assert "missing required key: DSBOT_SCHEMA_MODE" in "\n".join(
+            validate_env.check(str(empty), mode))
 
 
 def test_r2607_env_requires_digest_pinned_bootstrap_image(tmp_path) -> None:
@@ -992,5 +1063,15 @@ def test_real_compose_render_passes_invariants(tmp_path, mode: str) -> None:
     if proc.returncode != 0:
         pytest.fail(f"compose config failed: {proc.stderr[:800]}")
     cfg = json.loads(proc.stdout)
+    # Review R26-07 (blocker 3): hard-wire обязан быть виден именно в живом
+    # рендере: environment каждого runtime-бота (приоритетнее env_file) — verify.
+    # Профильные сервисы (controlplane) данная версия compose может отсеивать —
+    # проверяем присутствующих, как и сам валидатор.
+    for name in validate_compose.BOT_ENVFILE_SERVICES:
+        svc = cfg["services"].get(name)
+        if svc is None:
+            continue
+        got = validate_compose._environment(svc).get("DSBOT_SCHEMA_MODE")
+        assert got == validate_compose.RUNTIME_SCHEMA_MODE, (mode, name, got)
     errors = validate_compose.check(cfg, mode, env_file=str(env))
     assert errors == [], "\n".join(errors)

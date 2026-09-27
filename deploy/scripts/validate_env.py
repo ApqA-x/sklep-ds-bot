@@ -9,7 +9,11 @@ R26-07: mongod поднят с --auth — env-файл обязан нести �
 MONGO_BACKUP_URI/MONGO_RESTORE_URI),
 пароли пользователей плана migrate.py (DB_USER_ROOT/DB_PASS_ROOT и
 DB_USER_<USERNAME в ВЕРХНИЙ РЕГИСТР> — ровно так читает USER_PLAN), образ
-bootstrap-job'а (BOOTSTRAP_IMAGE, digest) и DSBOT_SCHEMA_MODE ∈ {verify, bootstrap}.
+bootstrap-job'а (BOOTSTRAP_IMAGE, digest) и DSBOT_SCHEMA_MODE РОВНО "verify".
+Review R26-07 (blocker 3): deploy-профиль production/staging не может нести
+bootstrap — это mutating-режим runtime'а (ensure_indexes = DDL под app-
+креденшеллами), локальная dev-возможность вне deploy-профилей (compose к тому
+же якорит verify в x-bot-env, и validate_compose сверяет рендер).
 Набор одинаков у production и staging: staging репетирует ровно тот прогон, что
 пойдёт на прод (изоляция же — прод-специфичные проверки томов/базы/порта ниже).
 Review R26-07 (blocker 1): пользователи плана (app/web/migration/backup/restore)
@@ -87,7 +91,12 @@ MONGO_USER_KEYS = [
     "DB_USER_DSBOT_BACKUP",
     "DB_USER_DSBOT_RESTORE",
 ]
-DSBOT_SCHEMA_MODES = {"verify", "bootstrap"}
+# Review R26-07 (blocker 3): для deploy-профилей (production/staging — ровно они
+# принимает --mode) допустимо ТОЛЬКО это значение. bootstrap — режим локального
+# dev вне deploy-профилей: в runtime он вызывает Repository.ensure_indexes(),
+# то есть writes/DDL под runtime app-креденшеллами, чего verify-only контракт
+# прода не допускает.
+DEPLOY_SCHEMA_MODE = "verify"
 # Review R26-07 (blocker 1): эти пользователи создаются ensure_users в рабочей
 # БД (client[MONGO_DB]) — authSource их URI обязан быть MONGO_DB. MONGO_ADMIN_URI
 # (root, localhost exception) исключён: он аутентифицируется в admin.
@@ -107,8 +116,8 @@ COMMON_REQUIRED = IMAGE_KEYS + MONGO_URI_KEYS + MONGO_USER_KEYS + [
     "DISCORD_APPLICATION_ID",
     "EVENT_SIGNING_SECRET",
     "MONGO_DB",
-    # R26-07: runtime стартует в verify (DDL недоступен); bootstrap — только
-    # dev/первый job-runner прогон services/*/schema_mode.
+    # R26-07 (blocker 3): runtime deploy-профиля — строго verify (DDL недоступен);
+    # bootstrap отвергается ниже, он живёт только в локальном dev вне профилей.
     "DSBOT_SCHEMA_MODE",
     # web (production-гарды T02 проверяет само приложение; здесь — наличие ключей)
     "DISCORD_CLIENT_ID",
@@ -185,10 +194,15 @@ def check(path: str, mode: str) -> list[str]:
             elif unquote(pm.group(1)) != workdb:
                 errors.append(f"{key}: URI path database must equal MONGO_DB "
                               "(or use ?authSource=<MONGO_DB>)")
-    mode_value = env.get("DSBOT_SCHEMA_MODE", "").strip().lower()
-    if mode_value and mode_value not in DSBOT_SCHEMA_MODES:
-        errors.append("DSBOT_SCHEMA_MODE must be \"verify\" (runtime, no DDL) or "
-                      "\"bootstrap\" (dev/first job-runner run only)")
+    # Review R26-07 (blocker 3): ровно "verify" (без приведения регистра — value
+    # сверяется как есть после strip; пустое значение уже поймано required-проверкой).
+    # bootstrap и всё остальное — ошибка; значение в сообщение не печатается.
+    schema_mode_value = env.get("DSBOT_SCHEMA_MODE", "").strip()
+    if schema_mode_value and schema_mode_value != DEPLOY_SCHEMA_MODE:
+        errors.append('DSBOT_SCHEMA_MODE must be exactly "verify" in production/staging '
+                      'deploy profiles — runtime startup is verify-only (R26-07); '
+                      '"bootstrap" runs DDL (ensure_indexes) under runtime credentials '
+                      "and is a local-dev mode outside deploy profiles")
 
     def is_int(v: str) -> bool:
         return v.isdigit()
