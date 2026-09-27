@@ -90,6 +90,12 @@ class Config:
     # E09 (R26-02): окно «живого» heartbeat другого instance для отказа старту
     # второго gateway; 0 = guard выключен (только по явному решению оператора).
     gateway_singleton_max_age_seconds: int = 90
+    # R26-07 (DB06/V26-18): режим работы со схемой на startup. "verify" (по
+    # умолчанию) — только read-only сверка + CRUD-backfill: runtime-роли намеренно
+    # НЕ имеют createIndex/dropIndex/dropCollection, требовать DDL на startup
+    # нельзя. "bootstrap" — полный ensure_indexes (dev-стенд без auth и
+    # job-runner'ный первый запуск); DDL на проде — `migrate up` с migration-ролью.
+    schema_mode: str = "verify"
 
 
 def load_config(env: Any = None) -> Config:
@@ -124,6 +130,20 @@ def load_config(env: Any = None) -> Config:
     cfg.media_min_free_bytes = _getenv_int(
         source, "MEDIA_MIN_FREE_BYTES", cfg.media_min_free_bytes, allow_zero=True
     )
+    # R26-07 (DB03): ровно два допустимых значения. Опечатка — явная ошибка старта,
+    # а не тихая подмена: молчаливый выбор режима мог бы либо включить DDL на проде,
+    # либо выключить его на dev-стенде без ведома оператора. В текст ошибки значение
+    # не поднимается — в env рядом лежат секреты.
+    mode = _clean(source.get("DSBOT_SCHEMA_MODE", "")).lower()
+    if mode == "":
+        cfg.schema_mode = "verify"
+    elif mode in ("verify", "bootstrap"):
+        cfg.schema_mode = mode
+    else:
+        raise ValueError(
+            'DSBOT_SCHEMA_MODE must be "verify" (runtime startup: schema check only, no DDL) '
+            'or "bootstrap" (dev-stand / first job-runner run: create indexes)'
+        )
     if cfg.mongo_uri == "" or cfg.mongo_db == "" or cfg.nats_url == "":
         raise ValueError("missing required configuration")
     return cfg

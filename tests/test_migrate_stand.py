@@ -243,16 +243,22 @@ def test_db06_least_privilege_users_created_idempotent(db) -> None:
     by_name = {u["user"]: u for u in info["users"]}
     dbname = db.name
     assert {r["db"] for u in by_name.values() for r in u["roles"]} <= {dbname, "admin"}
-    assert all(r == {"role": "readWrite", "db": dbname} for r in by_name["dsbot_app"]["roles"])
-    assert all(r == {"role": "readWrite", "db": dbname} for r in by_name["dsbot_web"]["roles"])
-    assert {"role": "dsbot_migration_role", "db": dbname} in by_name["dsbot_migration"]["roles"]
-    assert by_name["dsbot_backup"]["roles"] == [{"role": "backup", "db": "admin"}]
+    # R26-07: ни встроенной readWrite, ни прочего прошлого состава — grants
+    # ровно из USER_PLAN (сверка через _desired_roles, без дублей литералов)
+    for username in pw:
+        assert by_name[username]["roles"] == migrate._desired_roles(username, dbname), username
 
     roles = db.command("rolesInfo", showPrivileges=True)["roles"]
-    mig_role = next(r for r in roles if r["role"] == "dsbot_migration_role")
-    actions = {a for p in mig_role["privileges"] for a in p["actions"]}
-    assert {"createIndex", "listIndexes", "collMod"} <= actions
-    assert "dropIndex" not in actions and "dropCollection" not in actions  # DDL-разрушение не раздаётся
+    by_role = {r["role"]: r for r in roles}
+    actions_of = {name: {a for p in doc["privileges"] for a in p["actions"]}
+                  for name, doc in by_role.items() if name in migrate.ROLE_PLAN}
+    for role, plan_actions in migrate.ROLE_PLAN.items():
+        assert actions_of[role] == set(plan_actions), role  # состав ровно планом
+    mig = actions_of["dsbot_migration_role"]
+    assert {"createIndex", "dropIndex"} <= mig  # runner пересобирает индексы (R26-07)
+    assert not (mig & {"dropCollection", "userAdmin", "grantRole", "revokeRole"})
+    for runtime_role in ("dsbot_runtime_bot_role", "dsbot_runtime_web_role"):
+        assert not (actions_of[runtime_role] & {"createIndex", "dropIndex", "dropCollection"})
 
 
 # ------------------------------------------------------------------ DB07

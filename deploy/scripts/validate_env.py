@@ -3,6 +3,14 @@
 
 Смотрит только ИМЕНА ключей и ФОРМАТ значений (digest/числа) — секреты наружу не
 печатаются никогда. staging не должен указывать на прод-тома/прод-базу (P03).
+
+R26-07: mongod поднят с --auth — env-файл обязан нести аутентифицированные URI
+(MONGO_BOT_URI/MONGO_WEB_URI/MONGO_ADMIN_URI/MONGO_BACKUP_URI/MONGO_RESTORE_URI),
+пароли пользователей плана migrate.py (DB_USER_ROOT/DB_PASS_ROOT и
+DB_USER_<USERNAME в ВЕРХНИЙ РЕГИСТР> — ровно так читает USER_PLAN), образ
+bootstrap-job'а (BOOTSTRAP_IMAGE, digest) и DSBOT_SCHEMA_MODE ∈ {verify, bootstrap}.
+Набор одинаков у production и staging: staging репетирует ровно тот прогон, что
+пойдёт на прод (изоляция же — прод-специфичные проверки томов/базы/порта ниже).
 """
 from __future__ import annotations
 
@@ -12,6 +20,9 @@ import re
 import sys
 
 DIGEST_RE = re.compile(r"^(?:[\w.\-]+/)?[\w.\-/]+@sha256:[0-9a-f]{64}$")
+# R26-07: аутентифицированный Mongo-URI = scheme://<userinfo>@… (без credentials
+# mongod с --auth клиента не пустит; плейсхолдер REPLACE_ME формат не ломает).
+AUTHED_URI_RE = re.compile(r"^mongodb(?:\+srv)?://[^/@]+@[^/]+")
 
 # R26-06 (п.4): точные отпечатки прод-идентичностей вместо подстроки "-prod".
 # Исторический прод-volume называется ровно "dsbot-media" — подстроку "-prod"
@@ -34,8 +45,34 @@ IMAGE_KEYS = [
     "BOT_STALKER_IMAGE",
     "BOT_CONTROLPLANE_IMAGE",
     "WEB_IMAGE",
+    # R26-07: image одноразового mongo-bootstrap (compose `image:` того же профиля)
+    "BOOTSTRAP_IMAGE",
 ]
-COMMON_REQUIRED = IMAGE_KEYS + [
+# R26-07: контракт Mongo --auth. Нужны ОБОИМ профилям: и production, и staging
+# compose интерполируют ${MONGO_BOT_URI}/${MONGO_WEB_URI} и сервис mongo-bootstrap
+# (${BOOTSTRAP_IMAGE}); staging репетирует ровно тот прогон, что пойдёт на прод.
+MONGO_URI_KEYS = [
+    "MONGO_BOT_URI",
+    "MONGO_WEB_URI",
+    "MONGO_ADMIN_URI",
+    "MONGO_BACKUP_URI",
+    "MONGO_RESTORE_URI",
+]
+# migrate.py читает пароли пользователей плана строго как
+# DB_USER_<USERNAME В ВЕРХНИЙ РЕГИСТР> из USER_PLAN (dsbot_app/dsbot_web/
+# dsbot_migration/dsbot_backup/dsbot_restore); DB_USER_ROOT/DB_PASS_ROOT —
+# имя и пароль root для localhost exception. Имена ниже сверены с USER_PLAN.
+MONGO_USER_KEYS = [
+    "DB_USER_ROOT",
+    "DB_PASS_ROOT",
+    "DB_USER_DSBOT_APP",
+    "DB_USER_DSBOT_WEB",
+    "DB_USER_DSBOT_MIGRATION",
+    "DB_USER_DSBOT_BACKUP",
+    "DB_USER_DSBOT_RESTORE",
+]
+DSBOT_SCHEMA_MODES = {"verify", "bootstrap"}
+COMMON_REQUIRED = IMAGE_KEYS + MONGO_URI_KEYS + MONGO_USER_KEYS + [
     "MONGO_VOLUME",
     "MEDIA_VOLUME",
     "DSBOT_UID",
@@ -44,6 +81,9 @@ COMMON_REQUIRED = IMAGE_KEYS + [
     "DISCORD_APPLICATION_ID",
     "EVENT_SIGNING_SECRET",
     "MONGO_DB",
+    # R26-07: runtime стартует в verify (DDL недоступен); bootstrap — только
+    # dev/первый job-runner прогон services/*/schema_mode.
+    "DSBOT_SCHEMA_MODE",
     # web (production-гарды T02 проверяет само приложение; здесь — наличие ключей)
     "DISCORD_CLIENT_ID",
     "DISCORD_CLIENT_SECRET",
@@ -86,6 +126,18 @@ def check(path: str, mode: str) -> list[str]:
         if value and not DIGEST_RE.match(value):
             errors.append(f"{key}: must be registry/name@sha256:<64 hex> (no tags, no latest)")
 
+    # R26-07: URI обязаны нести credentials (mongod с --auth), значения не
+    # печатаются — только имена ключей.
+    for key in MONGO_URI_KEYS:
+        value = env.get(key, "")
+        if value and not AUTHED_URI_RE.match(value):
+            errors.append(f"{key}: must be an authenticated mongodb://<user>@<host> URI "
+                          "(mongod runs with --auth, R26-07)")
+    mode_value = env.get("DSBOT_SCHEMA_MODE", "").strip().lower()
+    if mode_value and mode_value not in DSBOT_SCHEMA_MODES:
+        errors.append("DSBOT_SCHEMA_MODE must be \"verify\" (runtime, no DDL) or "
+                      "\"bootstrap\" (dev/first job-runner run only)")
+
     def is_int(v: str) -> bool:
         return v.isdigit()
 
@@ -102,6 +154,13 @@ def check(path: str, mode: str) -> list[str]:
     if mode == "staging":
         if env.get("MONGO_DB") == PROTECTED_DB:
             errors.append("staging MONGO_DB is the PRODUCTION database name")
+        # R26-07: ровно тот же P03-запрет внутри URI — staging не должен
+        # аутентифицироваться в прод-базу (authSource=voice_tracker exact).
+        for key in MONGO_URI_KEYS:
+            v = env.get(key, "")
+            if re.search(rf"authSource={re.escape(PROTECTED_DB)}(?:&|$)", v):
+                errors.append(f"staging {key} authenticates against the PRODUCTION "
+                              "database (authSource)")
         # R26-06 (п.4): exact fingerprints вместо подстроки "-prod" — исторический
         # прод-volume "dsbot-media" не содержит "-prod" и раньше проходил гард.
         for key in ("MONGO_VOLUME", "MEDIA_VOLUME"):

@@ -55,6 +55,23 @@ deploy/
   Переезд с Windows-host Mongo (:27017) — отдельная backup/restore миграция (T14),
   не молчаливая смена URI.
 
+## Mongo auth (R26-07)
+mongod проекта работает под `--auth`; все runtime-URI аутентифицированные и
+живут в env-файле: `MONGO_BOT_URI` (dsbot_app) для бот-сервисов, `MONGO_WEB_URI`
+(dsbot_web) для web, `MONGO_ADMIN_URI`/`MONGO_BACKUP_URI`/`MONGO_RESTORE_URI` —
+админ-гейты и backup/restore. Валидаторы отвергают безпарольный
+`mongodb://mongo…` и расхождение render-значений с env-ключами.
+Начальные права на **пустом томе** — один раз под профилем `bootstrap`
+(localhost exception только внутри mongo-контейнера):
+`docker compose -p <project> -f <compose-файл> --env-file <env> --profile bootstrap run
+--rm mongo-bootstrap python -m voice_tracker.migrate users --bootstrap`
+(пароли — `DB_USER_*`/`DB_PASS_ROOT` из того же env-файла), затем `migrate up`
+под `dsbot_migration` и штатный запуск: runtime стартует с
+`DSBOT_SCHEMA_MODE=verify` (только сверка схемы, DDL runner'у; `bootstrap` —
+исключительно dev/первый прогон job-runner'а). Повторный запуск команды чинит
+drift грантов (`ensure_users`). Ротация пароля: `updateUser pwd` → править
+URI в env → рестарт сервисов. Модель, роли и обоснование — `docs/adr/0005-mongo-auth-roles.md`.
+
 ## Первый запуск (Linux-хост)
 1. Установить docker engine + compose plugin; `systemctl enable --now docker`
    — docker стартует от root-сервиса systemd; контейнеры поднимает политика

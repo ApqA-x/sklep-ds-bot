@@ -29,6 +29,13 @@ load_backup_env() {
   [ -n "$MONGO_DB" ] || die "MONGO_DB not set in $ENV_FILE"
   MONGO_IMAGE="$(env_value MONGO_IMAGE)"
   [ -n "$MONGO_IMAGE" ] || die "MONGO_IMAGE not set in $ENV_FILE (restore media через mongo-образ)"
+  # R26-07: mongod под --auth — mongodump/mongorestore/mongosh-гейты работают
+  # только по аутентифицированным URI из env-файла. Обязательность проверяется
+  # в месте использования (backup — MONGO_BACKUP_URI, restore — ADMIN/RESTORE),
+  # значения не печатаются никогда.
+  MONGO_BACKUP_URI="$(env_value MONGO_BACKUP_URI)"
+  MONGO_ADMIN_URI="$(env_value MONGO_ADMIN_URI)"
+  MONGO_RESTORE_URI="$(env_value MONGO_RESTORE_URI)"
   RETENTION_DAILY="$(env_value RETENTION_DAILY)"; RETENTION_DAILY="${RETENTION_DAILY:-7}"
   RETENTION_WEEKLY="$(env_value RETENTION_WEEKLY)"; RETENTION_WEEKLY="${RETENTION_WEEKLY:-4}"
   command -v age >/dev/null 2>&1 || die "age not installed on this host (encryption, п.T14 D06)"
@@ -51,7 +58,13 @@ services_to_freeze() { # всё, что пишет (app-сервисы), кро�
 }
 
 dump_mongo_archive() { # mongo-контейнер живёт во время заморозки — exec ok
-  compose exec -T mongo mongodump --quiet --db "$MONGO_DB" --archive > "$1"
+  # R26-07: mongod под --auth — дампу нужен URI с встроенной ролью backup
+  # (dsbot_backup, authSource=admin из env-примеров). --db остаётся: в URI
+  # база не указана (путь "/"), конфликты с --uri нет. Значение секретно и
+  # в вывод не попадает (только как аргумент mongodump внутри контейнера).
+  [ -n "${MONGO_BACKUP_URI:-}" ] \
+    || die "MONGO_BACKUP_URI not set (R26-07: mongodump needs backup role)"
+  compose exec -T mongo mongodump --quiet --uri "$MONGO_BACKUP_URI" --db "$MONGO_DB" --archive > "$1"
   [ -s "$1" ] || die "mongodump produced empty archive"
 }
 

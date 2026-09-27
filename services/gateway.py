@@ -1940,7 +1940,12 @@ async def main() -> None:
 
     mongo_client = MongoClient(cfg.mongo_uri)
     repo = Repository(mongo_client[cfg.mongo_db])
-    repo.ensure_indexes(None)
+    # R26-07 (DB03): startup по умолчанию verify-only; DDL — только в явном bootstrap-режиме.
+    # getattr: stand-in cfg в тестах могут не нести новое поле — тогда более строгий режим.
+    if getattr(cfg, "schema_mode", "verify") == "bootstrap":
+        repo.ensure_indexes(None)
+    else:
+        repo.verify_startup()
 
     # E09 (R26-02): gateway — единственный writer порядка voice.events (seq
     # выдаётся под bucket-lock этого процесса). Свежий heartbeat другого

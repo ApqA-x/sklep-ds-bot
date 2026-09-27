@@ -18,6 +18,13 @@
 # dsbot-egress (bridge = NAT) для Discord REST/Gateway/OAuth; mongo/nats/
 # tracker/writer/controlplane в egress НЕ состоят.
 #
+# R26-07: auth включён — mongod поднят с --auth; все runtime-URI аутентифицированные
+# и приходят из env-файла: x-bot-env → ${MONGO_BOT_URI} (dsbot_app, без DDL-роли),
+# web → ${MONGO_WEB_URI} (dsbot_web); безпарольный URI на сервис mongo в compose
+# запрещён (проверяет validate_compose.py). Начальные права создаёт ОДНОРАЗОВЫЙ
+# mongo-bootstrap под ЯВНЫМ профилем bootstrap (в обычный up не входит; на staging
+# репетируется ровно тот прогон, что пойдёт на прод).
+#
 # Успех на NTFS НЕ подтверждает Linux-права (UID/GID, case sensitivity, atomic
 # rename) — эти проверки отдельные, на Linux-стенде (см. runbook раздел Linux).
 
@@ -35,13 +42,18 @@ x-defaults: &app-defaults
   user: "${DSBOT_UID:?set in staging env}:${DSBOT_GID:?set in staging env}"
 
 x-bot-env: &bot-env
-  MONGO_URI: mongodb://mongo:27017
+  # R26-07: mongod с --auth — bot-URI аутентифицированный (dsbot_app, DDL-роли нет)
+  # и берётся из env-файла staging; URI фиксирован на mongo-контейнер этого проекта.
+  MONGO_URI: "${MONGO_BOT_URI:?authenticated bot URI (dsbot_app, no DDL role) — env file}"
   NATS_URL: nats://nats:4222
   MEDIA_DIR: /data/media
 
 services:
   mongo:
     image: ${MONGO_IMAGE:?pin mongo:7 by digest in env file}
+    # R26-07: auth включён. Healthcheck-mongosh ping разрешён без credentials,
+    # поэтому его команда намеренно не меняется.
+    command: ["--auth"]
     restart: unless-stopped
     logging:
       driver: json-file
@@ -63,6 +75,27 @@ services:
         limits:
           cpus: "1.0"
           memory: 1G
+
+  # R26-07: одноразовый job начальных прав (`migrate users --bootstrap`,
+  # grants-сверка). Явный профиль: docker compose --profile bootstrap run
+  # mongo-bootstrap python -m voice_tracker.migrate users --bootstrap. НЕ
+  # автозапуск (restart: "no" + профиль) — иначе ломает повторные up.
+  # localhost exception mongod --auth принимает только с 127.0.0.1 — отсюда
+  # network_mode: service:mongo (пароли root/пользователей — из env_file).
+  mongo-bootstrap:
+    image: "${BOOTSTRAP_IMAGE:?python image with voice_tracker + pymongo}"
+    restart: "no"
+    network_mode: service:mongo
+    depends_on:
+      mongo:
+        condition: service_healthy
+    env_file:
+      - "${DSBOT_ENV_FILE:?set by deploy scripts (single source of env)}"
+    environment:
+      MONGO_URI: mongodb://127.0.0.1:27017
+      MONGO_DB: ${MONGO_DB:?}
+    user: "${DSBOT_UID:?}:${DSBOT_GID:?}"
+    profiles: ["bootstrap"]
 
   nats:
     image: ${NATS_IMAGE:?pin nats:2.10-alpine by digest in env file}
@@ -246,8 +279,9 @@ services:
     # wt-web api/config.py (набор идентичен production; см. комментарий там).
     # staging гоняет ТЕ ЖЕ production-гарды (T02 fail-closed), отличается только
     # изоляцией данных (свои volumes/DB/сеть) и тестовыми Discord-идентичностями.
+    # R26-07: web-URI аутентифицированный (dsbot_web, без DDL-роли) — из env-файла.
     environment:
-      MONGO_URI: mongodb://mongo:27017
+      MONGO_URI: "${MONGO_WEB_URI:?authenticated web URI (dsbot_web, no DDL role) — env file}"
       MEDIA_DIR: /data/media
       WEB_ENV: production
       MONGO_DB: ${MONGO_DB:?}

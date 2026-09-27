@@ -72,6 +72,10 @@ class FakeRepo:
     def ensure_indexes(self, _ctx) -> None:
         return None
 
+    # R26-07 (DB03): startup сервиса по умолчанию идёт в verify-only ветку.
+    def verify_startup(self) -> None:
+        return None
+
     def get_auto_unmute_user_ids(self, _ctx, guild_id: str) -> list[str]:
         return list(self.auto_unmute_ids.get(str(guild_id), []))
 

@@ -183,6 +183,28 @@ class Repository:
             )
         report.raise_if_incompatible()
 
+    def verify_startup(self) -> None:
+        """R26-07 (DB03): startup рантайма — только сверка схемы, никакого DDL.
+
+        Боевые роли Mongo намеренно не имеют createIndex/dropIndex/dropCollection,
+        поэтому единственный легальный путь к DDL — `python -m voice_tracker.migrate up`
+        под migration-ролью. Здесь же допустимо ровно два действия: CRUD-backfill
+        revision (тем же запросом, что и в ensure_indexes) и read-only verify_db,
+        несовместимость которого не скрывается, а поднимается вверх.
+
+        ensure_indexes остаётся режимом dev-стенда / job-runner'а
+        (DSBOT_SCHEMA_MODE=bootstrap) и на этом пути не вызывается.
+        """
+        # T06: идемпотентный backfill revision для старых документов (существующих не трогает)
+        self.guild_settings.update_many({"revision": {"$exists": False}}, {"$set": {"revision": 0}})
+        report = schema.verify_db(self.db, owners=("bot", "shared"))
+        if report.under_other_name:
+            logging.getLogger(__name__).info(
+                "schema: эквивалентные индексы под другими именами приняты как есть: %s",
+                ", ".join(report.under_other_name),
+            )
+        report.raise_if_incompatible()
+
     def _snowflake_created_at(self, message_id: str) -> datetime:
         # DISCORD_EPOCH: время зашито в snowflake — спасает, если событие прилетело без created_at
         try:

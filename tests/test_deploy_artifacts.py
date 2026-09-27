@@ -59,8 +59,27 @@ def _bot(name: str, envfile: str = ENV_PATH, **over) -> dict:
 
 def _good_cfg(mode: str, envfile: str = ENV_PATH) -> dict:
     egress = ["dsbot-data", "dsbot-egress"]
+    # R26-07: в ОТРЕНДЕРЕННОМ конфиге ${MONGO_BOT_URI}/${MONGO_WEB_URI} схлопнуты
+    # в значения env-файла; фикстура обязана нести ровно их (при недоступном
+    # файле — синтетические аутентифицированные URI той же формы).
+    env_vals = validate_compose._parse_env_values(envfile) or {}
+    bot_uri = env_vals.get("MONGO_BOT_URI") or (
+        "mongodb://dsbot_app:pw-app@mongo:27017/?authSource=voice_tracker"
+    )
+    web_uri = env_vals.get("MONGO_WEB_URI") or (
+        "mongodb://dsbot_web:pw-web@mongo:27017/?authSource=voice_tracker"
+    )
     services = {
-        "mongo": _svc(),
+        "mongo": _svc(command=["--auth"]),
+        # R26-07: одноразовый bootstrap-job: restart "no", профиль bootstrap,
+        # localhost exception — только с 127.0.0.1 внутри сетевого namespace mongo.
+        "mongo-bootstrap": _svc(
+            restart="no",
+            profiles=["bootstrap"],
+            network_mode="service:mongo",
+            networks=[],
+            environment={"MONGO_URI": "mongodb://127.0.0.1:27017"},
+        ),
         "nats": _svc(),
         "gateway": _bot("gateway", envfile, networks=egress,
                         volumes=[{"type": "volume", "source": "media", "target": "/data/media"}]),
@@ -77,6 +96,9 @@ def _good_cfg(mode: str, envfile: str = ENV_PATH) -> dict:
             environment={"WEB_ENV": "production"},
         ),
     }
+    for name in validate_compose.BOT_ENVFILE_SERVICES:
+        services[name].setdefault("environment", {})["MONGO_URI"] = bot_uri
+    services["web"]["environment"]["MONGO_URI"] = web_uri
     return {
         "name": validate_compose.EXPECTED_PROJECT[mode],
         "services": services,
@@ -153,6 +175,7 @@ def test_host_mongo_uri_and_prod_db_in_staging_rejected() -> None:
 
 
 def _write_env(tmp: Path, mode: str, name: str | None = None, **over) -> Path:
+    db = "voice_tracker" if mode == "production" else "voice_tracker_staging"
     env = {
         "MONGO_IMAGE": f"mongo@sha256:{HEX64}",
         "NATS_IMAGE": f"nats@sha256:{HEX64}",
@@ -164,6 +187,23 @@ def _write_env(tmp: Path, mode: str, name: str | None = None, **over) -> Path:
         "BOT_STALKER_IMAGE": f"ghcr.io/apqa-x/sklep-ds-bot/stalker@sha256:{HEX64}",
         "BOT_CONTROLPLANE_IMAGE": f"ghcr.io/apqa-x/sklep-ds-bot/controlplane@sha256:{HEX64}",
         "WEB_IMAGE": f"ghcr.io/apqa-x/sklep-ds-bot-web@sha256:{HEX64}",
+        # R26-07: mongod под --auth — аутентифицированные URI (синтетические креды),
+        # пароли пользователей плана migrate.py (DB_USER_<USERNAME.upper()>) и
+        # image bootstrap-job'а.
+        "BOOTSTRAP_IMAGE": f"ghcr.io/apqa-x/sklep-ds-bot/gateway@sha256:{HEX64}",
+        "MONGO_BOT_URI": f"mongodb://dsbot_app:pw-app@mongo:27017/?authSource={db}",
+        "MONGO_WEB_URI": f"mongodb://dsbot_web:pw-web@mongo:27017/?authSource={db}",
+        "MONGO_ADMIN_URI": "mongodb://dsbot_root:pw-root@mongo:27017/admin?authSource=admin",
+        "MONGO_BACKUP_URI": "mongodb://dsbot_backup:pw-bkp@mongo:27017/?authSource=admin",
+        "MONGO_RESTORE_URI": "mongodb://dsbot_restore:pw-rst@mongo:27017/?authSource=admin",
+        "DB_USER_ROOT": "dsbot_root",
+        "DB_PASS_ROOT": "pw-root",
+        "DB_USER_DSBOT_APP": "pw-app",
+        "DB_USER_DSBOT_WEB": "pw-web",
+        "DB_USER_DSBOT_MIGRATION": "pw-mig",
+        "DB_USER_DSBOT_BACKUP": "pw-bkp",
+        "DB_USER_DSBOT_RESTORE": "pw-rst",
+        "DSBOT_SCHEMA_MODE": "verify",
         "MONGO_VOLUME": f"dsbot-{mode}-mongo-data",
         "MEDIA_VOLUME": f"dsbot-{mode}-media",
         "DSBOT_UID": "10001",
@@ -171,7 +211,7 @@ def _write_env(tmp: Path, mode: str, name: str | None = None, **over) -> Path:
         "DISCORD_TOKEN": "t",
         "DISCORD_APPLICATION_ID": "a",
         "EVENT_SIGNING_SECRET": "s" * 32,
-        "MONGO_DB": "voice_tracker" if mode == "production" else "voice_tracker_staging",
+        "MONGO_DB": db,
         "DISCORD_CLIENT_ID": "c",
         "DISCORD_CLIENT_SECRET": "cs",
         "WEB_SESSION_SECRET": "x" * 40,
@@ -438,6 +478,141 @@ def test_v2617_rendered_project_name_is_pinned() -> None:
     assert "identity isolation" in errors
 
 
+# ------------------------------- R26-07: Mongo --auth, env-URI, mongo-bootstrap
+
+
+def test_r2607_mongo_without_auth_command_rejected() -> None:
+    cfg = _good_cfg("production")
+    cfg["services"]["mongo"].pop("command")
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "must contain --auth" in errors
+
+
+def test_r2607_unauthenticated_mongo_uri_in_environment_rejected() -> None:
+    """Ни один service.environment не обязан был пережить безпарольный
+    mongodb://mongo[:порт] после включения --auth."""
+    cfg = _good_cfg("production")
+    cfg["services"]["tracker"]["environment"]["MONGO_URI"] = "mongodb://mongo:27017"
+    cfg["services"]["web"]["environment"]["MONGO_URI"] = "mongodb://mongo"
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "[tracker] MONGO_URI is an unauthenticated mongodb:// URI" in errors
+    assert "[web] MONGO_URI is an unauthenticated mongodb:// URI" in errors
+
+
+def test_r2607_bootstrap_service_contract_rejected_variants() -> None:
+    # отсутствие (когда прочие profile-сервисы в рендере видны) — падение
+    cfg = _good_cfg("production")
+    cfg["services"].pop("mongo-bootstrap")
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "mongo-bootstrap" in errors and "missing from render" in errors
+    # без профиля — «автозапуск» и поломка повторных up
+    cfg = _good_cfg("production")
+    cfg["services"]["mongo-bootstrap"].pop("profiles")
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "must sit behind the \"bootstrap\" profile" in errors
+    # resident-restart у одноразового job — запрещён
+    cfg = _good_cfg("production")
+    cfg["services"]["mongo-bootstrap"]["restart"] = "unless-stopped"
+    errors = "\n".join(validate_compose.check(cfg, "production"))
+    assert "one-shot bootstrap must have restart" in errors
+
+
+def test_r2607_profile_filtered_render_tolerates_absent_bootstrap() -> None:
+    """Рендеры compose, отсеивающие неактивные profile-сервисы, не показывают ни
+    controlplane, ни mongo-bootstrap — отсутствие не должно быть ложной тревогой
+    (контракт держат YAML-тесты)."""
+    cfg = _good_cfg("production")
+    cfg["services"].pop("mongo-bootstrap")
+    cfg["services"].pop("controlplane")
+    assert validate_compose.check(cfg, "production") == []
+
+
+def test_r2607_bot_uri_must_be_the_env_bot_uri(tmp_path) -> None:
+    """MONGO_URI бота в рендере обязан ровно совпадать с MONGO_BOT_URI выбранного
+    env-файла (web — с MONGO_WEB_URI): подмена на URI с DDL-ролью (migration) —
+    скрытая эскалация прав, падает по имени ключа без раскрытия значений."""
+    selected = _write_env(tmp_path, "production")
+    cfg = _good_cfg("production", envfile=str(selected))
+    assert validate_compose.check(cfg, "production", env_file=str(selected)) == []
+    cfg["services"]["gateway"]["environment"]["MONGO_URI"] = (
+        "mongodb://dsbot_migration:pw-mig@mongo:27017/?authSource=voice_tracker"
+    )
+    cfg["services"]["web"]["environment"]["MONGO_URI"] = (
+        "mongodb://dsbot_app:pw-app@mongo:27017/?authSource=voice_tracker"
+    )
+    errors = "\n".join(validate_compose.check(cfg, "production", env_file=str(selected)))
+    assert "[gateway] MONGO_URI does not match the selected env file's MONGO_BOT_URI" in errors
+    assert "[web] MONGO_URI does not match the selected env file's MONGO_WEB_URI" in errors
+    # секреты в сообщение не попадают
+    assert "pw-mig" not in errors and "pw-app" not in errors
+
+
+def test_r2607_yaml_compose_auth_uris_and_bootstrap() -> None:
+    """Форма YAML: mongod с --auth; x-bot-env → ${MONGO_BOT_URI...}, web →
+    ${MONGO_WEB_URI...}; безпарольный URI на mongo-контейнер не встречается и в
+    комментариях; mongo-bootstrap — restart "no" + профиль bootstrap +
+    network_mode: service:mongo (localhost exception только с 127.0.0.1)."""
+    for path in (DEPLOY / "production" / "compose.yml", DEPLOY / "staging" / "compose.staging.yml"):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        assert doc["services"]["mongo"]["command"] == ["--auth"], path.name
+        assert "mongodb://mongo:27017" not in text, path.name
+        assert "MONGO_URI: mongodb://mongo" not in text, path.name
+        assert doc["x-bot-env"]["MONGO_URI"].startswith("${MONGO_BOT_URI:?"), path.name
+        assert doc["services"]["web"]["environment"]["MONGO_URI"].startswith("${MONGO_WEB_URI:?"), path.name
+        boot = doc["services"]["mongo-bootstrap"]
+        assert boot["image"].startswith("${BOOTSTRAP_IMAGE:?"), path.name
+        assert boot["restart"] == "no", path.name
+        assert boot["profiles"] == ["bootstrap"], path.name
+        assert boot["network_mode"] == "service:mongo", path.name
+        assert boot["environment"]["MONGO_URI"] == "mongodb://127.0.0.1:27017", path.name
+        assert str(boot["env_file"][0]).startswith("${DSBOT_ENV_FILE:?"), path.name
+        assert boot["user"] == "${DSBOT_UID:?}:${DSBOT_GID:?}", path.name
+        assert boot["depends_on"]["mongo"]["condition"] == "service_healthy", path.name
+
+
+def test_r2607_env_requires_auth_uris_passwords_and_schema_mode(tmp_path) -> None:
+    good = _write_env(tmp_path, "production")
+    assert validate_env.check(str(good), "production") == []
+    # отсутствие любого нового обязательного ключа — падение
+    for key in ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_ADMIN_URI", "MONGO_BACKUP_URI",
+                "MONGO_RESTORE_URI", "DB_USER_ROOT", "DB_PASS_ROOT", "DB_USER_DSBOT_APP",
+                "DB_USER_DSBOT_WEB", "DB_USER_DSBOT_MIGRATION", "DB_USER_DSBOT_BACKUP",
+                "DB_USER_DSBOT_RESTORE", "BOOTSTRAP_IMAGE", "DSBOT_SCHEMA_MODE"):
+        bad = _write_env(tmp_path, "production", name=f".env.miss.{key}", **{key: ""})
+        errors = "\n".join(validate_env.check(str(bad), "production"))
+        assert f"missing required key: {key}" in errors, key
+    # staging требует тот же auth-набор (репетиция прода) и не пускает прод-authSource
+    good_st = _write_env(tmp_path, "staging")
+    assert validate_env.check(str(good_st), "staging") == []
+    sneaky = _write_env(tmp_path, "staging",
+                        MONGO_BOT_URI="mongodb://dsbot_app:pw@mongo:27017/?authSource=voice_tracker")
+    errors = "\n".join(validate_env.check(str(sneaky), "staging"))
+    assert "MONGO_BOT_URI authenticates against the PRODUCTION database" in errors
+
+
+def test_r2607_env_rejects_unauthenticated_uri_value(tmp_path) -> None:
+    env = _write_env(tmp_path, "production", MONGO_BOT_URI="mongodb://mongo:27017")
+    errors = "\n".join(validate_env.check(str(env), "production"))
+    assert "MONGO_BOT_URI: must be an authenticated" in errors
+
+
+def test_r2607_env_rejects_unknown_schema_mode(tmp_path) -> None:
+    env = _write_env(tmp_path, "production", DSBOT_SCHEMA_MODE="garbage")
+    errors = "\n".join(validate_env.check(str(env), "production"))
+    assert "DSBOT_SCHEMA_MODE" in errors
+    # bootstrap допустим (dev/первый job-runner прогон), verify допустим
+    assert validate_env.check(str(_write_env(tmp_path, "production",
+                                             name=".env.boot", DSBOT_SCHEMA_MODE="bootstrap")),
+                              "production") == []
+
+
+def test_r2607_env_requires_digest_pinned_bootstrap_image(tmp_path) -> None:
+    env = _write_env(tmp_path, "production", BOOTSTRAP_IMAGE="python:3.12-slim")
+    errors = "\n".join(validate_env.check(str(env), "production"))
+    assert "BOOTSTRAP_IMAGE" in errors and "sha256" in errors
+
+
 # ------------------------------------------------------------- compose-файлы как YAML
 
 
@@ -462,9 +637,11 @@ def test_compose_sources_have_no_build_no_tags_no_bind(path: Path) -> None:
     assert with_ports == {"web"}
     assert services["controlplane"]["profiles"] == ["controlplane"]
     assert doc["networks"]["dsbot-data"]["internal"] is True
-    for n in ("gateway", "tracker", "writer", "commands", "activity", "stalker", "web", "mongo", "nats"):
+    for n in ("gateway", "tracker", "writer", "commands", "activity", "stalker", "web",
+              "mongo", "mongo-bootstrap", "nats"):
         assert n in services
-    assert services["web"]["environment"]["MONGO_URI"] == "mongodb://mongo:27017"
+    # R26-07: web-URI — плейсхолдер env-ключа (аутентифицированный dsbot_web)
+    assert services["web"]["environment"]["MONGO_URI"].startswith("${MONGO_WEB_URI:?")
     assert "host.docker.internal" not in path.read_text(encoding="utf-8")
     # media: writable только у gateway; web ro
     gw = services["gateway"].get("volumes") or []

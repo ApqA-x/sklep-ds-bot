@@ -38,18 +38,16 @@
    Для `preflight.sh` нужен `docker buildx` (проверка digest/platform через
    `docker buildx imagetools inspect`); для приватного ghcr — выполненный
    `docker login ghcr.io`.
-3. **Mongo (решения R26-07)**: в текущем репозитории зафиксировано:
-   `MONGO_IMAGE` — контейнер этого же проекта на internal-сети **без
-   published ports и без auth** (`deploy/production/compose.yml`: `x-bot-env`
-   фиксирует `MONGO_URI: mongodb://mongo:27017`). Наружу публикуется только
-   web. Если принято решение о **внешнем Mongo + auth**, оно должно быть
-   отражено явно: изменение `x-bot-env`/`services.*.environment` в
-   `compose.yml` (MONGO_URI с учётными данными — только в env-файле хоста), а
-   роли least-privilege создаёт `python -m voice_tracker.migrate users` (T10,
-   читает `DB_USER_*` из окружения контейнера). До такого изменения compose
-   этот runbook исполняется с внутренним mongo-контейнером как есть; молча
-   подменять URI env-переменной нельзя — её в `COMMON_REQUIRED`
-   (`deploy/scripts/validate_env.py`) нет.
+3. **Mongo (решение R26-07 принято и зафиксировано в коде — ADR-0005)**: контейнер этого же
+   проекта на internal-сети, без published ports, но **под `--auth`**
+   (`deploy/production/compose.yml`). Все URI приходят из env-файла:
+   `MONGO_BOT_URI`/`MONGO_WEB_URI` (runtime, без DDL-роли), `MONGO_ADMIN_URI`
+   (гейты mongosh), `MONGO_BACKUP_URI`/`MONGO_RESTORE_URI` (backup/restore);
+   начальные права на пустом томе создаёт `python -m voice_tracker.migrate
+   users --bootstrap` (localhost exception, профиль compose `bootstrap`;
+   пароли `DB_USER_*`/`DB_PASS_ROOT` из env), роли least-privilege и их
+   grants-сверка — `migrate users` (DB06). Молча подменять URI нельзя:
+   сверка env-ключей с рендером — в `validate_compose.py`.
 4. **NATS**: то же решение, что и по Mongo — в текущем compose это контейнер
    проекта (`nats://nats:4222`, internal-сеть, мониторинг `:8222` только
    внутри сети). Отдельного env-ключа для NATS_URL нет.
@@ -154,6 +152,13 @@ deploy/scripts/linux_init.sh production
 docker compose -p dsbot-prod -f deploy/production/compose.yml \
   --env-file deploy/production/.env up -d mongo nats
 ```
+
+Сразу после подъёма **пустого** тома — одноразовый bootstrap прав (R26-07,
+ADR-0005; без него mongod под `--auth` не пустит ни гейты `restore.sh`, ни
+приложения): той же командой добавить `--profile bootstrap run --rm
+mongo-bootstrap python -m voice_tracker.migrate users --bootstrap`
+(localhost exception изнутри mongo-контейнера, пароли — `DB_USER_*`/
+`DB_PASS_ROOT` из env).
 
 Репетиция в режиме `rehearsal` (по умолчанию): цели генерируются прогоном —
 БД `voice_tracker_production_rehearsal_<runid>` (строгий allowlist
@@ -398,4 +403,5 @@ Docker Desktop с Linux-контейнерами на Windows-машине **Н�
 
 До подтверждения всех пунктов релиз-статус остаётся **candidate/staged**, не
 released. Блокираторы, не снимаемые этим пакетом: D12 (хост), D09-details
-(окно), решение R26-07 (внешний Mongo+auth vs контейнер compose).
+(окно). Решение R26-07 снято: Mongo остаётся контейнером compose, но под
+`--auth` с env-URI и least-privilege ролями (ADR-0005).

@@ -18,6 +18,18 @@ R26-06 дополнения:
   - п.4: project name в рендере зафиксирован (production=dsbot-prod,
     staging=dsbot-staging) — изоляция идентичностей P03.
 
+R26-07 дополнения (Mongo --auth):
+  - mongo обязан запускаться с command: ["--auth"];
+  - ни один environment не содержит безпарольный URI на контейнерный mongo
+    (mongodb://mongo[:порт] без credentials) — runtime-URI обязаны приходить из
+    env-файла: bot-сервисы → MONGO_BOT_URI, web → MONGO_WEB_URI (при доступном
+    env-файле значения MONGO_URI сверяются с этими ключами). Исключение —
+    mongodb://127.0.0.1 у mongo-bootstrap: единственный легальный путь
+    localhost exception;
+  - mongo-bootstrap: profile "bootstrap", restart "no" (одноразовый job, не
+    автозапуск). Если рендер данной версии compose отсеивает profile-сервисы
+    (ни один сервис не вернул profiles), контракт bootstrap покрывают YAML-тесты.
+
 Выход: 0 = инварианты соблюдены; 1 = нарушение (перечислены); 2 = неверный ввод.
 """
 from __future__ import annotations
@@ -29,8 +41,13 @@ import re
 import sys
 
 DIGEST_RE = re.compile(r"^(?:[\w.\-]+/)?[\w.\-/]+@sha256:[0-9a-f]{64}$")
+# R26-07: безпарольный URI на контейнерный mongo (host ровно "mongo", без
+# userinfo) — с --auth нерабочий, а его наличие значит, что секция не мигрировала
+# на env-URI. 127.0.0.1 (localhost exception mongo-bootstrap) сюда не попадает.
+UNAUTHENTICATED_MONGO_URI_RE = re.compile(r"^mongodb://mongo(?::\d+)?(?:[/?].*)?$")
 ALLOWED_SERVICES = {
     "mongo",
+    "mongo-bootstrap",
     "nats",
     "gateway",
     "tracker",
@@ -41,8 +58,13 @@ ALLOWED_SERVICES = {
     "web",
     "controlplane",
 }
+# R26-07: одноразовый bootstrap-job начальных прав — НЕ resident-сервис:
+# restart "no", профиль bootstrap (в обычный up не входит).
+BOOTSTRAP_SERVICE = "mongo-bootstrap"
+BOOTSTRAP_PROFILE = "bootstrap"
 IMAGE_VARS = {
     "mongo": "MONGO_IMAGE",
+    "mongo-bootstrap": "BOOTSTRAP_IMAGE",
     "nats": "NATS_IMAGE",
     "gateway": "BOT_GATEWAY_IMAGE",
     "tracker": "BOT_TRACKER_IMAGE",
@@ -208,10 +230,16 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
         if name != "web" and _service_ports(svc):
             errors.append(f"[{name}] publishes ports; only web ingress may (P07)")
         restart = svc.get("restart") or svc.get("restart_policy") or ""
-        if not restart or restart in {"no", "never"}:
-            errors.append(f"[{name}] missing restart policy")
+        if name == BOOTSTRAP_SERVICE:
+            # R26-07: одноразовый job, resident-политика запрещена в обратную
+            # сторону — restart "no" обязателен (иначе пересоздаётся на каждом up).
+            if restart not in {"no", "never"}:
+                errors.append(f"[{name}] one-shot bootstrap must have restart: \"no\" (R26-07)")
+        else:
+            if not restart or restart in {"no", "never"}:
+                errors.append(f"[{name}] missing restart policy")
         resources = ((svc.get("deploy") or {}).get("resources") or {}).get("limits") or {}
-        if not resources.get("cpus") and not resources.get("memory"):
+        if name != BOOTSTRAP_SERVICE and not resources.get("cpus") and not resources.get("memory"):
             errors.append(f"[{name}] no resource limits")
         logging_cfg = svc.get("logging") or {}
         options = logging_cfg.get("options") or {}
@@ -336,6 +364,56 @@ def check(cfg: dict, mode: str, env_file: str | None = None) -> list[str]:
         uri = str(_environment(svc).get("MONGO_URI") or "")
         if "host.docker.internal" in uri:
             errors.append(f"[{name}] MONGO_URI points at host.docker.internal — prod DB migration must be an explicit backup/restore step (T14), not a silent URI")
+
+    # ------------------------------------------------ R26-07: Mongo --auth ----
+    mongo_svc = services.get("mongo") or {}
+    cmd = mongo_svc.get("command")
+    tokens = cmd if isinstance(cmd, list) else str(cmd or "").split()
+    if "--auth" not in [str(t) for t in tokens]:
+        errors.append("[mongo] command must contain --auth (R26-07: runtime URI "
+                      "authentication is meaningless against an auth-less mongod)")
+
+    # безпарольный URI на контейнерный mongo: с --auth нерабочий, а его наличие
+    # в environment значит, что секция не переехала на env-URI (MONGO_BOT_URI /
+    # MONGO_WEB_URI). Сообщения — только ИМЕНА ключей, значения (секреты) не печатаются.
+    for name, svc in services.items():
+        uri = str(_environment(svc).get("MONGO_URI") or "")
+        if UNAUTHENTICATED_MONGO_URI_RE.match(uri):
+            errors.append(f"[{name}] MONGO_URI is an unauthenticated mongodb:// URI — "
+                          "R26-07 requires the credentialed URI from the env file "
+                          "(MONGO_BOT_URI for bot services, MONGO_WEB_URI for web)")
+
+    # x-bot-env/services обязаны резолвиться ровно в env-ключи своего уровня.
+    # В рендере плейсхолдер ${MONGO_BOT_URI...} схлопнут в значение env-файла,
+    # поэтому при доступном env-файле сверяем значение MONGO_URI с ними.
+    if env_values is not None:
+        for ref_key, names in (("MONGO_BOT_URI", BOT_ENVFILE_SERVICES), ("MONGO_WEB_URI", ("web",))):
+            want = env_values.get(ref_key, "")
+            if not want:
+                continue
+            for name in names:
+                svc = services.get(name)
+                if svc is None:
+                    continue
+                uri = str(_environment(svc).get("MONGO_URI") or "")
+                if uri and uri != want:
+                    errors.append(f"[{name}] MONGO_URI does not match the selected env "
+                                  f"file's {ref_key} (R26-07 least privilege)")
+
+    # mongo-bootstrap: contract одноразового job'а (restart/profile проверены и
+    # выше по циклу, тут — сам факт присутствия в рендере и профиль).
+    boot = services.get(BOOTSTRAP_SERVICE)
+    if boot is None:
+        # рендеры compose, отсеивающие неактивные profile-сервисы, не покажут и
+        # controlplane — тогда отсутствие bootstrap не ложная тревога; контракт
+        # покрывают YAML-тесты test_deploy_artifacts.
+        if any(s.get("profiles") for s in services.values()):
+            errors.append(f"[{BOOTSTRAP_SERVICE}] missing from render while other "
+                          "profiled services are present (R26-07 one-shot bootstrap job)")
+    else:
+        if BOOTSTRAP_PROFILE not in (boot.get("profiles") or []):
+            errors.append(f"[{BOOTSTRAP_SERVICE}] must sit behind the \"{BOOTSTRAP_PROFILE}\" "
+                          "profile — auto-start breaks repeated ups (R26-07)")
 
     return errors
 
