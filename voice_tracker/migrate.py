@@ -168,11 +168,26 @@ def _apply_audit_state_index(db: Any, dry: bool) -> dict:
     return {"index": f"{spec.collection}.{spec.name}", "duplicates": dups, "dryRun": dry}
 
 
+def _apply_sweep_cursor_indexes(db: Any, dry: bool) -> dict:
+    """M5 (R26-01): индексы курсорного sweep'а — forward-выборка (subject,createdAt,_id)
+    и retry/oldest-выборки (consumer,state,createdAt). Аддитивны: старый код их не
+    требует, новый деградирует в in-memory sort (верно, но дороже), rollback
+    приложения безопасен."""
+    created: list[str] = []
+    for name in ("event_log_subject_createdAt_id", "event_inbox_consumer_state_createdAt"):
+        spec = next(s for s in MANIFEST if s.name == name)
+        if not dry:
+            db[spec.collection].create_index(list(spec.keys), **spec.create_kwargs())
+        created.append(f"{spec.collection}.{spec.name}")
+    return {"indexes": created, "dryRun": dry}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
     Migration(3, "discord-audit-entry-unique", _apply_discord_audit_unique, backward_compatible=False),
     Migration(4, "discord-audit-state-unique", _apply_audit_state_index, backward_compatible=True),
+    Migration(5, "eventlog-sweep-cursor-indexes", _apply_sweep_cursor_indexes, backward_compatible=True),
 )
 
 

@@ -177,6 +177,15 @@ MANIFEST: tuple[IndexSpec, ...] = (
     # два web-worker'а при первом insert создали бы по документу и курсоры разъехались.
     _spec(DAS, [("guildId", 1)], owner="runner", unique=True,
           name="discord_audit_state_guildId_unique"),
+    # R26-01 (M5): forward-скан sweep'а идёт курсором (createdAt,_id) за позицией
+    # consumer'а — без индекса (subject,createdAt,_id) сортировка tie-break'а
+    # выливалась бы в in-memory sort всего хвоста журнала.
+    _spec(EL, [("subject", 1), ("createdAt", 1), ("_id", 1)], owner="runner",
+          name="event_log_subject_createdAt_id"),
+    # R26-01: retry-проход и oldest-pending метрики выбираются фильтром
+    # (consumer,state) c сортировкой createdAt — индекс держит их индексообразными.
+    _spec(EI, [("consumer", 1), ("state", 1), ("createdAt", 1)], owner="runner",
+          name="event_inbox_consumer_state_createdAt"),
     # --- T10.1: обнаружены read-only снимком прод-Mongo 2026-09-25 и НЕ объявлены ни в
     # bot, ни в web коде. Т10.7 запрещает молча удалять «выглядящие лишними» индексы:
     # они могут держать инвариант старых версий. owner=legacy — документированы,

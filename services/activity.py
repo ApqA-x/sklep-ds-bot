@@ -465,8 +465,12 @@ async def main() -> None:
                     [domain.SUBJECT_ACTIVITY_EVENT],
                     handle_activity,
                     max_deliver=cfg.event_max_deliver,
+                    scan_limit=cfg.event_sweep_scan_limit,
+                    gap_seconds=cfg.event_sweep_gap_seconds,
                 )
-                stats = eventlog.pending_stats(repo.db, "activity", [domain.SUBJECT_ACTIVITY_EVENT])
+                stats = await asyncio.to_thread(
+                    eventlog.pending_stats, repo.db, "activity", [domain.SUBJECT_ACTIVITY_EVENT]
+                )
                 if n or stats["backlog"] or stats["quarantined"]:
                     logger.info("activity event sweep delivered=%s %s", n, stats)
             except asyncio.CancelledError:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hmac
 import inspect
@@ -164,7 +165,9 @@ class Bus:
                 if consumer is not None and db is not None:
                     from . import eventlog
 
-                    eventlog.quarantine_poison(db, consumer, subject, _as_bytes(data), str(exc))
+                    await asyncio.to_thread(
+                        eventlog.quarantine_poison, db, consumer, subject, _as_bytes(data), str(exc)
+                    )
                 else:
                     logger.warning("nats envelope error subject=%s: %s", subject, exc)
                 return
