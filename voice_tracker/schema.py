@@ -126,6 +126,10 @@ MANIFEST: tuple[IndexSpec, ...] = (
     # --- T09 outbox/inbox
     _spec(EL, [("subject", 1), ("createdAt", 1)], name="event_log_subject_createdAt"),
     _spec(EL, [("publishedAt", 1)], name="event_log_unpublished", partial={"publishedAt": None}),
+    # R26-02 (M6): гейт порядка читает предшественников (subject, scope, seq)
+    # на каждой доставке — runner-owned, как индексы свипа M5 (DDL не в startup).
+    _spec(EL, [("subject", 1), ("scope", 1), ("seq", 1)], owner="runner",
+          name="event_log_subject_scope_seq"),
     _spec(EI, [("consumer", 1), ("state", 1)], name="event_inbox_consumer_state"),
     _spec(EI, [("eventId", 1)], name="event_inbox_eventId"),
     # --- invites

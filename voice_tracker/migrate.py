@@ -182,12 +182,23 @@ def _apply_sweep_cursor_indexes(db: Any, dry: bool) -> dict:
     return {"indexes": created, "dryRun": dry}
 
 
+def _apply_ordering_gate_index(db: Any, dry: bool) -> dict:
+    """M6 (R26-02): индекс гейта порядка доставки (subject, scope, seq) —
+    предшественники scope читаются на каждой доставке. Аддитивен: гейт без
+    индекса верен, но стоит дороже; rollback приложения безопасен."""
+    spec = next(s for s in MANIFEST if s.name == "event_log_subject_scope_seq")
+    if not dry:
+        db[spec.collection].create_index(list(spec.keys), **spec.create_kwargs())
+    return {"index": f"{spec.collection}.{spec.name}", "dryRun": dry}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
     Migration(3, "discord-audit-entry-unique", _apply_discord_audit_unique, backward_compatible=False),
     Migration(4, "discord-audit-state-unique", _apply_audit_state_index, backward_compatible=True),
     Migration(5, "eventlog-sweep-cursor-indexes", _apply_sweep_cursor_indexes, backward_compatible=True),
+    Migration(6, "eventlog-ordering-gate-index", _apply_ordering_gate_index, backward_compatible=True),
 )
 
 

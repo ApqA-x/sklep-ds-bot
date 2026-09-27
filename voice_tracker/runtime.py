@@ -87,6 +87,9 @@ class Config:
     # R26-01: ширина окна gap-прохода (0 = выключен) и потолок строк страницы
     event_sweep_gap_seconds: int = 120
     event_sweep_scan_limit: int = 2000
+    # E09 (R26-02): окно «живого» heartbeat другого instance для отказа старту
+    # второго gateway; 0 = guard выключен (только по явному решению оператора).
+    gateway_singleton_max_age_seconds: int = 90
 
 
 def load_config(env: Any = None) -> Config:
@@ -115,6 +118,9 @@ def load_config(env: Any = None) -> Config:
         source, "EVENT_SWEEP_GAP_SECONDS", cfg.event_sweep_gap_seconds, allow_zero=True
     )
     cfg.event_sweep_scan_limit = _getenv_int(source, "EVENT_SWEEP_SCAN_LIMIT", cfg.event_sweep_scan_limit)
+    cfg.gateway_singleton_max_age_seconds = _getenv_int(
+        source, "GATEWAY_SINGLETON_MAX_AGE_SECONDS", cfg.gateway_singleton_max_age_seconds, allow_zero=True
+    )
     cfg.media_min_free_bytes = _getenv_int(
         source, "MEDIA_MIN_FREE_BYTES", cfg.media_min_free_bytes, allow_zero=True
     )

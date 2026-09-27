@@ -110,6 +110,23 @@ class RecordingCollection:
         self.writes: list[dict] = []
         self.fail_times = 0
 
+    def find_one(self, flt):
+        return dict(self.docs[flt["worker"]]) if flt["worker"] in self.docs else None
+
+    def update_one(self, flt, update, upsert=False):
+        doc = self.docs.get(flt["worker"])
+        matched = doc is not None and all(doc.get(k) == v for k, v in flt.items() if k != "$or")
+        if matched:
+            doc.update(update.get("$set", {}))
+        elif upsert:
+            new = {k: v for k, v in flt.items() if not str(k).startswith("$")}
+            new.update(update.get("$setOnInsert", {}))
+            new.update(update.get("$set", {}))
+            self.docs[flt["worker"]] = new
+        else:
+            return
+        self.writes.append(dict(self.docs[flt["worker"]]))
+
     def replace_one(self, flt, doc, upsert=False) -> None:
         if self.fail_times > 0:
             self.fail_times -= 1
@@ -142,6 +159,7 @@ async def test_heartbeat_writes_loops_and_deps() -> None:
     await sup.shutdown()
     doc = db.coll.docs["writer"]
     assert isinstance(doc["updated_at"], datetime)
+    assert doc["instance"] == supervise.INSTANCE_ID
     assert doc["deps"] == {"nats": {"connected": True}}
     names = {loop["name"] for loop in doc["loops"]}
     assert "writer-heartbeat" in names
@@ -234,3 +252,66 @@ def test_healthcheck_main_requires_env(monkeypatch, capsys) -> None:
     err = capsys.readouterr().err
     assert "MONGO_URI" in err
     assert "mongodb://" not in err
+
+
+# ------------------------------------------------------- E09 single-writer guard
+
+
+def test_single_writer_evaluate_matrix() -> None:
+    now = datetime.now(UTC)
+    assert supervise.evaluate_single_writer(None, "host-a", now, 90.0) is None
+    # наш же instance (рестарт контейнера) — не блокер даже со свежим beat
+    mine = {"worker": "gateway", "instance": "host-a", "updated_at": now}
+    assert supervise.evaluate_single_writer(mine, "host-a", now, 90.0) is None
+    # чужой живой instance — отказ
+    other = {"worker": "gateway", "instance": "host-b", "updated_at": now - timedelta(seconds=10)}
+    reason = supervise.evaluate_single_writer(other, "host-a", now, 90.0)
+    assert reason is not None and "host-b" in reason
+    # чужой, но просроченный (аварийно умер) — пропускаем
+    stale = {"worker": "gateway", "instance": "host-b", "updated_at": now - timedelta(seconds=200)}
+    assert supervise.evaluate_single_writer(stale, "host-a", now, 90.0) is None
+    # чужой, но снят graceful stop — пропускаем
+    stopped = {"worker": "gateway", "instance": "host-b", "updated_at": now, "stopped": True}
+    assert supervise.evaluate_single_writer(stopped, "host-a", now, 90.0) is None
+    # BSON-наивный datetime
+    naive = {"worker": "gateway", "instance": "host-b",
+             "updated_at": (now - timedelta(seconds=5)).replace(tzinfo=None)}
+    assert supervise.evaluate_single_writer(naive, "host-a", now, 90.0) is not None
+
+
+def test_single_writer_claim_and_release() -> None:
+    class _Coll:
+        def __init__(self):
+            self.docs = {}
+
+        def find_one(self, flt):
+            d = self.docs.get(flt["worker"])
+            return dict(d) if d else None
+
+        def update_one(self, flt, update, upsert=False):
+            key = flt["worker"]
+            if key in self.docs:
+                self.docs[key].update(update["$set"])
+            elif upsert:
+                self.docs[key] = dict(update["$set"])
+
+    coll = _Coll()
+
+    class _Db:
+        def __getitem__(self, name):
+            assert name == supervise.HEARTBEAT_COLLECTION
+            return coll
+
+    real_db = _Db()
+    supervise.claim_single_writer(real_db, "gateway", "host-a")
+    assert coll.docs["gateway"]["instance"] == "host-a"
+    # второй живой instance отвергается
+    with pytest.raises(RuntimeError, match="host-a"):
+        supervise.claim_single_writer(real_db, "gateway", "host-b")
+    # рестарт того же instance — проходит
+    supervise.claim_single_writer(real_db, "gateway", "host-a")
+    # graceful stop снимает блок для нового instance
+    supervise.release_single_writer(real_db, "gateway", "host-a")
+    assert coll.docs["gateway"]["stopped"] is True
+    supervise.claim_single_writer(real_db, "gateway", "host-b")
+    assert coll.docs["gateway"]["instance"] == "host-b"
