@@ -7,6 +7,14 @@ tests/test_mongo_auth_stand.py. Здесь закрывается вторая �
     runtime-роли нельзя было вернуть к прошлому составу (встроенная readWrite
     реально разрешает createIndex/dropIndex/dropCollection, проверено rolesInfo
     на Mongo 7 — ADR-0005);
+  * ROOT_ROLE_PLAN — ТОЧНЫЙ состав bootstrap root (review R26-07, blocker 2):
+    единый для production bootstrap_users и r2607-стенда, минимально
+    достаточный для create/repair ролей и пользователей плана, выдачи им
+    built-in backup/restore и штатного restore-cleanup dropDatabase. Здесь он
+    закреплён поимённо; эквивалентность боевого пути и стенда на живом сервере
+    доказывает tests/test_mongo_auth_stand.py (root там создаётся точной
+    production-командой `migrate users --bootstrap` и его роли сверяются с
+    сервером);
   * ensure_roles/ensure_users на фейковой БД с журналом команд: съехавший состав
     роли чинится updateRole (а не создаётся заново), leftover-роль пользователя
     отзывается grant/revoke-репарацией, повтор прогона ничего не делает,
@@ -51,6 +59,23 @@ EXPECTED_GRANTS: dict[str, tuple[tuple[str, str], ...]] = {
     "dsbot_restore": (("restore", "admin"), ("readAnyDatabase", "admin")),
 }
 PLAN_USERS = tuple(EXPECTED_GRANTS)
+# Review R26-07 (blocker 2): bootstrap root — ОДИН состав на всех (production
+# bootstrap_users и r2607-стенд берут его из migrate.ROOT_ROLE_PLAN). Список
+# ниже — независимая фиксация в тесте: «минимально достаточно, но не меньше»:
+# userAdminAnyDatabase — createUser/grantRole/createRole; readWriteAnyDatabase —
+# CRUD-привилегии, которые обязан владеть грантер кастомных ролей плана;
+# dbAdminAnyDatabase — DDL-состав createRole migration-роли + dropDatabase для
+# штатного restore-cleanup (restore.sh гейт под MONGO_ADMIN_URI); backup/
+# restore — транзитивное владение выдаваемыми built-in ролями dsbot_backup/
+# dsbot_restore; clusterMonitor — админ-гейты. Ни admin, ни root superuser.
+EXPECTED_ROOT_ROLES: tuple[tuple[str, str], ...] = (
+    ("userAdminAnyDatabase", "admin"),
+    ("readWriteAnyDatabase", "admin"),
+    ("dbAdminAnyDatabase", "admin"),
+    ("backup", "admin"),
+    ("restore", "admin"),
+    ("clusterMonitor", "admin"),
+)
 
 
 # ------------------------------------------------------------- фейковая БД R26-07
@@ -273,6 +298,66 @@ class TestRolePlanContract:
             assert len(privileges) == 1
             assert privileges[0]["resource"] == {"db": "voice_tracker_prod", "collection": ""}
             assert privileges[0]["actions"] == sorted(migrate.ROLE_PLAN[role])
+
+
+# ------------------------------------------------- 1b. ROOT_ROLE_PLAN (blocker 2)
+
+
+class TestRootRolePlan:
+    """Точный состав bootstrap root — единый для production `bootstrap_users`
+    и r2607-стенда (review R26-07, blocker 2). Декларативная половина: живой
+    стенд создаёт root этой же production-командой и test_mongo_auth_stand.py
+    сверяет роли root'а УЖЕ НА СЕРВЕРЕ ( authenticatedUserRoles ), т.е.
+    эквивалентность «прод == стенд» проверяется фактом, а не комментарием."""
+
+    def test_root_role_plan_exact_composition(self) -> None:
+        # порядок и состав — поимённо: любой дрейф (добавили admin/root, убрали
+        # backup/restore, перенесли роль из admin) падает здесь, а не на проде
+        assert tuple(migrate.ROOT_ROLE_PLAN) == EXPECTED_ROOT_ROLES
+
+    def test_root_roles_doc_is_the_plan_in_server_shape(self) -> None:
+        # то, что реально уходит в createUser серверу — ровно план, без потерь
+        assert migrate.root_roles_doc() == [{"role": r, "db": d}
+                                            for r, d in EXPECTED_ROOT_ROLES]
+
+    def test_root_roles_are_unique_and_admin_scoped(self) -> None:
+        names = [r for r, _d in migrate.ROOT_ROLE_PLAN]
+        assert len(names) == len(set(names))  # дубль роли в createUser — не «минимально», а баг
+        assert {d for _r, d in migrate.ROOT_ROLE_PLAN} == {"admin"}
+
+    def test_root_is_not_superuser(self) -> None:
+        # минимальная достаточность: ни встроенного admin, ни root, ни __system
+        assert not ({r for r, _d in migrate.ROOT_ROLE_PLAN}
+                    & {"admin", "root", "__system"})
+
+    def test_root_owns_every_builtin_role_the_plan_grants(self) -> None:
+        # грантер обязан владеть выдаваемыми built-in ролями (иначе createUser/
+        # grant dsbot_backup с backup@admin дают Unauthorized на живом mongod —
+        # именно из-за этого bootstrap_users с одной userAdminAnyDatabase не
+        # проходил план)
+        owned = {r for r, _d in migrate.ROOT_ROLE_PLAN}
+        granted = {role for _u, roles, _n in migrate.USER_PLAN
+                   for role, db in roles if db == "admin"}
+        assert granted, "план обязан кому-то выдавать built-in роли"
+        # backup/restore несут cluster-специфичные действия (backup/restore на
+        # ресурсе cluster): их грантер не может «вывести» из AnyDatabase-ролей —
+        # root обязан владеть ими буквально
+        assert {"backup", "restore"} <= owned & granted, (sorted(owned), sorted(granted))
+        # readAnyDatabase — единственная built-in плана, которой root НЕ владеет
+        # по имени: выдача проходит containment'ом привилегий readWriteAnyDatabase
+        # (надмножество find по всем БД). Держать эту тонкость «на вере» нельзя —
+        # живой прогон createUser dsbot_restore (backup/restore+readAnyDatabase)
+        # идёт production-путём на стенде; неверное предположение там же и упадёт.
+        assert (granted - {"backup", "restore"}) == {"readAnyDatabase"}
+        assert ("readWriteAnyDatabase", "admin") in migrate.ROOT_ROLE_PLAN
+
+    def test_root_plan_covers_bootstrap_and_restore_cleanup_needs(self) -> None:
+        need = {"userAdminAnyDatabase",    # createRole/createUser/grant по плану
+                "readWriteAnyDatabase",    # CRUD-привилегии грантера createRole
+                "dbAdminAnyDatabase",      # DDL-состав createRole + dropDatabase cleanup
+                "backup", "restore",       # выдача dsbot_backup/dsbot_restore
+                "clusterMonitor"}          # админ-гейты (списки/диагностика)
+        assert {r for r, _d in migrate.ROOT_ROLE_PLAN} == need
 
 
 # ------------------------------------------------------------ 2. ensure_roles
@@ -555,12 +640,15 @@ class TestBootstrapUsers:
 
         assert note == "bootstrap:root-created"
         assert made[0] == note
-        # localhost-сессия: ровно один createUser root'а с userAdminAnyDatabase
+        # localhost-сессия: ровно один createUser root'а СОСТАВОМ ИЗ ROOT_ROLE_PLAN
+        # (review R26-07, blocker 2: одна userAdminAnyDatabase не покрывает ни
+        # createRole ролей плана, ни выдачу backup/restore, ни dropDatabase
+        # штатного restore-cleanup)
         first = fake.clients[0].admin
         assert [c[0] for c in first.calls] == ["createUser"]
         _op, args, kw = first.calls[0]
         assert args == (ROOT_USER,)
-        assert kw["roles"] == [{"role": "userAdminAnyDatabase", "db": "admin"}]
+        assert kw["roles"] == [{"role": r, "db": "admin"} for r, _d in EXPECTED_ROOT_ROLES]
         assert fake.uris[0] == LOCAL_URI  # без credentials — и есть localhost exception
         # дальше тот же путь, что у `migrate users`: URI из root-учётки, роли+план
         assert len(fake.clients) == 2

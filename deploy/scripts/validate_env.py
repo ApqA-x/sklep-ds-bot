@@ -11,6 +11,11 @@ DB_USER_<USERNAME в ВЕРХНИЙ РЕГИСТР> — ровно так чит
 bootstrap-job'а (BOOTSTRAP_IMAGE, digest) и DSBOT_SCHEMA_MODE ∈ {verify, bootstrap}.
 Набор одинаков у production и staging: staging репетирует ровно тот прогон, что
 пойдёт на прод (изоляция же — прод-специфичные проверки томов/базы/порта ниже).
+Review R26-07 (blocker 1): пользователи плана (app/web/backup/restore) создаются
+ensure_users В РАБОЧЕЙ БД, поэтому authSource их URI обязан равняться MONGO_DB —
+роль backup/restore, живущая в admin, туда пользователя не переносит, и
+authSource=admin даёт Authentication failed на живом mongod (доказано стендом).
+MONGO_ADMIN_URI из правила исключён: root создаётся localhost exception в admin.
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ import argparse
 import os
 import re
 import sys
+from urllib.parse import unquote
 
 DIGEST_RE = re.compile(r"^(?:[\w.\-]+/)?[\w.\-/]+@sha256:[0-9a-f]{64}$")
 # R26-07: аутентифицированный Mongo-URI = scheme://<userinfo>@… (без credentials
@@ -72,6 +78,13 @@ MONGO_USER_KEYS = [
     "DB_USER_DSBOT_RESTORE",
 ]
 DSBOT_SCHEMA_MODES = {"verify", "bootstrap"}
+# Review R26-07 (blocker 1): эти пользователи создаются ensure_users в рабочей
+# БД (client[MONGO_DB]) — authSource их URI обязан быть MONGO_DB. MONGO_ADMIN_URI
+# (root, localhost exception) исключён: он аутентифицируется в admin.
+WORKDB_AUTH_URI_KEYS = ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_BACKUP_URI", "MONGO_RESTORE_URI")
+AUTHSOURCE_RE = re.compile(r"[?&]authSource=([^&]*)")
+# path-база URI без authSource: scheme://<userinfo>@host[:port]/<db>[?…]
+URI_PATH_DB_RE = re.compile(r"^mongodb(?:\+srv)?://[^@]*@[^/?]+/([^?]+)")
 COMMON_REQUIRED = IMAGE_KEYS + MONGO_URI_KEYS + MONGO_USER_KEYS + [
     "MONGO_VOLUME",
     "MEDIA_VOLUME",
@@ -133,6 +146,32 @@ def check(path: str, mode: str) -> list[str]:
         if value and not AUTHED_URI_RE.match(value):
             errors.append(f"{key}: must be an authenticated mongodb://<user>@<host> URI "
                           "(mongod runs with --auth, R26-07)")
+
+    # Review R26-07 (blocker 1): app/web/backup/restore создаются migrate.py в
+    # рабочей БД, поэтому их URI обязан аутентифицироваться против MONGO_DB
+    # (authSource=<MONGO_DB> или path-база <MONGO_DB>). Формат URI уже
+    # проверен выше; значения в сообщения не попадают.
+    workdb = env.get("MONGO_DB", "").strip()
+    if workdb:
+        for key in WORKDB_AUTH_URI_KEYS:
+            value = env.get(key, "").strip()
+            if not value or not AUTHED_URI_RE.match(value):
+                continue
+            m = AUTHSOURCE_RE.search(value)
+            if m:
+                if unquote(m.group(1)) != workdb:
+                    errors.append(f"{key}: authSource must equal MONGO_DB — plan users are "
+                                  "created in the working database (a role living in admin "
+                                  "does not move the user there; authSource=admin fails "
+                                  "authentication on live mongod)")
+                continue
+            pm = URI_PATH_DB_RE.match(value)
+            if pm is None:
+                errors.append(f"{key}: must authenticate against MONGO_DB — add "
+                              "?authSource=<MONGO_DB> (plan users are not in admin)")
+            elif unquote(pm.group(1)) != workdb:
+                errors.append(f"{key}: URI path database must equal MONGO_DB "
+                              "(or use ?authSource=<MONGO_DB>)")
     mode_value = env.get("DSBOT_SCHEMA_MODE", "").strip().lower()
     if mode_value and mode_value not in DSBOT_SCHEMA_MODES:
         errors.append("DSBOT_SCHEMA_MODE must be \"verify\" (runtime, no DDL) or "

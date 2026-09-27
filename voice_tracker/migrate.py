@@ -386,7 +386,11 @@ ROLE_PLAN: dict[str, tuple[str, ...]] = {
 }
 
 # (username, роль, назначения). db="{dbname}" — плейсхолдер рабочей БД;
-# built-in роли (backup/restore/readAnyDatabase) живут в admin (DB06).
+# built-in роли (backup/restore/readAnyDatabase) живут в admin (DB06), НО все
+# пользователи плана (включая dsbot_backup/dsbot_restore) создаются в рабочей
+# БД: ensure_users работает на client[db_name]. authSource их URI — MONGO_DB,
+# не admin (review R26-07: admin в env-шаблонах = Authentication failed на
+# живом mongod; роль в admin не переносит туда пользователя).
 USER_PLAN: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("dsbot_app", (("dsbot_runtime_bot_role", "{dbname}"),),
      "бот-сервисы: CRUD бизнес-коллекций, DDL недоступен (R26-07)"),
@@ -399,6 +403,43 @@ USER_PLAN: tuple[tuple[str, tuple[tuple[str, str], ...], str], ...] = (
     ("dsbot_restore", (("restore", "admin"), ("readAnyDatabase", "admin")),
      "mongorestore + гейты restore.sh: listDatabases/чтение целей (R26-07)"),
 )
+
+# Состав bootstrap root (localhost exception) — ЕДИНСТВЕННЫЙ источник истины
+# и для bootstrap_users ниже, и для генератора стенда deploy/scripts/
+# r2607_auth_stand.sh (импортирует этот же констант): стенд не может «прятать»
+# расхождение с продакционной комплектацией (review R26-07, blocker 2:
+# bootstrap_users создавал root только с userAdminAnyDatabase, чего не хватает
+# ни на createRole по плану, ни на штатный restore-cleanup dropDatabase).
+# root — НЕ runtime-credential: только `migrate users --bootstrap`/`migrate
+# users` (репарация grants) и mongosh-гейты restore.sh. Учтены granter-ограничения
+# Mongo (эмпирически подтверждены живым прогоном стенда на mongo:7):
+#   * userAdminAnyDatabase — createUser/grantRole/createRole на любой БД (ensure_users);
+#   * readWriteAnyDatabase — привилегии find/insert/update/remove, которыми грантер
+#     обязан владеть для createRole кастомных ролей плана (CRUD-часть);
+#   * dbAdminAnyDatabase  — createIndex/dropIndex/createCollection/collMod
+#     (createRole migration-роли) + dropDatabase: у встроенной dbAdmin на mongo:7
+#     есть это действие (docs v7.0, список actions dbAdmin) — им делает cleanup
+#     таргет-БД restore.sh под MONGO_ADMIN_URI;
+#   * backup / restore    — выдача тех же ролей dsbot_backup/dsbot_restore без
+#     Unauthorized (грантер владеет ролью) + listDatabases-гейт restore.sh;
+#   * clusterMonitor      — кластерная диагностика для тех же admin-гейтов.
+# Комплектация закреплена unit-тестом точного состава
+# (tests/test_mongo_roles_plan.py::TestRootRolePlan) и доказывается живым
+# стендом (tests/test_mongo_auth_stand.py: dropDatabase root'а, bootstrap_users
+# поверх стендового кластера, auth backup/restore URI).
+ROOT_ROLE_PLAN: tuple[tuple[str, str], ...] = (
+    ("userAdminAnyDatabase", "admin"),
+    ("readWriteAnyDatabase", "admin"),
+    ("dbAdminAnyDatabase", "admin"),
+    ("backup", "admin"),
+    ("restore", "admin"),
+    ("clusterMonitor", "admin"),
+)
+
+
+def root_roles_doc() -> list[dict]:
+    """ROOT_ROLE_PLAN в форме серверного документа createUser.roles."""
+    return [{"role": role, "db": db} for role, db in ROOT_ROLE_PLAN]
 
 
 def _already_exists(exc: Exception) -> bool:
@@ -519,6 +560,11 @@ def bootstrap_users(*, local_uri: str, db_name: str, passwords: dict[str, str],
     mongod --auth через localhost exception (подключение с localhost без
     credentials создаёт первого админа), затем роли+пользователи плана под ним.
 
+    Состав root — строго ROOT_ROLE_PLAN (та же константа, из которой генерится
+    r2607-стенд): userAdminAnyDatabase одна не покрывает ни createRole ролей
+    плана (грантер обязан владеть выдаваемыми привилегиями), ни dropDatabase
+    штатного restore-cleanup (review R26-07, blocker 2).
+
     Идемпотентность: если localhost exception уже закрыта (Unauthorized 13 —
     на кластере есть пользователи), подключаемся admin-URI (явный MONGO_ADMIN_URI
     или собранный из root-учётки) и продолжаем обычный ensure_users со сверкой
@@ -532,7 +578,7 @@ def bootstrap_users(*, local_uri: str, db_name: str, passwords: dict[str, str],
         client = pymongo.MongoClient(local_uri, serverSelectionTimeoutMS=5000)
         try:
             client.admin.command("createUser", root_user, pwd=root_pass,
-                                 roles=[{"role": "userAdminAnyDatabase", "db": "admin"}])
+                                 roles=root_roles_doc())
         finally:
             client.close()
     except Exception as exc:

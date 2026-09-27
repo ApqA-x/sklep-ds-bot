@@ -1,7 +1,8 @@
 # ADR-0005: Mongo `--auth` и least-privilege роли (R26-07)
 
 Дата: 2026-09-27. Статус: принят. Код: `voice_tracker/migrate.py` (ROLE_PLAN/
-USER_PLAN/`ensure_roles`/`ensure_users`/`bootstrap_users`/CLI `users --bootstrap`),
+USER_PLAN/ROOT_ROLE_PLAN/`ensure_roles`/`ensure_users`/`bootstrap_users`/CLI
+`users --bootstrap`),
 `voice_tracker/repository.py` (`verify_startup`), `voice_tracker/runtime.py`
 (`DSBOT_SCHEMA_MODE`), `deploy/*/compose*.yml` (mongod `--auth`, сервис
 `mongo-bootstrap` под профилем `bootstrap`), `deploy/scripts/validate_env.py` /
@@ -74,12 +75,20 @@ mongod работал без `--auth`, ролевая модель была де
    env-файле, план прав не меняется.
 7. **Enforcement доказывается стендом, а не верой.** Одноразовый auth-стенд
    `deploy/scripts/r2607_auth_stand.sh` (mongo:7 `--auth` на
-   127.0.0.1:27098, БД `voice_tracker_t07auth_<hex>`, mongosh-скрипт генерится
-   ИМПОРТОМ ROLE_PLAN/USER_PLAN — план не дублируется руками) и
+   127.0.0.1:27098, БД `voice_tracker_t07auth_<hex>`) создаёт начальные права
+   ТОЧНОЙ production-точкой входа — `python -m voice_tracker.migrate users
+   --bootstrap` (bootstrap_users → localhost exception → ROOT_ROLE_PLAN/
+   ROLE_PLAN/USER_PLAN) в helper-контейнере с общим сетевым namespace mongod;
+   самописного mongosh-генератора плана больше нет — стенд не может «спрятать»
+   расхождение с продакшн-комплектацией.
    `tests/test_mongo_auth_stand.py`: CRUD/listIndexes runtime'ом проходят,
    ЛЮБОЙ DDL/админ-команда отбивается РЕАЛЬНЫМ кодом сервера 13 (Unauthorized)
    — это и есть доказательство DB06; migration-роль строит индекс; у
-   `dsbot_app` нет admin-ролей; grants-репарация отзывает leftover `readWrite`.
+   `dsbot_app` нет admin-ролей; grants-репарация отзывает leftover `readWrite`;
+   backup/restore-URI живой аутентификацией подтверждают authSource=рабочая БД
+   (с authSource=admin сервер ОТВЕРГАЕТ, code 18); roles root'а на сервере
+   равны ROOT_ROLE_PLAN, root делает dropDatabase, повторный production
+   bootstrap идемпотентен.
    Общий стенд 27099 (без auth) остаётся для runner'а/потоков; allowlist
    стендовых портов — `tests/stand_guard.py`.
 
@@ -105,11 +114,14 @@ mongod работал без `--auth`, ролевая модель была де
   назначение root: начальный bootstrap (`migrate users --bootstrap`) и
   админ-гейты restore.sh (`listDatabases`/`dropDatabase` цели в cleanup).
   `userAdminAnyDatabase` для этого недостаточно (он не даёт ни listDatabases,
-  ни drop чужих БД), поэтому root-учётке нужны роли шире плана
-  (`userAdminAnyDatabase` + `dbAdminAnyDatabase` + `readAnyDatabase`/
-  `clusterMonitor`; сверх того грантер обязан транзитивно владеть
-  привилегиями выдаваемых built-in ролей `backup`/`restore` — стенд выдаёт их
-  root'у явно). root вне `USER_PLAN` — `ensure_users` его не понижает.
+  ни drop чужих БД). Единственный источник состава — `migrate.ROOT_ROLE_PLAN`
+  (`userAdminAnyDatabase` + `readWriteAnyDatabase` + `dbAdminAnyDatabase` +
+  `backup` + `restore` + `clusterMonitor`): dbAdminAnyDatabase даёт dropDatabase
+  cleanup'а и DDL-грант для createRole миграционной роли, readWriteAnyDatabase —
+  CRUD-привилегии, которыми обязан владеть грантер, backup/restore/clusterMonitor —
+  выдачу соответствующих built-in ролей планом и listDatabases-гейт restore.sh
+  (эмпирически подтверждено живым прогоном стенда на mongo:7). root вне
+  `USER_PLAN` — `ensure_users` его не понижает.
 - **Приложения больше не могут чинить схему сами.** Missing/incompatible
   индексы на startup в verify-режиме — падение с диагностикой, а не тихий
   createIndex; лечение — `migrate up` под migration-пользователем. Это и есть

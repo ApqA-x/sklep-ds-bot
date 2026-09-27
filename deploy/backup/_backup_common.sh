@@ -59,8 +59,9 @@ services_to_freeze() { # всё, что пишет (app-сервисы), кро�
 
 dump_mongo_archive() { # mongo-контейнер живёт во время заморозки — exec ok
   # R26-07: mongod под --auth — дампу нужен URI с встроенной ролью backup
-  # (dsbot_backup, authSource=admin из env-примеров). --db остаётся: в URI
-  # база не указана (путь "/"), конфликты с --uri нет. Значение секретно и
+  # (dsbot_backup создан в РАБОЧЕЙ БД, authSource=<MONGO_DB> из env-примеров;
+  # роль backup живёт в admin, но пользователя туда не переносит). --db остаётся:
+  # в URI база не указана (путь "/"), конфликтов с --uri нет. Значение секретно и
   # в вывод не попадает (только как аргумент mongodump внутри контейнера).
   [ -n "${MONGO_BACKUP_URI:-}" ] \
     || die "MONGO_BACKUP_URI not set (R26-07: mongodump needs backup role)"

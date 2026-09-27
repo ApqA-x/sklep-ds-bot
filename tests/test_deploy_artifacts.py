@@ -194,8 +194,10 @@ def _write_env(tmp: Path, mode: str, name: str | None = None, **over) -> Path:
         "MONGO_BOT_URI": f"mongodb://dsbot_app:pw-app@mongo:27017/?authSource={db}",
         "MONGO_WEB_URI": f"mongodb://dsbot_web:pw-web@mongo:27017/?authSource={db}",
         "MONGO_ADMIN_URI": "mongodb://dsbot_root:pw-root@mongo:27017/admin?authSource=admin",
-        "MONGO_BACKUP_URI": "mongodb://dsbot_backup:pw-bkp@mongo:27017/?authSource=admin",
-        "MONGO_RESTORE_URI": "mongodb://dsbot_restore:pw-rst@mongo:27017/?authSource=admin",
+        # review R26-07 (blocker 1): backup/restore-пользователи созданы в рабочей
+        # БД — authSource обязан быть MONGO_DB, не admin (сверяет validate_env)
+        "MONGO_BACKUP_URI": f"mongodb://dsbot_backup:pw-bkp@mongo:27017/?authSource={db}",
+        "MONGO_RESTORE_URI": f"mongodb://dsbot_restore:pw-rst@mongo:27017/?authSource={db}",
         "DB_USER_ROOT": "dsbot_root",
         "DB_PASS_ROOT": "pw-root",
         "DB_USER_DSBOT_APP": "pw-app",
@@ -597,6 +599,40 @@ def test_r2607_env_rejects_unauthenticated_uri_value(tmp_path) -> None:
     assert "MONGO_BOT_URI: must be an authenticated" in errors
 
 
+def test_r2607_env_plan_user_uris_must_auth_against_working_db(tmp_path) -> None:
+    """Review R26-07 (blocker 1): dsbot_app/dsbot_web/dsbot_backup/dsbot_restore
+    создаются ensure_users В РАБОЧЕЙ БД (роли backup/restore из admin только
+    ВЫДАНЫ им — пользователя туда не переносят). authSource=admin на этих URI —
+    гарантированный Authentication failed на живом mongod; валидатор обязан
+    отвергнуть это до деплоя. MONGO_ADMIN_URI (root в admin) — исключение."""
+    for key in ("MONGO_BOT_URI", "MONGO_WEB_URI", "MONGO_BACKUP_URI", "MONGO_RESTORE_URI"):
+        bad = _write_env(tmp_path, "production", name=f".env.src.{key}",
+                         **{key: "mongodb://u:p@mongo:27017/?authSource=admin"})
+        errors = "\n".join(validate_env.check(str(bad), "production"))
+        assert f"{key}: authSource must equal MONGO_DB" in errors, (key, errors)
+    # сам root-URI правилами рабочей БД не связан (создан localhost exception в admin)
+    root_admin = _write_env(tmp_path, "production", name=".env.root",
+                            MONGO_ADMIN_URI="mongodb://dsbot_root:pw@mongo:27017/admin?authSource=admin")
+    assert validate_env.check(str(root_admin), "production") == []
+    # path-форма вместо authSource: обязана указывать на рабочую БД; "/admin" — ошибка
+    pathdb = _write_env(tmp_path, "production", name=".env.pathdb",
+                        MONGO_BACKUP_URI="mongodb://u:p@mongo:27017/admin")
+    errors = "\n".join(validate_env.check(str(pathdb), "production"))
+    assert "MONGO_BACKUP_URI: URI path database must equal MONGO_DB" in errors
+    good_path = _write_env(tmp_path, "production", name=".env.pathok",
+                           MONGO_BACKUP_URI="mongodb://u:p@mongo:27017/voice_tracker")
+    assert validate_env.check(str(good_path), "production") == []
+    # пустой path без authSource (= admin по умолчанию) — тоже ошибка контракта
+    nosrc = _write_env(tmp_path, "production", name=".env.nosrc",
+                       MONGO_RESTORE_URI="mongodb://u:p@mongo:27017/")
+    errors = "\n".join(validate_env.check(str(nosrc), "production"))
+    assert "MONGO_RESTORE_URI: must authenticate against MONGO_DB" in errors
+    # URL-encoded authSource совпадает после decode
+    encoded = _write_env(tmp_path, "production", name=".env.encoded",
+                         MONGO_BACKUP_URI="mongodb://u:p@mongo:27017/?authSource=voice%5Ftracker")
+    assert validate_env.check(str(encoded), "production") == []
+
+
 def test_r2607_env_rejects_unknown_schema_mode(tmp_path) -> None:
     env = _write_env(tmp_path, "production", DSBOT_SCHEMA_MODE="garbage")
     errors = "\n".join(validate_env.check(str(env), "production"))
@@ -611,6 +647,28 @@ def test_r2607_env_requires_digest_pinned_bootstrap_image(tmp_path) -> None:
     env = _write_env(tmp_path, "production", BOOTSTRAP_IMAGE="python:3.12-slim")
     errors = "\n".join(validate_env.check(str(env), "production"))
     assert "BOOTSTRAP_IMAGE" in errors and "sha256" in errors
+
+
+def test_r2607_auth_stand_script_contract() -> None:
+    """Review R26-07: одноразовый auth-стенд обязан (a) создавать права ТОЧНОЙ
+    production-точкой входа `migrate users --bootstrap` (не самописным
+    mongosh-генератором, который мог «спрятать» расхождение с ROOT_ROLE_PLAN —
+    blocker 2), (b) экспортировать ВСЕ URI плана, включая backup/restore с
+    authSource=рабочая БД (blocker 1), (c) держать секреты вне stdout, кроме
+    eval-блока, и не публиковать прод-порт 27017 на хост."""
+    text = (DEPLOY / "scripts" / "r2607_auth_stand.sh").read_text(encoding="utf-8")
+    # (a) production-путь начальных прав; ручного создания ролей/грантов нет
+    assert "voice_tracker.migrate users --bootstrap" in text
+    for manual in ("createRole", "createUser", "grantRolesToUser"):
+        assert manual not in text, f"стенд не обязан генерировать права вручную: {manual}"
+    # (b) полный набор export'ов для eval
+    for key in ("TEST_MONGO_ADMIN_URI", "TEST_MONGO_APP_URI", "TEST_MONGO_WEB_URI",
+                "TEST_MONGO_MIGRATION_URI", "TEST_MONGO_BACKUP_URI",
+                "TEST_MONGO_RESTORE_URI", "TEST_MONGO_ROOT_LOCAL"):
+        assert f"export {key}=" in text, key
+    assert "authSource=$DB'" in text  # backup/restore — против рабочей БД стенда
+    # (c) публикация только на стендовый порт loopback; 27017 хоста не используется
+    assert '-p "127.0.0.1:${PORT}:27017"' in text and "PORT=27098" in text
 
 
 # ------------------------------------------------------------- compose-файлы как YAML

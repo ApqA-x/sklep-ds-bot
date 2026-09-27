@@ -11,7 +11,17 @@
   * у dsbot_app в authenticatedUserRoles нет ни одной админской роли;
   * grants-репарация ensure_users отзывает leftover-роль readWrite у
     пользователя плана (DB06-нарушение прошлого) и НЕ трогает пользователей
-    вне плана (локаут-безопасность реверка поимённо).
+    вне плана (локаут-безопасность реверка поимённо);
+  * review R26-07, blocker 1: backup/restore-URI стенда (TEST_MONGO_BACKUP_URI/
+    TEST_MONGO_RESTORE_URI) РЕАЛЬНО аутентифицируются с authSource=<рабочая БД>
+    (пользователи созданы в ней, built-in роли лишь выданы из admin) и дают
+    ровно роли плана; та же учётка через authSource=admin сервер ОТВЕРГАЕТ —
+    ровно тот режим отказа, который старые env-шаблоны ловили уже на проде;
+  * review R26-07, blocker 2: root на живом кластере создан ТОЧНОЙ
+    production-командой `migrate users --bootstrap` (см. r2607_auth_stand.sh),
+    его authenticatedUserRoles на сервере равны ROOT_ROLE_PLAN, root делает
+    dropDatabase (штатный restore-cleanup гейт restore.sh), а повторный прогон
+    production bootstrap_users() поверх живого кластера идемпотентен.
 
 Стенд одноразовый (mongo:7 --auth, 127.0.0.1:27098, БД
 voice_tracker_t07auth_<hex>), роли/пользователи — из ROLE_PLAN/USER_PLAN:
@@ -20,14 +30,17 @@ voice_tracker_t07auth_<hex>), роли/пользователи — из ROLE_PL
     python -B -m pytest tests/test_mongo_auth_stand.py -q -m integration
     deploy/scripts/r2607_auth_stand.sh --down
 
-Без URI в окружении или при недоступном стенде — skip. guard_mongo_uri/
-guard_db_name вызываются ПЕРЕД подключением: чужой/продовой URI или имя БД —
-AssertionError (падает, а не скипается).
+Без URI в окружении или при недоступном стенде — skip. При ПОДНЯТОМ стенде
+(TEST_MONGO_DB задан) отсутствующий URI-экспорт — FAIL, не skip: живые
+проверки обязательных URI не должны «испаряться» молча (review R26-07,
+blocker 1). guard_mongo_uri/guard_db_name вызываются ПЕРЕД подключением:
+чужой/продовой URI или имя БД — AssertionError (падает, а не скипается).
 """
 from __future__ import annotations
 
 import os
 import uuid
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -45,6 +58,9 @@ ENV_URI = {
     "app": "TEST_MONGO_APP_URI",
     "web": "TEST_MONGO_WEB_URI",
     "migration": "TEST_MONGO_MIGRATION_URI",
+    # review R26-07 (blocker 1): эти два URI — обязательная часть живого стенда
+    "backup": "TEST_MONGO_BACKUP_URI",
+    "restore": "TEST_MONGO_RESTORE_URI",
 }
 RUNTIME_ADMIN_ROLES = {
     "admin", "root", "__system", "userAdmin", "userAdminAnyDatabase",
@@ -62,19 +78,41 @@ def _db_name() -> str:
     return name
 
 
+def _uri(env_key: str) -> str:
+    """URI стенда. Нет стенда (TEST_MONGO_DB не задан) — skip; стенд ПОДНЯТ, а
+    обязательного export нет — FAIL: набор URI из r2607_auth_stand.sh — часть
+    живого контракта (review R26-07, blocker 1), «забытый» backup/restore URI
+    не должен превращать проверку в тихий skip."""
+    uri = os.environ.get(env_key, "").strip()
+    if uri:
+        return uri
+    if os.environ.get("TEST_MONGO_DB", "").strip():
+        pytest.fail(f"стенд поднят (TEST_MONGO_DB задан), но {env_key} отсутствует: "
+                    "r2607_auth_stand.sh обязан экспортировать ВСЕ URI плана — "
+                    'переподними: eval "$(deploy/scripts/r2607_auth_stand.sh up)"')
+    pytest.skip(f"{env_key} не задан — подними стенд: eval \"$(deploy/scripts/r2607_auth_stand.sh up)\"")
+
+
 def _client(kind: str) -> MongoClient:
     env_key = ENV_URI[kind]
-    uri = os.environ.get(env_key, "").strip()
-    if not uri:
-        pytest.skip(f"{env_key} не задан — подними стенд: eval \"$(deploy/scripts/r2607_auth_stand.sh up)\"")
+    uri = _uri(env_key)
     # guard — СТРОГО до любого подключения (fail-closed на прод-ресурсы)
     guard_mongo_uri(uri)
     client = MongoClient(uri, serverSelectionTimeoutMS=3000)
     try:
-        # pymongo аутентифицирует каждое соединение: ping подтверждает и
-        # доступность, и валидность credentials
+        # pymongo аутентифицирует каждое соединение (handshake SASL): ping
+        # подтверждает и доступность, и валидность credentials
         client.admin.command("ping")
+    except pymongo_errors.OperationFailure as exc:
+        # сервер ОТВЕТИЛ, но отверг учётные данные/полномочия — это ровно
+        # режим отказа сломанного authSource (blocker 1). Skip здесь «спрятал»
+        # бы проверку: живый тест обязан падать.
+        client.close()
+        pytest.fail(f"{env_key}: живые учётные данные отвергнуты сервером "
+                    f"(code {exc.code}/{exc.code_name}) — регрессия контракта "
+                    "authSource/пароля, а не недоступный стенд")
     except Exception as exc:
+        client.close()
         pytest.skip(f"auth-стенд недоступен по {env_key}: {type(exc).__name__}")
     return client
 
@@ -241,3 +279,96 @@ def test_grants_repair(admin_client, collections_ready, db_name) -> None:
             db.command("dropUser", tmp)
         except Exception as exc:  # cleanup-diagnostic: не меняем исходный отказ
             print(f"WARN: dropUser {tmp} не удался: {type(exc).__name__}")
+
+
+# --------------------------------------- blocker 1: backup/restore URI — живая auth
+
+
+def _auth_roles(client: MongoClient, db: str) -> set[tuple[str, str]]:
+    status = client[db].command("connectionStatus")
+    return {(r["role"], r["db"]) for r in status["authInfo"]["authenticatedUserRoles"]}
+
+
+def test_backup_uri_live_auth_and_exact_roles(db_name) -> None:
+    """TEST_MONGO_BACKUP_URI реально проходит SASL на mongo:7 (authSource=рабочая
+    БД) и даёт ровно роли плана USER_PLAN — ничего больше. До R26-07 env-шаблоны
+    ставили authSource=admin (пользователя там нет) — падало уже на проде;
+    _client() обязан УМЕРЕТЬ, а не смиться, если стенд это «забыл»."""
+    client = _client("backup")
+    try:
+        assert _auth_roles(client, db_name) == {("backup", "admin")}
+    finally:
+        client.close()
+
+
+def test_restore_uri_live_auth_and_exact_roles(db_name) -> None:
+    client = _client("restore")
+    try:
+        assert _auth_roles(client, db_name) == {("restore", "admin"),
+                                                ("readAnyDatabase", "admin")}
+    finally:
+        client.close()
+
+
+def test_backup_restore_reject_admin_authsource(db_name) -> None:
+    """Ровно режим отказа старых env-шаблонов: та же учётка с authSource=admin
+    сервер ОТВЕРГАЕТ (AuthenticationFailed 18). Пользователи плана живут в
+    рабочей БД; built-in роль в admin это не переносит (review R26-07, blocker 1)."""
+    for kind in ("backup", "restore"):
+        # _uri принимает ИМЯ ENV-КЛЮЧА (не имя плана): без ENV_URI[kind] здесь
+        # читался бы os.environ["backup"] -> FAIL «стенд поднят, но backup
+        # отсутствует» вместо живой проверки отказа
+        uri = _uri(ENV_URI[kind]).replace(f"authSource={db_name}", "authSource=admin")
+        assert "authSource=admin" in uri, "стендовый URI должен меняться предсказуемо"
+        guard_mongo_uri(uri)
+        client = MongoClient(uri, serverSelectionTimeoutMS=3000)
+        try:
+            with pytest.raises(pymongo_errors.OperationFailure) as exc:
+                client.admin.command("ping")
+            assert exc.value.code == 18, f"{kind}: ожидался AuthenticationFailed, " \
+                f"получен {exc.value.code}/{exc.value.code_name}"
+        finally:
+            client.close()
+
+
+# ------------------------------- blocker 2: root == ROOT_ROLE_PLAN на живом сервере
+
+
+def test_root_roles_equal_plan_on_server(admin_client) -> None:
+    """authenticatedUserRoles root'а НА СЕРВЕРЕ равны ROOT_ROLE_PLAN — состав
+    доказан production-путём (стенд поднимал права `migrate users --bootstrap`,
+    а не самописным mongosh-генератором)."""
+    assert _auth_roles(admin_client, "admin") == set(migrate.ROOT_ROLE_PLAN)
+
+
+def test_root_can_drop_database(admin_client) -> None:
+    """Штатный restore-cleanup гейт restore.sh (dropDatabase таргета под
+    MONGO_ADMIN_URI): dbAdminAnyDatabase в ROOT_ROLE_PLAN обязана работать на
+    живом mongo:7 — иначе cleanup невозможнен и оператор уйдёт в ручные rm."""
+    scratch = f"voice_tracker_t07drop_{uuid.uuid4().hex[:12]}"
+    guard_db_name(scratch)
+    try:
+        admin_client[scratch]["gate"].insert_one({"n": 1})
+        assert scratch in admin_client.list_database_names()
+        admin_client.drop_database(scratch)
+        assert scratch not in admin_client.list_database_names()
+    finally:
+        try:
+            admin_client.drop_database(scratch)  # идемпотентно, если assert упал до drop
+        except Exception:
+            pass
+
+
+def test_production_bootstrap_idempotent_on_live_cluster(db_name) -> None:
+    """Повторный прогон ТОЙ ЖЕ production-функции bootstrap_users() поверх
+    живого кластера (localhost exception закрыта, root есть) — не падает и
+    ничего не меняет: идемпотентность точки начальных прав на проде."""
+    local_uri = _uri("TEST_MONGO_ROOT_LOCAL")
+    guard_mongo_uri(local_uri)
+    parsed = urlparse(_uri("TEST_MONGO_ADMIN_URI"))
+    made, note = migrate.bootstrap_users(
+        local_uri=local_uri, db_name=db_name, passwords={},
+        root_user=unquote(parsed.username or ""), root_pass=unquote(parsed.password or ""),
+    )
+    assert note == "bootstrap:admin-auth", made
+    assert made == [note], f"идемпотентный прогон что-то изменил: {made}"
