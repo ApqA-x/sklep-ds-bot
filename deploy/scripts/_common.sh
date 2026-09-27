@@ -36,7 +36,12 @@ resolve_env() {
 }
 
 compose() {
-  docker compose -p "$PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
+  # R26-06/V26-16: единый источник env. Интерполяция ${DSBOT_ENV_FILE} в YAML
+  # (секция env_file) и --env-file получают ОДИН И ТОТ ЖЕ путь. Переменная
+  # экспортируется только на время этой команды — окружение дочерних скриптов
+  # не отравляется. DSBOT_ENV_FILE НЕ должен быть определён внутри env-файла
+  # (validate_env.py это отвергает).
+  DSBOT_ENV_FILE="$ENV_FILE" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"
 }
 
 require_docker() {

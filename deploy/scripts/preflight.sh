@@ -18,7 +18,9 @@ RENDERED="$(mktemp)"
 trap 'rm -f "$RENDERED"' EXIT
 compose config --format json >"$RENDERED" 2>/dev/null
 info "compose rendered: $(compose config --services | sort | tr '\n' ' ')"
-python3 "$DEPLOY_DIR/scripts/validate_compose.py" --mode "$PROFILE" --json-file "$RENDERED"
+# R26-06/V26-16: --env-file сверяет, что env_file у app-сервисов в ОТРЕНДЕРЕННОМ
+# конфиге указывает ровно на выбранный ENV_FILE (не на дефолтный .env рядом с YAML).
+python3 "$DEPLOY_DIR/scripts/validate_compose.py" --mode "$PROFILE" --json-file "$RENDERED" --env-file "$ENV_FILE"
 
 # п.9: digest существует в registry и содержит нужную platform-вариант.
 # docker info даёт «x86_64», манифесты — «amd64»: нормализуем.

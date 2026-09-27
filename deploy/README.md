@@ -20,8 +20,31 @@ deploy/
 ## Правила
 - **Никогда** не запускайте `docker compose` из случайного cwd: только скрипты,
   они прописывают `-p <project> -f <файл> --env-file <env>` явно.
+- **Единый источник env (R26-06/V26-16):** в YAML `env_file` ссылается на
+  `${DSBOT_ENV_FILE}`; скрипты передают ОДИН путь и в `--env-file`
+  (интерполяция), и контейнерам. Дефолт `env_file: .env` (резолв от каталога
+  compose-файла) выведен; ключ `DSBOT_ENV_FILE` внутри env-файла запрещён
+  (validate_env). Выбор другого файла — переменная окружения хоста
+  `DSBOT_ENV_FILE=/путь` перед запуском скрипта.
+- **Egress (V26-17):** `dsbot-data` — internal (всё межсервисное);
+  `gateway`/`commands`/`activity`/`stalker`/`web` дополнительно состоят в
+  `dsbot-egress` (обычная bridge = NAT) для Discord REST/Gateway/OAuth.
+  `mongo`/`nats`/`tracker`/`writer`/`controlplane` наружу не имеют; порты
+  mongo/nats хосту не публикуются.
 - Секреты живут только в env-файле на хосте (`deploy/<profile>/.env`, chmod 600),
   в git — только `.example`. Значения не печатаются ни одним скриптом.
+- **web без общего env_file (п.5):** container-env web собирается интерполяцией
+  ровно ключей, которые читает `wt-web/api/config.py`; backup/secret-ключи
+  бэкенда к web не мигрируют.
+- **Dry-run по умолчанию (V26-15):** `deploy.sh <profile>` ничего не меняет;
+  `--apply` выполняет `pull → up -d --remove-orphans → status.sh`.
+  `status.sh` fail-closed: exit 1, если любой обязательный сервис (все, кроме
+  опционального controlplane) не running/healthy или web не отвечает на
+  `/api/readyz`.
+- **Staging-изоляция — точные отпечатки (п.4):** прод-имена `dsbot-media`,
+  `dsbot-prod-mongo-data`, база `voice_tracker`, проект `dsbot-prod` отклоняются
+  в staging-env точным совпадением; staging-тома обязаны начинаться с
+  `dsbot-staging-` (allowlist), имя проекта в рендере фиксировано валидатором.
 - Образы — **digest'ы** (`registry/name@sha256:...`), не теги. Тег `v...`/`0.2.0`
   — человекочитаемое имя, deploy-источник — манифест + env.
 - `WEB_DEV_BYPASS_AUTH` в этих профилях не существует (конфиг web отвергает его,
