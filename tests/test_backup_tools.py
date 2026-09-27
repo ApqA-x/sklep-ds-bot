@@ -203,6 +203,47 @@ def test_env_examples_document_backup_keys() -> None:
             assert key in text, f"{env}: {key}"
 
 
+# ------------------------------------------------ R26-08: параметры restore.sh
+
+
+def test_restore_script_r2608_arg_surface() -> None:
+    text = (DEPLOY / "backup" / "restore.sh").read_text(encoding="utf-8")
+    # удалённые обходы не должны вернуться даже как case-ветки парсера
+    assert '"--no-verify)' not in text and "--no-verify)" not in text
+    assert "--media-volume)" not in text
+    assert "DO_VERIFY" not in text
+    # новый обязательный surface
+    for flag in ("--mode", "--state", "--resume", "--confirm-dest", "--into-db", "--keep"):
+        assert flag in text, flag
+    # verify без обхода, cleanup через ownership-гейты, цели — только генерируемые
+    for needle in ("restore_targets.py", "com.dsbot.restore.run", "validate-db",
+                   "assert-absent", "check-tar", "run-id", "state-check",
+                   "listDatabases", "db_name_is_safe"):
+        assert needle in text, needle
+    assert 'MEDIA_VOL="$2"' not in text  # имя media-volume извне не принимается
+
+
+def test_restore_script_has_no_drop_flag_in_executable_lines() -> None:
+    text = (DEPLOY / "backup" / "restore.sh").read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    assert "--drop" not in code
+    # и в самом монorestore-вызове (он многострочный с продолжением)
+    assert "mongorestore" in code
+    for ln in code.splitlines():
+        if "mongorestore" in ln:
+            assert "--drop" not in ln, ln
+
+
+def test_restore_targets_helper_shipped_alongside() -> None:
+    helper = DEPLOY / "backup" / "restore_targets.py"
+    assert helper.is_file()
+    src = helper.read_text(encoding="utf-8")
+    for sub in ("validate-db", "assert-absent", "check-tar", "run-id", "state-write"):
+        assert f'"{sub}"' in src or f"'{sub}'" in src, sub
+    # allowlist-имя обязательно с полным префиксом рабочей БД (stand_guard-совместимость)
+    assert "voice_tracker_(production|staging)_rehearsal_" in src
+
+
 def test_runbook_records_d06_and_b05_gap() -> None:
     text = (DEPLOY.parent / "docs" / "runbook-backup.md").read_text(encoding="utf-8")
     for needle in ("D06 (2026-09-25", "RPO 24", "B05", "backup_retention.py",

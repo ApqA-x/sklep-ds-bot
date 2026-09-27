@@ -142,8 +142,10 @@ def test_full_dump_restore_verify_roundtrip(tmp_path: Path, mongo: MongoClient) 
         assert not ok and any("sha256" in p for p in problems)
         archive.write_bytes(good)
 
+        # R26-08: цель — гарантированно новая пустая БД (имя с entropy-суффиксом),
+        # обход через --drop не используется и в проде, и здесь.
         _exec_stream(docker, [
-            f"mongorestore --quiet --drop --archive --nsInclude='{src}.*'"
+            f"mongorestore --quiet --archive --nsInclude='{src}.*'"
             f" --nsFrom='{src}.*' --nsTo='{dst}.*'"], stdin=good)
 
         report = backup_report.verify(TEST_MONGO_URI, dst, run / "manifest.json", str(media))

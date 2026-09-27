@@ -81,10 +81,15 @@ Windows→Linux с порядком «сначала consumers, потом gatew
   атомарно: временный каталог `.incomplete` → манифест (counts/размеры/checksums/
   версии инструментов, секрет-гард) → проверка чтения → `.verified_ok` sidecar.
   Сбой не трогает предыдущую проверенную точку (B02).
-- `backup/restore.sh <profile>` — только в **новую пустую** БД/volume (живой
-  destination структурно запрещён), checksums до любой записи (B04), затем
-  verify против манифеста: counts, индексы (каноническая сверка схемы T10),
-  revision, соответствие attachments.path файлов media (B03/B06-механика).
+- `backup/restore.sh <profile> [--mode rehearsal|cutover] [--state FILE] [--resume]
+  [--keep] [--confirm-dest NAME]` — пишет ТОЛЬКО в цели, созданные этим прогоном
+  (R26-08): media-volume всегда новый с ownership-меткой run id, цель БД — из
+  строгого allowlist (или боевое имя только в cutover + точный --confirm-dest);
+  существующая цель = отказ до любых записей; гейт «БД отсутствует» проверяется
+  дважды (гонка), mongorestore без drop; checksums и check-tar (traversal/размер)
+  до первой записи; verify обязателен всегда (--no-verify удалён): counts, индексы
+  (каноническая сверка схемы T10), revision, соответствие attachments.path файлов
+  media (B03/B06-механика). cleanup удаляет только свои state-подтверждённые цели.
 - `backup/backup_status.sh <profile>` — возраст последней проверенной точки
   против лимита (B06); встроен в `scripts/status.sh`, на хосте — hourly-таймер
   `backup/systemd/`; суточный запуск — `dsbot-backup.timer`.
