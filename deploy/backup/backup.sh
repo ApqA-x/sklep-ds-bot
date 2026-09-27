@@ -13,11 +13,23 @@
 # копию (B02) и не оставляет полуточку с sidecar; упавший каталог остаётся
 # виден оператору как orphan.
 #
+# R26-09 (приватность и параллелизм):
+#  * stream-encryption: stdout mongodump и tar сразу уходит в age — на диск
+#    попадают только mongo.archive.age / media.age, plaintext-стейджинга нет
+#    ни при каком исходе (включая SIGKILL: trap не нужен, чтобы нечего стирать);
+#  * preflight ключа age (round-trip encrypt→decrypt синтетики) — ДО freeze
+#    writers: невалидный ключ виден, пока стенд ещё работает;
+#  * ops-lock (flock -x -n на $BACKUP_DIR/.ops-<profile>.lock) держится весь
+#    прогон: параллельный backup/restore/retention-вне-прогона не запускаются;
+#    без flock скрипт отказывается стартовать (fail-closed).
+#
 # Нигде не печатаются секреты: age-ключ читается с диска, URI — из env
 # контейнеров (наружу не выводятся).
 #
 # usage: backup.sh <production|staging>
 set -euo pipefail
+# права файлов точки (700/600) — с первой команды, до любого создания файлов
+umask 077
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../scripts/_common.sh
@@ -29,10 +41,14 @@ resolve_env "${1:-}"; shift || true
 
 require_docker
 load_backup_env
+# R26-09: единый lock на профиль против параллельных прогонов (держим до выхода)
+acquire_ops_lock
+# R26-09: кривой age-ключ обнаруживается ДО остановки writers (стенд не лежит впустую)
+age_key_preflight
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 DEST="$BACKUP_DIR/$PROFILE"
-mkdir -p "$DEST"
+mkdir -m 700 -p "$DEST"
 FINAL="$DEST/dsbot-$PROFILE-$TS"
 # .incomplete (не скрытая точка): упавший запуск остаётся manifest-less или
 # unverified-записью и виден оператору через backup_status (B06-форензика);
@@ -58,23 +74,28 @@ unfreeze() {
   compose up -d $RUNNING >/dev/null 2>&1 || die "не удалось поднять ($RUNNING) — требовать вмешательства"
 }
 # При любом выходе (включая ошибку в середине) writers поднимаем и work-каталог
-# убираем — иначе стенд останется замороженным.
-trap 'unfreeze; rm -rf "$WORK"' EXIT
+# убираем — иначе стенд останется замороженным. scrub_partial_plaintext —
+# страховка R26-09: в стрим-конвейере plaintext не возникает, но если артефакт
+# прежнего конвейера всё же есть в полуточке, он не должен пережить прогон.
+trap 'unfreeze; rm -rf "$WORK"; scrub_partial_plaintext "$PARTIAL" || true' EXIT
 
-mkdir -p "$PARTIAL"
+mkdir -m 700 "$PARTIAL"
 t0=$SECONDS
 
 freeze
-info "writers остановлены; снимаем Mongo и media"
+info "writers остановлены; снимаем Mongo и media (stream-encrypt: plaintext на диск не пишется)"
 
-# 1) Mongo — архив в stdout (внутри mongo-контейнера mongodump есть).
-dump_mongo_archive "$PARTIAL/mongo.archive"
-info "mongodump: $(wc -c < "$PARTIAL/mongo.archive") bytes"
+# 1) Mongo — архив в stdout mongodump (внутри mongo-контейнера mongodump есть),
+#    сразу в age: на диске только шифротекст mongo.archive.age; падение любой
+#    половины конвейера = ненулевой выход (pipefail).
+dump_mongo_archive "$PARTIAL/mongo.archive.age"
+info "mongodump|age: $(wc -c < "$PARTIAL/mongo.archive.age") bytes ciphertext"
 
 # 2) Media — читается volume одноразовым контейнером с образом приложения
-#    (единственный пишущий сервис уже заморожен), архив — во временный каталог.
-media_archive "$PARTIAL/media.tar"
-info "media: $(wc -c < "$PARTIAL/media.tar") bytes"
+#    (единственный пишущий сервис уже заморожен); tar-поток идёт напрямую в
+#    age → media.age (media.tar на диске не появляется).
+media_archive "$PARTIAL/media.age"
+info "media|age: $(wc -c < "$PARTIAL/media.age") bytes ciphertext"
 
 # 3) counts/схема — из замороженного состояния, одноразовым контейнером с
 #    voice_tracker (pymongo есть в образе), к БД по внутреннему URI контейнера.
@@ -85,12 +106,8 @@ unfreeze
 DUMP_SECS=$((SECONDS - t0))
 info "writers подняты (окно заморозки ${DUMP_SECS}s)"
 
-# 5) Шифрование age (симметрично по ключ-файлу 600). Секреты не логируются.
-age_encrypt "$PARTIAL/mongo.archive" "$PARTIAL/mongo.archive.age"
-age_encrypt "$PARTIAL/media.tar"     "$PARTIAL/media.age"
-# исходные незашифрованные копии после шифрования не храним (приватные данные)
-rm -f "$PARTIAL/mongo.archive" "$PARTIAL/media.tar"
-
+# 4) Sha256 — по шифротексту: он единственный виден диску с шагов 1–2 (R26-09),
+#    отдельные plaintext-копии стирать нечем.
 sha256sum "$PARTIAL/mongo.archive.age" | awk '{print $1}' > "$WORK/sha_mongo"
 sha256sum "$PARTIAL/media.age" | awk '{print $1}' > "$WORK/sha_media"
 cat > "$WORK/files.json" <<EOF
@@ -108,20 +125,22 @@ cat > "$WORK/durations.json" <<EOF
 {"freezeWindowSeconds": $DUMP_SECS}
 EOF
 
-# 6) manifest (п.2). build отказывается писать при признаках секретов (B01).
+# 5) manifest (п.2). build отказывается писать при признаках секретов (B01).
 manifest_build "$PARTIAL/manifest.json" "$TS" "$WORK" "$app_revision"
 
-# 7) П.5: перечитать зашифрованный архив (checksum) ДО объявления успешным.
+# 6) П.5: перечитать зашифрованный архив (checksum) ДО объявления успешным.
 #    Расхождение → B02: предыдущая копия цела, эта не финализируется.
 verify_checksums "$PARTIAL" "$WORK/files.json"
 host_python "$HERE/backup_manifest.py" check --run-dir "$PARTIAL" >/dev/null
 
-# 8) Финализация: mv во временное→финальное имя, затем sidecar.
+# 7) Финализация: mv во временное→финальное имя, затем sidecar.
 mv "$PARTIAL" "$FINAL"
 touch "$FINAL/.verified_ok"
 info "backup written: $FINAL"
 
-# 9) Ретенция (п.8): GFS; последняя проверенная защищена от удаления.
+# 8) Ретенция (п.8): GFS; последняя проверенная защищена от удаления.
+#    Вызывается из этого же shell — ops-lock (fd 9) уже удерживается прогоном,
+#    повторного захвата нет (R26-09).
 host_python "$HERE/backup_retention.py" prune --dest "$DEST" --profile "$PROFILE" \
   --daily-keep "$RETENTION_DAILY" --weekly-keep "$RETENTION_WEEKLY" --execute
 

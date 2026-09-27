@@ -57,20 +57,30 @@ services_to_freeze() { # всё, что пишет (app-сервисы), кро�
   compose config --services | grep -vE '^(mongo|nats)$' | tr '\n' ' ' | sed 's/ $//'
 }
 
-dump_mongo_archive() { # mongo-контейнер живёт во время заморозки — exec ok
+dump_mongo_archive() { # dump_mongo_archive AGE_OUT — R26-09: стрим в age, plaintext не касается диска
+  # mongo-контейнер живёт во время заморозки — exec ok.
   # R26-07: mongod под --auth — дампу нужен URI с встроенной ролью backup
   # (dsbot_backup создан в РАБОЧЕЙ БД, authSource=<MONGO_DB> из env-примеров;
   # роль backup живёт в admin, но пользователя туда не переносит). --db остаётся:
   # в URI база не указана (путь "/"), конфликтов с --uri нет. Значение секретно и
   # в вывод не попадает (только как аргумент mongodump внутри контейнера).
+  # R26-09: stdout mongodump идёт напрямую в age --encrypt — на диске появляется
+  # только шифротекст. pipefail вызывающего скрипта превращает падение любой
+  # половины конвейера в ненулевой выход; age пишет только шифротекст, поэтому
+  # обрыв конвейера не оставляет незашифрованных данных (частичный .age — мусор).
   [ -n "${MONGO_BACKUP_URI:-}" ] \
     || die "MONGO_BACKUP_URI not set (R26-07: mongodump needs backup role)"
-  compose exec -T mongo mongodump --quiet --uri "$MONGO_BACKUP_URI" --db "$MONGO_DB" --archive > "$1"
+  compose exec -T mongo mongodump --quiet --uri "$MONGO_BACKUP_URI" --db "$MONGO_DB" --archive \
+    | age --encrypt -i "$BACKUP_AGE_KEY_FILE" -o "$1"
   [ -s "$1" ] || die "mongodump produced empty archive"
 }
 
-media_archive() { # frozen-сервис exec'нуть нельзя — одноразовый контейнер с тем же volume
-  compose run --rm --no-deps -T --entrypoint tar gateway -cf - -C /data/media . > "$1"
+media_archive() { # media_archive AGE_OUT — R26-09: tar-поток из контейнера сразу в age
+  # frozen-сервис exec'нуть нельзя — одноразовый контейнер с тем же volume;
+  # tar -c пишет в stdout, age шифрует на лету: media.tar на диске не возникает.
+  compose run --rm --no-deps -T --entrypoint tar gateway -cf - -C /data/media . \
+    | age --encrypt -i "$BACKUP_AGE_KEY_FILE" -o "$1"
+  [ -s "$1" ] || die "media archive produced empty ciphertext"
 }
 
 counts_json() {
@@ -91,12 +101,57 @@ container_label() { # container_label SERVICE KEY — OCI-метка образ�
 }
 
 # --- шифрование/целостность ---
-age_encrypt() { # age_encrypt IN OUT — симметрично по ключ-файлу (неинтерактивно)
-  age --encrypt -i "$BACKUP_AGE_KEY_FILE" -o "$2" "$1"
-}
-
+# R26-09: пост-обработка «plaintext-файл → age» удалена намеренно: единственный
+# путь шифрования — стрим (dump_mongo_archive/media_archive), незашифрованные
+# данные дампа на диск не пишутся. age_decrypt_stream остаётся для restore.
 age_decrypt_stream() { # stdout → расшифрованный поток (для restore)
   age --decrypt -i "$BACKUP_AGE_KEY_FILE" "$1"
+}
+
+# --- R26-09: preflight ключа и блокировка параллельных прогонов ---
+age_key_preflight() {
+  # Round-trip синтетики ДО freeze writers: 32 случайных байта → age --encrypt
+  # → age --decrypt → побайтовое сравнение. Ловит и нечитаемый/невалидный ключ,
+  # и сломанный age одним прогоном; вызывается до compose stop, поэтому отказ
+  # не стоит стенду простоя. Временный каталог — mktemp -d (700 при umask 077),
+  # probe-байты живут только в нём и уничтожаются здесь же.
+  local d rc=1
+  d="$(mktemp -d)"
+  if head -c 32 /dev/urandom > "$d/probe.bin" \
+     && age --encrypt -i "$BACKUP_AGE_KEY_FILE" -o "$d/probe.age" "$d/probe.bin" \
+     && age --decrypt -i "$BACKUP_AGE_KEY_FILE" "$d/probe.age" > "$d/probe.out"; then
+    cmp -s "$d/probe.bin" "$d/probe.out" && rc=0
+  fi
+  rm -rf "$d"
+  [ "$rc" = 0 ] \
+    || die "preflight: ключ age не читается/не валиден (round-trip encrypt→decrypt не прошёл) — backup прерван ДО остановки writers"
+}
+
+OPS_LOCK_FD=9
+acquire_ops_lock() {
+  # Один прогон над точками профиля в любой момент: backup.sh и restore.sh
+  # берут ОДИН И ТОТ ЖЕ lock (fd наследуется дочерним retention-prune из
+  # того же shell — повторного захвата нет, дедлока нет). Отказ — до freeze
+  # и до любых записей. fail-closed: без flock параллельные прогоны не
+  # исключить, поэтому не стартуем вовсе.
+  # R26-09 (добор): имя/расположение lock-файла зеркалится в
+  # backup_retention.py::ops_lock_path (dest.parent/.ops-<dest.name>.lock при
+  # --dest=$BACKUP_DIR/$PROFILE) — менять строго в обоих местах сразу.
+  command -v flock >/dev/null 2>&1 \
+    || die "flock недоступен на хосте — backup/restore без блокировки параллельных прогонов запрещены (R26-09)"
+  local lockfile="$BACKUP_DIR/.ops-$PROFILE.lock"
+  exec 9>"$lockfile" || die "не удалось создать lock-файл: $lockfile"
+  flock -x -n "$OPS_LOCK_FD" \
+    || die "другой backup/restore уже выполняется (lock: $lockfile) — параллельные прогоны запрещены (R26-09)"
+}
+
+scrub_partial_plaintext() {
+  # Страховка в trap: если в незавершённом каталоге всё же существует
+  # plaintext-артефакт прежнего конвейера (mongo.archive / media.tar без
+  # .age-суффикса) — стереть. Вызывается только по $PARTIAL: после mv каталога
+  # с таким именем нет, готовые FINAL-архивы (…archive.age/…age) не трогаем.
+  [ -n "${1:-}" ] && [ -d "$1" ] || return 0
+  rm -f "$1/mongo.archive" "$1/media.tar"
 }
 
 verify_checksums() { # сверяет .age-файлы каталога с files.json ДО финализации
