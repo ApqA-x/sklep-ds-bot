@@ -92,7 +92,10 @@ async def main() -> None:
                 supervisor.beat("tracker-event-sweep")
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                # R26-10.3: исключение проглочено, цикл жив, но итерация без
+                # прогресса → наблюдаемая серия отказов (beat сбросит на успехе)
+                supervisor.fail("tracker-event-sweep", exc)
                 logger.exception("tracker event sweep failed")
 
     supervisor = supervise.Supervisor()

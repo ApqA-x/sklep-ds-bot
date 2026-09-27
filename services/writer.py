@@ -138,7 +138,10 @@ async def main() -> None:
                 supervisor.beat("writer-event-sweep")
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                # R26-10.3: проглоченная ошибка итерации наблюдаема (fail), а не
+                # только в логе; успех следующей итерации сбросит серию (beat).
+                supervisor.fail("writer-event-sweep", exc)
                 logger.exception("writer pending summary sweep failed")
 
     supervisor = supervise.Supervisor()

@@ -477,9 +477,13 @@ async def main() -> None:
                 )
                 if n or stats["backlog"] or stats["quarantined"]:
                     logger.info("activity event sweep delivered=%s %s", n, stats)
+                supervisor.beat("activity-event-sweep")
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                # R26-10.3: итерация провалена и проглочена → серия отказов
+                # видна в heartbeat-снапшоте; цикл при этом остаётся жив.
+                supervisor.fail("activity-event-sweep", exc)
                 logger.exception("activity event sweep failed")
 
     # T12: цикл догрузки под надзором + heartbeat (loop жив, NATS подключен);

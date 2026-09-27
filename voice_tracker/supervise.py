@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import socket
 import time
 from datetime import UTC, datetime
@@ -31,6 +32,9 @@ HEARTBEAT_COLLECTION = "bot_runtime_heartbeats"
 # bucket-lock одного процесса; второй параллельный gateway его ломает, поэтому
 # startup сверяется со свежим heartbeat ДРУГОГО instance и отказывает.
 INSTANCE_ID = socket.gethostname()
+# R26-10: время старта процесса попадает в heartbeat-док (started_at) —
+# healthcheck отличает «процесс в startup grace» от «цикл давно без прогресса».
+PROCESS_STARTED_AT = datetime.now(UTC)
 DEFAULT_BACKOFF_INITIAL_SECONDS = 1.0
 DEFAULT_BACKOFF_CAP_SECONDS = 60.0
 DEFAULT_UNHEALTHY_AFTER = 3
@@ -117,6 +121,7 @@ class TaskHandle:
         "last_error_type",
         "last_error_at",
         "last_tick_at",
+        "started_at",
         "running",
         "_task",
     )
@@ -129,10 +134,13 @@ class TaskHandle:
         self.last_error_type: str | None = None
         self.last_error_at: str | None = None
         self.last_tick_at: str | None = None
+        self.started_at: str | None = None
         self.running = False
         self._task: asyncio.Task[None] | None = None
 
     def snapshot(self) -> dict[str, Any]:
+        # startedAt/running — «жизнь» цикла; lastTickAt — последний успешный
+        # прогресс; lastErrorAt — последняя неуспешная итерация (R26-10).
         return {
             "name": self.name,
             "critical": self.critical,
@@ -142,6 +150,7 @@ class TaskHandle:
             "lastErrorType": self.last_error_type,
             "lastErrorAt": self.last_error_at,
             "lastTickAt": self.last_tick_at,
+            "startedAt": self.started_at,
         }
 
 
@@ -185,11 +194,43 @@ class Supervisor:
         return handle
 
     def beat(self, name: str) -> None:
-        """Явный признак прогресса из тела задачи: сбрасывает счётчик отказов."""
+        """Явный признак успешной итерации из тела задачи: сбрасывает счётчик
+        отказов и отмечает lastTickAt (последний успешный прогресс)."""
         handle = self._handles.get(name)
         if handle is not None:
             handle.consecutive_failures = 0
             handle.last_tick_at = datetime.now(UTC).isoformat(timespec="seconds")
+
+    def fail(self, name: str, error: BaseException | str | None = None) -> None:
+        """Явный признак неуспешной итерации внутри бесконечного while: цикл
+        жив (running не меняется, respawn не происходит), но итерация не
+        завершилась прогрессом. beat() на следующей успешной итерации
+        возвращает счётчик в 0 — восстановление наблюдаемо (R26-10).
+
+        наружу идёт только метка ошибки: имя типа исключения или ASCII-метка
+        без пробелов/URL-символов (токены и URI не протекают в snapshot)."""
+        handle = self._handles.get(name)
+        if handle is None:
+            return
+        handle.consecutive_failures += 1
+        handle.last_error_type = self._safe_error_label(error)
+        handle.last_error_at = datetime.now(UTC).isoformat(timespec="seconds")
+        logger.warning(
+            "supervise event=iteration_failed task=%s critical=%s consecutive=%s error=%s",
+            handle.name,
+            handle.critical,
+            handle.consecutive_failures,
+            handle.last_error_type,
+        )
+
+    @staticmethod
+    def _safe_error_label(error: BaseException | str | None) -> str:
+        if isinstance(error, BaseException):
+            return _error_name(error)
+        if error is None:
+            return "IterationFailed"
+        cleaned = re.sub(r"[^0-9A-Za-z_.-]", "", str(error))
+        return (cleaned[:64] or "IterationFailed") if cleaned else "IterationFailed"
 
     def _run(self, handle: TaskHandle, factory: Callable[[], Awaitable[None]]) -> Awaitable[None]:
         return self._run_loop(handle, factory)
@@ -198,6 +239,8 @@ class Supervisor:
         attempt = 0
         while True:
             handle.running = True
+            if handle.started_at is None:
+                handle.started_at = datetime.now(UTC).isoformat(timespec="seconds")
             started = time.monotonic()
             try:
                 await factory()
@@ -286,14 +329,20 @@ def nats_state(conn: Any) -> dict[str, Any]:
 
 
 def discord_state(client: Any) -> dict[str, Any]:
-    """Состояние Discord-gateway: закрыт ли клиент и последний измеренный latency.
+    """Состояние Discord-gateway: закрыт ли клиент, готов ли и последний latency.
 
+    R26-10 r2: closed=False ≠ ready — клиент в reconect/waiting может быть ещё
+    не closed, но гейт не готов; healthcheck гейтит readiness по ready.
     Это НЕ пользовательские события: gateway сам держит heartbeat-пинг Discord."""
     out: dict[str, Any] = {}
     try:
         out["closed"] = bool(client.is_closed())
     except Exception:
         out["closed"] = None
+    try:
+        out["ready"] = bool(client.is_ready())
+    except Exception:
+        out["ready"] = None
     try:
         out["latencyMs"] = round(float(client.latency) * 1000.0, 1)
     except Exception:
@@ -333,6 +382,7 @@ class Heartbeat:
             doc: dict[str, Any] = {
                 "worker": self.worker,
                 "instance": INSTANCE_ID,
+                "started_at": PROCESS_STARTED_AT,
                 "updated_at": datetime.now(UTC),
                 "loops": self.supervisor.snapshot(),
                 "heartbeatErrors": self._db_errors,
@@ -348,6 +398,10 @@ class Heartbeat:
                 self.supervisor.beat(self.task_name)
             except Exception as exc:
                 self._db_errors += 1
+                # R26-10: итерация heartbeat-цикла неуспешна, хотя сам цикл жив:
+                # heartbeat life (running) и last successful progress (lastTickAt)
+                # расходятся — healthcheck видит это по снапшоту.
+                self.supervisor.fail(self.task_name, exc)
                 logger.warning(
                     "supervise event=heartbeat_write_failed worker=%s consecutive=%s error=%s",
                     self.worker,
