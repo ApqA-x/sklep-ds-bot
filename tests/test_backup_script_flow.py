@@ -19,7 +19,10 @@
   h) R26-09 добор: prune --execute ВНЕ прогона механически берёт тот же
      ops-lock (отказ при занятом, без единого удаления), standalone-захват
      работает, dry-run/status остаются read-only; на Windows-python
-     (fcntl=None) — fail-closed «требует POSIX-блокировки».
+     (fcntl=None) — fail-closed «требует POSIX-блокировки»;
+  i) R26-09 добор (PR #74 follow-up): унаследованный fd, указывающий на самый
+     lock-файл но НЕ заблокированный, не даёт ложного владения — блокировка
+     подтверждается настоящим LOCK_EX|LOCK_NB, конкурент не проходит.
 
 Номера вызовов age-«шифратора» в FAKE_AGE_FAIL_CALL/STALL_CALL: 1=preflight,
 2=mongo.archive.age, 3=media.age (round-trip preflight тоже шифрует).
@@ -753,3 +756,145 @@ def test_prune_execute_standalone_acquires_ops_lock(h: Harness) -> None:
     assert h.ops_lock().is_file(), "захват создаёт тот же lock-файл, что и bash-хелпер"
     assert not prior.exists(), "план при keep=0/0 обязан удалить хвост"
     assert newer.is_dir(), "последняя проверенная точка защищена всегда"
+
+
+# ------------------------- h-дополнение (PR #74 follow-up): незаблокированный
+# унаследованный fd обязан БЛОКИРОВАТЬСЯ по-настоящему, а не «считаться» владельцем
+
+
+# Хелпер: открывает lock-файл БЕЗ flock и передаёт этот fd ребёнку (pass_fds):
+# у ребёнка — тот же номер fd и то же open-file-description, но НЕ заблокированное.
+# Сценарий дефекта: старый _inherited_ops_lock видел совпадение пути в
+# /proc/self/fd и возвращал True без всякой блокировки → ложный rc=0,
+# конкурент проходил параллельно.
+_INHERIT_HELPER = r"""#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+retention_dir, dest, lock, child, competitor, hold = sys.argv[1:7]
+fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)  # именно БЕЗ flock
+rc = 3
+proc = None
+seen = []
+try:
+    proc = subprocess.Popen(
+        [sys.executable, child, retention_dir, dest, hold],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        bufsize=1, pass_fds=(fd,))  # тот же номер fd и то же OFD у ребёнка
+    assert proc.stdout is not None
+    child_rc = None
+    child_fd = None
+    locked = False
+    for line in proc.stdout:
+        seen.append(line.rstrip())
+        if line.startswith("CHILD rc="):
+            parts = line.split()
+            child_rc = int(parts[1].split("=", 1)[1])
+            child_fd = int(parts[2].split("=", 1)[1])
+        elif line.strip() == "CHILD LOCKED":
+            locked = True
+            break
+    if not locked or child_rc != 0:
+        print("FAIL: child locked=%s rc=%s\n%s" % (locked, child_rc, "\n".join(seen)),
+              file=sys.stderr)
+        sys.exit(2)
+    if child_fd != fd:
+        # владение обязано остаться на унаследованном fd (тот же OFD), а не на
+        # собственном новом open(): номер fd у ребёнка при pass_fds совпадает,
+        # а собственный open() в ребёнке дал бы номер выше
+        print("FAIL: lock held on fd %s, not inherited fd %s\n%s" % (child_fd, fd, "\n".join(seen)),
+              file=sys.stderr)
+        sys.exit(4)
+    # ребёнок заявил лок — независимый процесс обязан получить отказ
+    got = subprocess.run([sys.executable, competitor, retention_dir, dest],
+                         capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=30, stdin=subprocess.DEVNULL)
+    out = (got.stdout + got.stderr).strip()
+    if "REFUSED" in out:
+        print("OK: competitor refused", flush=True)
+        rc = 0
+    else:
+        print("FAIL: competitor: %r (rc=%s)\n%s" % (out, got.returncode, "\n".join(seen)),
+              file=sys.stderr)
+        rc = 3
+finally:
+    if proc is not None:
+        proc.kill()
+        proc.wait(timeout=30)
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+sys.exit(rc)
+"""
+
+# Ребёнок: импортирует реальный backup_retention и зовёт acquire_ops_lock(dest)
+# с унаследованным незаблокированным fd; печатает rc и номер fd, на котором
+# осталась блокировка (обязан совпасть с унаследованным); при rc=0 держит лок.
+_INHERIT_CHILD = r"""#!/usr/bin/env python3
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import backup_retention
+
+rc = backup_retention.acquire_ops_lock(Path(sys.argv[2]))
+print(f"CHILD rc={rc} fd={backup_retention._OPS_LOCK_FD}", flush=True)
+if rc == 0:
+    print("CHILD LOCKED", flush=True)
+    time.sleep(float(sys.argv[3]))
+sys.exit(0 if rc == 0 else 1)
+"""
+
+# Конкурент: свежий open() того же lock-файла (ДРУГОЕ OFD) + LOCK_EX|LOCK_NB.
+_INHERIT_COMPETITOR = r"""#!/usr/bin/env python3
+import fcntl
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import backup_retention
+
+lock = backup_retention.ops_lock_path(Path(sys.argv[2]))
+fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError as exc:
+    print(f"REFUSED {exc}", flush=True)
+else:
+    print("ACQUIRED", flush=True)
+finally:
+    os.close(fd)
+sys.exit(0)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="унаследованный fd ищется через /proc/self/fd — только Linux")
+def test_prune_execute_inherited_unlocked_fd_actually_locks(h: Harness) -> None:
+    """(h-добор, PR #74 follow-up) Унаследованный fd на самый lock-файл, но
+    БЕЗ flock: acquire_ops_lock обязан подтвердить владение НАСТОЯЩИМ
+    неблокирующим LOCK_EX на этом fd, а не поверить совпадению пути. rc=0 без
+    реальной блокировки означал бы, что конкурент проходит параллельно (P1)."""
+    h.dest().mkdir(parents=True, exist_ok=True)
+    lock = h.ops_lock()
+    scripts = h.tmp / "inherit-fd"
+    scripts.mkdir()
+    helper = scripts / "helper.py"
+    child = scripts / "child.py"
+    competitor = scripts / "competitor.py"
+    helper.write_text(_INHERIT_HELPER, encoding="utf-8", newline="\n")
+    child.write_text(_INHERIT_CHILD, encoding="utf-8", newline="\n")
+    competitor.write_text(_INHERIT_COMPETITOR, encoding="utf-8", newline="\n")
+    proc = subprocess.run(
+        [sys.executable, str(helper), str(DEPLOY_BACKUP), str(h.dest()), str(lock),
+         str(child), str(competitor), "8"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, stdin=subprocess.DEVNULL)
+    assert proc.returncode == 0, (
+        f"helper rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
+    assert "OK: competitor refused" in proc.stdout
+    assert lock.is_file(), "lock-файл создан (тем же путём, что и у bash-хелпера)"

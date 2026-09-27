@@ -184,7 +184,7 @@ _OPS_LOCK_FD: int | None = None  # держим открытым до выход
 
 
 def _inherited_ops_lock(lock: Path) -> bool:
-    """Уже держим ли ops-lock унаследованным fd (повторный захват не нужен).
+    """Держим ли ops-lock унаследованным fd — с ФАКТИЧЕСКИМ подтверждением блокировки.
 
     flock привязан к open-file-description: backup.sh держит lock на fd 9
     (`exec 9>…`), обёртка `flock -x -n FILE cmd` из runbook — на своём fd
@@ -192,7 +192,19 @@ def _inherited_ops_lock(lock: Path) -> bool:
     ДРУГОЕ описание, его собственный flock упёрся бы в EWOULDBLOCK с НАМИ ЖЕ.
     Поэтому сначала перечитываем /proc/self/fd/* (на хостах бэкапа Linux/WSL
     /proc есть; нет /proc — обычный OSError, уходим на собственный захват).
+
+    R26-09 (PR #74 follow-up): совпадение пути у fd — только КАНДИДАТ, а не
+    доказательство владения (унаследованный, но НЕ заблокированный fd раньше
+    молча считался владельцем и давал ложный rc=0). Владение подтверждаем
+    настоящим неблокирующим LOCK_EX на самом fd. Повторный flock на том же
+    OFD, который уже заблокирован нами, — noop-успех без self-deadlock
+    (сценарии backup.sh/fd9 и flock(1)); унаследованный незаблокированный fd
+    этот вызов блокирует по-настоящему. OSError (EWOULDBLOCK — описание занято
+    другим процессом) — fail-closed: закрываем такой fd и пробуем следующего
+    кандидата; ни один не подошёл → False, и acquire_ops_lock пойдёт своим
+    обычным путём (собственный open+lock), как и раньше.
     """
+    global _OPS_LOCK_FD
     try:
         want = os.path.realpath(str(lock))
     except OSError:
@@ -203,11 +215,28 @@ def _inherited_ops_lock(lock: Path) -> bool:
     except OSError:
         numbers = ["9"]
     for n in numbers:
+        if not n.isdigit():
+            continue  # os.listdir отдаёт строки; номера fd — только цифры
+        fd = int(n)
         try:
-            if os.path.realpath(os.readlink(f"{fd_dir}/{n}")) == want:
-                return True
+            if os.path.realpath(os.readlink(f"{fd_dir}/{n}")) != want:
+                continue
         except OSError:
             continue  # fd закрыт/принадлежит не нам — не помеха
+        try:
+            # candidate → реальная блокировка на этом же fd (см. docstring)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            continue
+        # владение доказано; fd НЕ закрываем до выхода процесса (закрытие
+        # сняло бы flock) — унаследованный fd держится ровно так же, как
+        # собственный fd в acquire_ops_lock
+        _OPS_LOCK_FD = fd
+        return True
     return False
 
 
@@ -225,7 +254,7 @@ def acquire_ops_lock(dest: Path) -> int:
               file=sys.stderr)
         return 1
     if _inherited_ops_lock(lock):
-        return 0  # lock уже держится нашим унаследованным fd (backup.sh/обёртка flock)
+        return 0  # унаследованный fd подтверждён реальным LOCK_EX (backup.sh/обёртка flock/свежий fd)
     try:
         fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
     except OSError as exc:
