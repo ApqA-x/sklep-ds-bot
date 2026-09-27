@@ -226,14 +226,19 @@ def _evaluate_loops(
         if isinstance(failures, bool) or not isinstance(failures, int):
             return False, f"loop invalid consecutiveFailures name={_safe_label(loop.name)}"
         # R26-10 r2: future lastTickAt (сверх skew) никогда не станет stale —
-        # отсекаем до progress-гейта и независимо от startup grace
+        # отсекаем до progress-гейта и независимо от startup grace.
+        # R26-10 r3: непарсящийся lastTickAt — это битый снапшот, а не «тика ещё
+        # не было»: отказ независимо от critical и независимо от startup grace
+        # (иначе grace и отсутствие прогресс-гейта у non-critical петель молча
+        # проглатывают мусор).
         raw_tick = entry.get("lastTickAt")
-        if raw_tick is not None:
-            parsed_tick = _as_utc(raw_tick)
-            if parsed_tick is not None:
-                future = _future_timestamp_error(parsed_tick, now, f"lastTickAt.{loop.name}")
-                if future is not None:
-                    return False, future
+        parsed_tick = _as_utc(raw_tick) if raw_tick is not None else None
+        if raw_tick is not None and parsed_tick is None:
+            return False, f"loop invalid lastTickAt name={_safe_label(loop.name)}"
+        if parsed_tick is not None:
+            future = _future_timestamp_error(parsed_tick, now, f"lastTickAt.{loop.name}")
+            if future is not None:
+                return False, future
         if loop.critical:
             if not running:
                 return False, f"required loop not running name={_safe_label(loop.name)}"
@@ -243,12 +248,9 @@ def _evaluate_loops(
                     f"consecutiveFailures={failures}"
                 )
         if loop.max_progress_age_seconds is not None and loop.critical and not in_grace:
-            tick = _as_utc(entry.get("lastTickAt"))
-            if entry.get("lastTickAt") is None:
+            if parsed_tick is None:
                 return False, f"required loop has no progress tick name={_safe_label(loop.name)}"
-            if tick is None:
-                return False, f"loop invalid lastTickAt name={_safe_label(loop.name)}"
-            tick_age = (now - tick).total_seconds()
+            tick_age = (now - parsed_tick).total_seconds()
             if tick_age > loop.max_progress_age_seconds:
                 return False, (
                     f"loop progress stale name={_safe_label(loop.name)} "
@@ -266,7 +268,16 @@ def _evaluate_deps(doc: dict[str, Any], contract: HealthContract) -> tuple[bool,
         if not isinstance(state, dict):
             return False, f"required dep missing name={_safe_label(name)}"
         if name == "nats":
-            if state.get("connected") is not True or state.get("closed") is True:
+            # R26-10 r3: supervise.nats_state() отдаёт честные bool|None — None
+            # (или missing/не-bool) означает «не удалось прочитать состояние»,
+            # т.е. unknown, а не healthy. Требуем все три явных bool.
+            connected = state.get("connected")
+            reconnecting = state.get("reconnecting")
+            closed = state.get("closed")
+            states = (connected, reconnecting, closed)
+            if not all(isinstance(value, bool) for value in states):
+                return False, "nats state unknown"
+            if connected is not True or reconnecting is not False or closed is not False:
                 return False, "nats not connected"
         elif name == "discord":
             if state.get("closed") is not False:
@@ -306,13 +317,20 @@ def evaluate(
         return False, f"heartbeat stale age={int(age)}s limit={int(max_age_seconds)}s"
     if contract is None:
         return True, f"heartbeat fresh age={int(age)}s"
-    started = _as_utc(doc.get("started_at"))
-    if started is not None:
+    started_raw = doc.get("started_at")
+    if started_raw is None:
+        # совместимость со старым доком без поля: grace считается от updated_at
+        started = updated
+    else:
+        # R26-10 r3: присутствующий, но непарсящийся started_at неотличим от
+        # «нет данных» — молчаливый откат к updated_at давал бы вечно активную
+        # startup grace; unknown = fail-closed
+        started = _as_utc(started_raw)
+        if started is None:
+            return False, "heartbeat invalid started_at"
         future = _future_timestamp_error(started, now, "started_at")
         if future is not None:
             return False, future
-    else:
-        started = updated
     in_grace = (now - started).total_seconds() <= contract.startup_grace_seconds
     ok, detail = _evaluate_loops(doc, now, contract, in_grace)
     if not ok:

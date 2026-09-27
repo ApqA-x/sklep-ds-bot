@@ -1166,3 +1166,107 @@ def test_v26_10_r2_small_clock_skew_stays_ready() -> None:
     ok, detail = evaluate(doc, now, 90.0, contract)
     assert ok, detail
     assert "fresh" in detail
+
+
+# ============================================================ R26-10 review r3
+# ДЕФЕКТ 1: NATS с closed=None/missing (unknown-состояние) не должен проходить
+# readiness — supervise.nats_state() честно отдаёт None, когда getattr бросил.
+# ДЕФЕКТ 2: непарсящийся lastTickAt/started_at не должен молча превращаться в
+# «ещё не было тика» / вечно активную startup grace.
+
+
+def test_v26_10_r3_nats_missing_closed_is_not_healthy() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["nats"] = {"connected": True, "reconnecting": False}  # closed missing
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "nats" in detail
+
+
+def test_v26_10_r3_nats_none_closed_is_not_healthy() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    doc["deps"]["nats"] = {"connected": True, "reconnecting": False, "closed": None}
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "nats" in detail
+
+
+def test_v26_10_r3_nats_reconnecting_or_unknown_not_healthy() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("writer")
+    assert contract is not None
+    for state in (
+        {"connected": True, "reconnecting": True, "closed": False},  # переподключение
+        {"connected": True, "reconnecting": None, "closed": False},  # unknown
+        {"connected": True, "reconnecting": False, "closed": "up"},  # не-bool
+        {"connected": True, "reconnecting": False},  # missing
+    ):
+        doc = _healthy_doc(contract, now)
+        doc["deps"]["nats"] = state
+        ok, detail = evaluate(doc, now, 90.0, contract)
+        assert not ok, (state, detail)
+        assert "nats" in detail, (state, detail)
+
+
+def test_v26_10_r3_nats_fully_valid_stays_healthy() -> None:
+    # перекос запрещён: все три явных bool на месте → readiness не снимается
+    now = datetime.now(UTC)
+    checked = 0
+    for worker in CONTRACT_WORKERS:
+        contract = hc.contract_for(worker)
+        assert contract is not None
+        if "nats" not in contract.deps:
+            continue
+        checked += 1
+        doc = _healthy_doc(contract, now)
+        doc["deps"]["nats"] = {"connected": True, "reconnecting": False, "closed": False}
+        ok, detail = evaluate(doc, now, 90.0, contract)
+        assert ok, (worker, detail)
+    assert checked == 6
+
+
+def test_v26_10_r3_malformed_lasttick_in_grace_rejected() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now, started_age=5)  # внутри startup grace
+    _set_loop(doc, "tracker-event-sweep", tick="not-a-date")
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "lastTickAt" in detail
+
+
+def test_v26_10_r3_malformed_lasttick_noncritical_rejected() -> None:
+    # битое поле = битый снапшот: отказ и для non-critical петли (её readiness
+    # не гейтится по прогрессу, но валидность снапшота едина для всех)
+    now = datetime.now(UTC)
+    contract = hc.contract_for("gateway")
+    assert contract is not None
+    doc = _healthy_doc(contract, now)
+    _set_loop(doc, "gateway-invite-snapshot-refresh", tick="not-a-date")
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "lastTickAt" in detail
+
+
+def test_v26_10_r3_malformed_started_at_rejected() -> None:
+    now = datetime.now(UTC)
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now, started_age=5)
+    doc["started_at"] = "not-a-date"
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert not ok and "started_at" in detail
+
+
+def test_v26_10_r3_absent_started_at_still_compatible() -> None:
+    # док вообще без started_at (старый формат): grace считается от updated_at
+    now = datetime.now(UTC)
+    contract = hc.contract_for("tracker")
+    assert contract is not None
+    doc = _healthy_doc(contract, now, age=5, started_age=600)
+    doc.pop("started_at")
+    ok, detail = evaluate(doc, now, 90.0, contract)
+    assert ok, detail
