@@ -10,7 +10,7 @@ from voice_tracker import supervise
 from voice_tracker.bus import Bus
 from voice_tracker import domain, eventlog
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
+from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret, wait_for_shutdown
 from voice_tracker.summary import Service
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,9 @@ async def main() -> None:
     supervise.attach(supervisor, heartbeat)
     logger.info("writer service ready")
     try:
-        await asyncio.Event().wait()
+        # R26-12b: вечное ожидание снимаем только SIGTERM/SIGINT — иначе docker
+        # stop убивал процесс по grace-таймауту и drain ниже не исполнялся.
+        await wait_for_shutdown()
     finally:
         # T12/R05: drain — cancel+await фоновых задач, потом закрываем транспорты.
         await supervisor.shutdown()

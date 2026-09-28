@@ -38,4 +38,9 @@ ENV SERVICE=${SERVICE}
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
   CMD python -m voice_tracker.healthcheck || exit 1
 
-CMD ["sh", "-c", "python -m services.${SERVICE}"]
+# R26-12b: exec-form, PID 1 = python (не dash). Через `sh -c` SIGTERM из
+# `docker stop` оставался у shell и до python не доходил вовсе (dash его не
+# форвардит), поэтому drain-путь в finally сервисов не исполнялся никогда —
+# контейнер убивался по grace-таймауту (exit=137). Сервис резолвится из env
+# здесь же: shell-подстановка ${SERVICE} в exec-form недоступна.
+CMD ["python", "-c", "import os,runpy; runpy.run_module('services.' + os.environ['SERVICE'], run_name='__main__')"]

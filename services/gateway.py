@@ -24,7 +24,7 @@ from voice_tracker import domain, eventlog
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.media import store_attachments
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
+from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret, wait_for_shutdown
 from voice_tracker.timeutil import datetime_to_json
 
 
@@ -2878,9 +2878,16 @@ async def main() -> None:
     )
     supervise.attach(supervisor, heartbeat)
     try:
-        await client.connect()
+        # R26-12b: connect() бессрочный, а SIGTERM из docker stop раньше не
+        # доходил до python (CMD был `sh -c`) — отсюда wait_for_shutdown: по
+        # сигналу connect() отменяется и drain ниже реально исполняется.
+        # R26-12b r2: отмена connect() в discord.py 2.7.1 НЕ закрывает ни
+        # websocket, ни HTTP-сессию (у start/login/connect нет finally-close) —
+        # client закрывает только явный close(), он ниже в drain.
+        await wait_for_shutdown(client.connect())
     finally:
         await supervisor.shutdown()
+        await client.close()
         await bus.aclose()
         if singleton_guard:
             supervise.release_single_writer(repo.db, "gateway", supervise.INSTANCE_ID)

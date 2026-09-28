@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 import logging
 from os import environ
+import signal
 from typing import Any
 
 
@@ -209,3 +212,86 @@ async def register_commands_http(token: str, app_id: str, guild_id: str, command
             if response.status >= 400:
                 body = await response.text()
                 raise RuntimeError(f"discord command registration failed: {response.status} {body}")
+
+
+# R26-12b: сигналы штатной остановки контейнера (docker stop -> SIGTERM,
+# Ctrl+C в dev -> SIGINT).
+_SHUTDOWN_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGTERM, signal.SIGINT)
+
+
+async def wait_for_shutdown(work: Awaitable[Any] | None = None) -> Any:
+    """Гранд-стоп сервиса: ждёт SIGTERM/SIGINT и отдаёт управление в drain.
+
+    PID 1 в bot-контейнере — python (exec-form CMD), поэтому сигнал из
+    `docker stop` приходит напрямую в этот процесс. Свой обработчик обязателен:
+    CPython по умолчанию НЕ перехватывает SIGTERM, дефолтная реакция ядра —
+    немедленное завершение, и `finally` с supervisor.shutdown()/bus.aclose()
+    не исполнялся бы никогда (ровно это и было дефектом R26-12b).
+
+    `work` — бессрочный awaitable сервиса (client.connect()/client.start()):
+    если передан, ждём «что раньше» — завершилось ли само `work` (его результат
+    или ошибка уходят наружу, как и раньше) или пришёл останавливающий сигнал.
+    По сигналу `work` отменяется, чтобы `finally` вызывающего дренировал фоновые
+    задачи; возврат по сигналу ошибкой не считается.
+
+    Обработчики снимаются перед возвратом: после возврата disposition сигналов
+    снова та, что была до вызова (в контейнере — дефолтная).
+    """
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+
+    def wake_from_signal(*_args: Any) -> None:
+        # Резервный путь (Windows): обработчик сигнала выполняется между
+        # байткодами в основном потоке, а цикл может стоять в ожидании ввода —
+        # будим его явно через call_soon_threadsafe.
+        try:
+            loop.call_soon_threadsafe(stop.set)
+        except RuntimeError:
+            pass
+
+    saved: list[tuple[signal.Signals, bool, Any]] = []
+    for sig in _SHUTDOWN_SIGNALS:
+        previous = signal.getsignal(sig)
+        try:
+            loop.add_signal_handler(sig, stop.set)
+            via_loop = True
+        except (NotImplementedError, RuntimeError, ValueError, OSError):
+            # Windows (Proactor-цикл) add_signal_handler не реализует —
+            # остаётся signal.signal.
+            signal.signal(sig, wake_from_signal)
+            via_loop = False
+        saved.append((sig, via_loop, previous))
+    waiter = asyncio.ensure_future(stop.wait())
+    task = None if work is None else asyncio.ensure_future(work)
+    try:
+        if task is None:
+            await waiter
+            return None
+        done, _pending = await asyncio.wait((task, waiter), return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            return task.result()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logging.getLogger(__name__).info(
+                "service loop ended with error after shutdown signal", exc_info=True
+            )
+        return None
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+        for sig, via_loop, previous in saved:
+            if via_loop:
+                try:
+                    loop.remove_signal_handler(sig)
+                except (RuntimeError, ValueError, OSError):
+                    pass
+            try:
+                signal.signal(sig, previous)
+            except (TypeError, ValueError, OSError):
+                # disposition была выставлена на C-уровне (getsignal -> None) —
+                # возвращаем хотя бы дефолт ОС, своё вешать обратно нельзя.
+                signal.signal(sig, signal.SIG_DFL)
