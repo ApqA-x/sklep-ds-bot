@@ -28,6 +28,9 @@
      (mongodump в контейнере mongo, tar в образе gateway) и свободное место в
      приёмнике (BACKUP_MIN_FREE_MB). От любого отказа — ненулевой выход при
      НУЛЕВЫМ числе compose stop, без полуточки и без касания предыдущей точки.
+     Round 2 того же PR: формат порога — строго десятичный, без ведущих нулей,
+     максимум 15 цифр; переполнение/octal-трактовка в $(( )) не должны
+     превращать space-gate в fail-open (j-5..j-8).
 
 Номера вызовов age-«шифратора» в FAKE_AGE_FAIL_CALL/STALL_CALL: 1=preflight,
 2=mongo.archive.age, 3=media.age (round-trip preflight тоже шифрует).
@@ -774,6 +777,91 @@ def test_preflight_garbage_min_free_mb_refuses_before_freeze(h: Harness) -> None
     assert h.stop_calls() == []
     assert h.partials() == [] and h.finals() == [prior]
     assert h.snapshot(prior) == before
+
+
+def test_preflight_overflow_min_free_mb_refuses_before_freeze(h: Harness) -> None:
+    """(j-5, round 2 PR #74) BACKUP_MIN_FREE_MB=9007199254740992 (16 цифр):
+    прежний парсер принимал любую строку из цифр, а $((9007199254740992*1024))
+    переполнял signed 64-битную арифметику bash ровно в ноль — space-gate
+    становился fail-open (прогон ревьюера на 93a24a2: rc=0, compose stop 1 раз,
+    финальная точка). Порог ~8 EiB заведомо неисполним, отказ обязан быть на
+    парсинге ДО freeze: ненулевой выход, ноль stop, ни дампа, ни полуточки,
+    предпрогонная точка цела (B02)."""
+    prior = h.seed_prior_point()
+    before = h.snapshot(prior)
+    h.append_env_keys(BACKUP_MIN_FREE_MB="9007199254740992")
+    proc = h.run_backup()
+    assert proc.returncode != 0, "порог с переполнением обязан отказывать, а не открывать space-gate"
+    out = proc.stderr + proc.stdout
+    assert "preflight" in out and "BACKUP_MIN_FREE_MB" in out
+    assert h.stop_calls() == []
+    assert h.dump_calls() == [] and h.tar_calls() == []
+    assert h.partials() == [] and h.finals() == [prior]
+    assert h.snapshot(prior) == before
+    h.assert_no_plaintext_anywhere()
+
+
+def test_preflight_leading_zero_min_free_mb_refuses_before_freeze(h: Harness) -> None:
+    """(j-6, round 2) BACKUP_MIN_FREE_MB=010: ведущий ноль в $(( )) — молчаливая
+    восьмеричная 8, дескриптор env-настройки занижался (10 MiB → 8 MiB).
+    Поведение зафиксировано тестом: значение НЕВАЛИДНО — отказ ДО freeze с
+    прежним preflight-префиксом (не «10» и не «8»)."""
+    prior = h.seed_prior_point()
+    before = h.snapshot(prior)
+    h.append_env_keys(BACKUP_MIN_FREE_MB="010")
+    proc = h.run_backup()
+    assert proc.returncode != 0
+    out = proc.stderr + proc.stdout
+    assert "preflight" in out and "BACKUP_MIN_FREE_MB" in out
+    assert h.stop_calls() == []
+    assert h.dump_calls() == [] and h.tar_calls() == []
+    assert h.partials() == [] and h.finals() == [prior]
+    assert h.snapshot(prior) == before
+
+
+def test_preflight_overlong_min_free_mb_refuses_before_freeze(h: Harness) -> None:
+    """(j-7, round 2) BACKUP_MIN_FREE_MB=99999999999999999999 (20 цифр, i64 max
+    пройден): прежде $(( )) умирал с невнятным arithmetic-сообщением bash
+    (set -e), теперь — детерминированный отказ по капу длины (15 цифр) ДО
+    freeze, без записей и без синтаксической ошибки арифметики в выводе."""
+    prior = h.seed_prior_point()
+    before = h.snapshot(prior)
+    h.append_env_keys(BACKUP_MIN_FREE_MB="99999999999999999999")
+    proc = h.run_backup()
+    assert proc.returncode != 0
+    out = proc.stderr + proc.stdout
+    assert "preflight" in out and "BACKUP_MIN_FREE_MB" in out
+    assert "syntax error" not in out.lower(), \
+        "арифметическая ошибка $(( )) вместо preflight-сообщения — это прежний дефект"
+    assert h.stop_calls() == []
+    assert h.dump_calls() == [] and h.tar_calls() == []
+    assert h.partials() == [] and h.finals() == [prior]
+    assert h.snapshot(prior) == before
+
+
+def test_min_free_mb_validation_precedes_space_comparison() -> None:
+    """(j-8, статика) «сырое» $((BACKUP_MIN_FREE_MB * 1024)) остаётся ровно один
+    раз в файле — в итоговом сравнении, которое идёт ПОСЛЕ валидации формата
+    порога (цифры/ведущие нули/кап 15 цифр) и после валидации длины числа с df.
+    Порядок в preflight_tools_and_space фиксируется по номерам строк тела."""
+    common = (DEPLOY_BACKUP / "_backup_common.sh").read_text(encoding="utf-8")
+    assert common.count("$((BACKUP_MIN_FREE_MB * 1024))") == 1
+    body = common.split("preflight_tools_and_space()", 1)[1].split("\n}", 1)[0]
+    lines = body.splitlines()
+
+    def first(sub: str) -> int:
+        idx = [i for i, ln in enumerate(lines) if sub in ln]
+        assert idx, f"в preflight_tools_and_space не найдено: {sub!r}"
+        return idx[0]
+
+    min_case = first('case "$BACKUP_MIN_FREE_MB" in')
+    no_leading_zero = first('0?*)')
+    min_cap = first('"${#BACKUP_MIN_FREE_MB}" -le 15')
+    avail_case = first('case "$avail_kb" in')
+    avail_cap = first('"${#avail_kb}" -le')
+    compare = first('-ge "$((BACKUP_MIN_FREE_MB * 1024))"')
+    assert min_case < no_leading_zero < min_cap < avail_case < avail_cap < compare, \
+        "обе валидации обязаны предшествовать арифметическому сравнению"
 
 
 # ---------------------------------------------------------------- f/g) lock
