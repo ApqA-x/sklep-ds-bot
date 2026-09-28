@@ -2881,9 +2881,13 @@ async def main() -> None:
         # R26-12b: connect() бессрочный, а SIGTERM из docker stop раньше не
         # доходил до python (CMD был `sh -c`) — отсюда wait_for_shutdown: по
         # сигналу connect() отменяется и drain ниже реально исполняется.
+        # R26-12b r2: отмена connect() в discord.py 2.7.1 НЕ закрывает ни
+        # websocket, ни HTTP-сессию (у start/login/connect нет finally-close) —
+        # client закрывает только явный close(), он ниже в drain.
         await wait_for_shutdown(client.connect())
     finally:
         await supervisor.shutdown()
+        await client.close()
         await bus.aclose()
         if singleton_guard:
             supervise.release_single_writer(repo.db, "gateway", supervise.INSTANCE_ID)

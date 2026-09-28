@@ -434,11 +434,14 @@ async def main() -> None:
     )
     supervise.attach(supervisor, heartbeat)
     try:
-        # R26-12b: start() бессрочный — по SIGTERM/SIGINT отменяем его (сам
-        # start закроет client в своём finally), чтобы drain ниже исполнялся.
+        # R26-12b: start() бессрочный — по SIGTERM/SIGINT отменяем его, чтобы
+        # drain ниже исполнялся. R26-12b r2: в discord.py 2.7.1 start() НЕ
+        # закрывает client в своём finally (там вообще нет close-пути) —
+        # поэтому drain закрывает client явно ниже.
         await wait_for_shutdown(client.start(cfg.discord_token))
     finally:
         await supervisor.shutdown()
+        await client.close()
         await nats.drain()
         mongo_client.close()
 

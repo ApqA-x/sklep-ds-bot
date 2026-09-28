@@ -136,6 +136,9 @@ class FakeClient:
 
     def __init__(self, *args, **kwargs) -> None:
         self.user = SimpleNamespace(id="999")
+        # R26-12b r2: main() в drain вызывает await client.close() — fake обязан
+        # иметь его, иначе AttributeError в finally (учёт флага — в test_shutdown_sigterm).
+        self.closed = False
         FakeClient.instances.append(self)
 
     def event(self, callback):
@@ -147,6 +150,9 @@ class FakeClient:
 
     async def connect(self) -> None:
         return None
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 async def _noop(*_args, **_kwargs) -> None:
