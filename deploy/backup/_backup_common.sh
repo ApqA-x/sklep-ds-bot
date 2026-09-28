@@ -57,20 +57,30 @@ services_to_freeze() { # всё, что пишет (app-сервисы), кро�
   compose config --services | grep -vE '^(mongo|nats)$' | tr '\n' ' ' | sed 's/ $//'
 }
 
-dump_mongo_archive() { # mongo-контейнер живёт во время заморозки — exec ok
+dump_mongo_archive() { # dump_mongo_archive AGE_OUT — R26-09: стрим в age, plaintext не касается диска
+  # mongo-контейнер живёт во время заморозки — exec ok.
   # R26-07: mongod под --auth — дампу нужен URI с встроенной ролью backup
   # (dsbot_backup создан в РАБОЧЕЙ БД, authSource=<MONGO_DB> из env-примеров;
   # роль backup живёт в admin, но пользователя туда не переносит). --db остаётся:
   # в URI база не указана (путь "/"), конфликтов с --uri нет. Значение секретно и
   # в вывод не попадает (только как аргумент mongodump внутри контейнера).
+  # R26-09: stdout mongodump идёт напрямую в age --encrypt — на диске появляется
+  # только шифротекст. pipefail вызывающего скрипта превращает падение любой
+  # половины конвейера в ненулевой выход; age пишет только шифротекст, поэтому
+  # обрыв конвейера не оставляет незашифрованных данных (частичный .age — мусор).
   [ -n "${MONGO_BACKUP_URI:-}" ] \
     || die "MONGO_BACKUP_URI not set (R26-07: mongodump needs backup role)"
-  compose exec -T mongo mongodump --quiet --uri "$MONGO_BACKUP_URI" --db "$MONGO_DB" --archive > "$1"
+  compose exec -T mongo mongodump --quiet --uri "$MONGO_BACKUP_URI" --db "$MONGO_DB" --archive \
+    | age --encrypt -i "$BACKUP_AGE_KEY_FILE" -o "$1"
   [ -s "$1" ] || die "mongodump produced empty archive"
 }
 
-media_archive() { # frozen-сервис exec'нуть нельзя — одноразовый контейнер с тем же volume
-  compose run --rm --no-deps -T --entrypoint tar gateway -cf - -C /data/media . > "$1"
+media_archive() { # media_archive AGE_OUT — R26-09: tar-поток из контейнера сразу в age
+  # frozen-сервис exec'нуть нельзя — одноразовый контейнер с тем же volume;
+  # tar -c пишет в stdout, age шифрует на лету: media.tar на диске не возникает.
+  compose run --rm --no-deps -T --entrypoint tar gateway -cf - -C /data/media . \
+    | age --encrypt -i "$BACKUP_AGE_KEY_FILE" -o "$1"
+  [ -s "$1" ] || die "media archive produced empty ciphertext"
 }
 
 counts_json() {
@@ -91,12 +101,114 @@ container_label() { # container_label SERVICE KEY — OCI-метка образ�
 }
 
 # --- шифрование/целостность ---
-age_encrypt() { # age_encrypt IN OUT — симметрично по ключ-файлу (неинтерактивно)
-  age --encrypt -i "$BACKUP_AGE_KEY_FILE" -o "$2" "$1"
-}
-
+# R26-09: пост-обработка «plaintext-файл → age» удалена намеренно: единственный
+# путь шифрования — стрим (dump_mongo_archive/media_archive), незашифрованные
+# данные дампа на диск не пишутся. age_decrypt_stream остаётся для restore.
 age_decrypt_stream() { # stdout → расшифрованный поток (для restore)
   age --decrypt -i "$BACKUP_AGE_KEY_FILE" "$1"
+}
+
+# --- R26-09: preflight ключа и блокировка параллельных прогонов ---
+age_key_preflight() {
+  # Round-trip синтетики ДО freeze writers: 32 случайных байта → age --encrypt
+  # → age --decrypt → побайтовое сравнение. Ловит и нечитаемый/невалидный ключ,
+  # и сломанный age одним прогоном; вызывается до compose stop, поэтому отказ
+  # не стоит стенду простоя. Временный каталог — mktemp -d (700 при umask 077),
+  # probe-байты живут только в нём и уничтожаются здесь же.
+  local d rc=1
+  d="$(mktemp -d)"
+  if head -c 32 /dev/urandom > "$d/probe.bin" \
+     && age --encrypt -i "$BACKUP_AGE_KEY_FILE" -o "$d/probe.age" "$d/probe.bin" \
+     && age --decrypt -i "$BACKUP_AGE_KEY_FILE" "$d/probe.age" > "$d/probe.out"; then
+    cmp -s "$d/probe.bin" "$d/probe.out" && rc=0
+  fi
+  rm -rf "$d"
+  [ "$rc" = 0 ] \
+    || die "preflight: ключ age не читается/не валиден (round-trip encrypt→decrypt не прошёл) — backup прерван ДО остановки writers"
+}
+
+preflight_tools_and_space() {
+  # R26-09 (шаг 2 AI_RELEASE_REMAINING_WORK, добор PR #74): ДО freeze проверяется
+  # всё, без чего прогон обречён: инструменты — в их РЕАЛЬНОМ контексте
+  # исполнения, и свободное место — в том самом приёмнике, куда пойдёт запись.
+  # Порядок — дешёвое к дорогому: хостовая проверка места, затем пробы в
+  # контейнерах. Первый отказ = die: writers ещё стоят, полуточки нет,
+  # предыдущая точка не тронута (стенд не ложится впустую).
+  # Секреты не печатаются: значения MONGO_* и содержимое env-файла наружу не
+  # выводятся, только пути.
+  #
+  # 1) Порог и место (дешевле всего, без контейнеров). BACKUP_MIN_FREE_MB —
+  #    нижняя граница в MiB (default 64 — защита от «диск забит», не
+  #    рекомендация по размеру; ops обязан выставить от представительного
+  #    размера точки). Формат — строго десятичное неотрицательное число:
+  #    только цифры, без знака и пробелов, без ведущих нулей (ведущий ноль в
+  #    $(( )) — молчаливая восьмеричная трактовка: «010» давало 8 вместо 10),
+  #    максимум 15 цифр. Кап по длине гарантирует MB*1024 < 1.024e18 — иначе
+  #    16-значное 9007199254740992 переполняло signed 64-битную арифметику
+  #    bash ровно в ноль и гейт места становился fail-open (регресс PR #74,
+  #    round 2), а число за i64 max роняло скрипт невнятной arithmetic-ошибкой
+  #    вместо детерминированного отказа. Мусорное или слишком большое
+  #    значение — die ДО freeze; само значение в stderr не печатается.
+  BACKUP_MIN_FREE_MB="$(env_value BACKUP_MIN_FREE_MB)"
+  BACKUP_MIN_FREE_MB="${BACKUP_MIN_FREE_MB:-64}"
+  local min_free_err="preflight: BACKUP_MIN_FREE_MB должно быть строго десятичным числом MiB (без знака, пробелов и ведущих нулей, максимум 15 цифр) — backup прерван ДО остановки writers"
+  case "$BACKUP_MIN_FREE_MB" in
+    ''|*[!0-9]*|0?*) die "$min_free_err" ;;
+  esac
+  [ "${#BACKUP_MIN_FREE_MB}" -le 15 ] || die "$min_free_err"
+  local avail_kb
+  local avail_err="preflight: не удалось определить свободное место в $BACKUP_DIR (df -Pk) — backup прерван ДО остановки writers"
+  avail_kb="$(df -Pk "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')" || avail_kb=""
+  case "$avail_kb" in
+    # fail-closed: df не ответил (каталог исчез/прав нет) — не гадаем, отказ.
+    # Число с df проходит ту же дисциплину, что и порог: только цифры без
+    # ведущих нулей — сравнение ниже не должно видеть непроверенный операнд.
+    ''|*[!0-9]*|0?*) die "$avail_err" ;;
+  esac
+  # 18 цифр < i64 max: реальные значения df далеки от капа, проверка — страховка.
+  [ "${#avail_kb}" -le 18 ] || die "$avail_err"
+  # Сравнение осталось «сырым» $(( )) намеренно: обе стороны доказаны выше в
+  # десятичном диапазоне, где умножение и вычитание не пересекают i64.
+  [ "$avail_kb" -ge "$((BACKUP_MIN_FREE_MB * 1024))" ] \
+    || die "preflight: недостаточно свободного места в $BACKUP_DIR (есть ${avail_kb} KB, нужно ${BACKUP_MIN_FREE_MB} MB по BACKUP_MIN_FREE_MB) — backup прерван ДО остановки writers"
+  # 2) mongodump — проба внутри mongo-контейнера: он не заморожен во время
+  #    префлайта, exec валиден, и это ровно тот контекст (образ, PATH), откуда
+  #    работает dump_mongo_archive. Вывод наружу не идёт (может содержать
+  #    пути/версии), важен только код возврата.
+  compose exec -T mongo mongodump --version >/dev/null 2>&1 \
+    || die "preflight: mongodump недоступен в контейнере mongo ($MONGO_DB не будет снят) — backup прерван ДО остановки writers"
+  # 3) tar — проба одноразовым контейнером с тем же entrypoint-враппером и тем
+  #    же образом, что у media_archive (frozen-сервис exec'нуть нельзя — и мы
+  #    ещё до freeze, но контекст обязан совпадать с реальным снимком).
+  compose run --rm --no-deps -T --entrypoint tar gateway --version >/dev/null 2>&1 \
+    || die "preflight: tar недоступен в образе gateway — backup прерван ДО остановки writers"
+}
+
+OPS_LOCK_FD=9
+acquire_ops_lock() {
+  # Один прогон над точками профиля в любой момент: backup.sh и restore.sh
+  # берут ОДИН И ТОТ ЖЕ lock (fd наследуется дочерним retention-prune из
+  # того же shell — повторного захвата нет, дедлока нет). Отказ — до freeze
+  # и до любых записей. fail-closed: без flock параллельные прогоны не
+  # исключить, поэтому не стартуем вовсе.
+  # R26-09 (добор): имя/расположение lock-файла зеркалится в
+  # backup_retention.py::ops_lock_path (dest.parent/.ops-<dest.name>.lock при
+  # --dest=$BACKUP_DIR/$PROFILE) — менять строго в обоих местах сразу.
+  command -v flock >/dev/null 2>&1 \
+    || die "flock недоступен на хосте — backup/restore без блокировки параллельных прогонов запрещены (R26-09)"
+  local lockfile="$BACKUP_DIR/.ops-$PROFILE.lock"
+  exec 9>"$lockfile" || die "не удалось создать lock-файл: $lockfile"
+  flock -x -n "$OPS_LOCK_FD" \
+    || die "другой backup/restore уже выполняется (lock: $lockfile) — параллельные прогоны запрещены (R26-09)"
+}
+
+scrub_partial_plaintext() {
+  # Страховка в trap: если в незавершённом каталоге всё же существует
+  # plaintext-артефакт прежнего конвейера (mongo.archive / media.tar без
+  # .age-суффикса) — стереть. Вызывается только по $PARTIAL: после mv каталога
+  # с таким именем нет, готовые FINAL-архивы (…archive.age/…age) не трогаем.
+  [ -n "${1:-}" ] && [ -d "$1" ] || return 0
+  rm -f "$1/mongo.archive" "$1/media.tar"
 }
 
 verify_checksums() { # сверяет .age-файлы каталога с files.json ДО финализации

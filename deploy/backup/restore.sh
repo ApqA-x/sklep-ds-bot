@@ -26,6 +26,8 @@
 #        [--mode rehearsal|cutover] [--into-db NAME] [--state FILE] [--resume]
 #        [--keep] [--confirm-dest NAME]
 set -euo pipefail
+# R26-09: state/временные файлы прогона не создаются world-readable
+umask 077
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../scripts/_common.sh
@@ -82,6 +84,9 @@ esac
 
 require_docker
 load_backup_env
+# R26-09: тот же ops-lock, что и у backup.sh (backup во время restore невозможен
+# и наоборот). Только захват + сообщение; гейты R26-08 ниже не тронуты.
+acquire_ops_lock
 
 # стабильный по профилю default: повторный запуск без --resume упрётся в
 # чужой run id в state-файле (защита «повтор в один час», R26-08 п.4)

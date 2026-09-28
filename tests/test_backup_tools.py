@@ -117,6 +117,26 @@ def test_scan_keeps_manifestless_incomplete_visible(tmp_path: Path) -> None:
     assert len(entries) == 1 and not entries[0].verified
 
 
+def test_scan_and_plan_tolerate_private_700_points(tmp_path: Path) -> None:
+    # R26-09: backup.sh создаёт точки под umask 077 (каталоги 700). Тот же
+    # пользователь-оператор: scan()/plan() обязаны читать такие каталоги без
+    # падений, а plan — защищать последнюю проверенную точку как обычно.
+    point = tmp_path / "dsbot-production-20260925T010203Z"
+    point.mkdir(mode=0o700)
+    (point / "manifest.json").write_text(
+        json.dumps({"runId": "r", "profile": "production",
+                    "createdAtUtc": "2026-09-25T01:02:03Z"}),
+        encoding="utf-8")
+    (point / ".verified_ok").touch()
+    lock = tmp_path / ".ops-production.lock"  # скрытый служебный файл не точка
+    lock.touch(mode=0o600)
+    entries = backup_retention.scan(tmp_path, "production")
+    assert [Path(e.path).name for e in entries] == [point.name]
+    assert entries[0].verified
+    kept, deleted = backup_retention.plan(entries, datetime.now(UTC), 7, 4)
+    assert deleted == [] and kept == entries
+
+
 # ------------------------------------------------ manifest: состав и секрет-гард
 
 
