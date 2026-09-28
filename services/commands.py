@@ -38,7 +38,7 @@ from voice_tracker.discord_models import (
 )
 from voice_tracker.repository import Repository
 from voice_tracker import supervise
-from voice_tracker.runtime import configure_logging, load_config, register_commands_http
+from voice_tracker.runtime import configure_logging, load_config, register_commands_http, wait_for_shutdown
 from voice_tracker.site_audit import (
     MUTATING_ROUTES,
     REASON_DISABLED,
@@ -341,7 +341,7 @@ async def main() -> None:
             len(registered_commands),
             cfg.discord_guild_id or "global",
         )
-        await client.connect()
+        await wait_for_shutdown(client.connect())
     finally:
         await supervisor.shutdown()
         await client.close()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -152,6 +153,18 @@ async def _noop(*_args, **_kwargs) -> None:
     return None
 
 
+async def _yielding_noop(*_args, **_kwargs) -> None:
+    # R26-12b: заглушка asyncio.sleep обязана уступать цикл хотя бы раз. С
+    # wait_for_shutdown в main() фоновые задачи реально исполняются: если sleep
+    # резолвится без yield (как _noop), heartbeat-цикл `while True: ...; await
+    # sleep(15)` превращается в бесконечный спин без точек переключения и
+    # голодает event loop (зависание/крах всего pytest-процесса).
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    loop.call_soon(fut.set_result, None)
+    await fut
+
+
 def _async_entries(entries: list[object]):
     async def _iterator():
         for entry in entries:
@@ -177,7 +190,7 @@ def test_member_role_labels_skip_default_role() -> None:
 
 
 async def test_audit_member_remove_details_detects_kick(monkeypatch) -> None:
-    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    monkeypatch.setattr(gateway.asyncio, "sleep", _yielding_noop)
     now = gateway._utc_now()
     actor = SimpleNamespace(id="7", name="Mod", display_avatar=SimpleNamespace(url="https://example.com/mod.png"))
     entry = SimpleNamespace(created_at=now, target=SimpleNamespace(id="42"), user=actor)
@@ -199,14 +212,14 @@ async def test_audit_member_remove_details_detects_kick(monkeypatch) -> None:
 
 
 async def test_audit_member_remove_details_defaults_to_leaved(monkeypatch) -> None:
-    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    monkeypatch.setattr(gateway.asyncio, "sleep", _yielding_noop)
     guild = SimpleNamespace(audit_logs=lambda **_kwargs: _async_entries([]))
 
     assert await gateway._audit_member_remove_details(guild, "42") == ("leaved", "", "", "")
 
 
 async def test_audit_actor_for_voice_move_uses_recent_member_move(monkeypatch) -> None:
-    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    monkeypatch.setattr(gateway.asyncio, "sleep", _yielding_noop)
     actor = SimpleNamespace(id="7", name="Mover", display_avatar=SimpleNamespace(url="https://example.com/mover.png"))
     entry = SimpleNamespace(
         created_at=gateway._utc_now(),
@@ -224,7 +237,7 @@ async def test_audit_actor_for_voice_move_uses_recent_member_move(monkeypatch) -
 
 
 async def test_audit_actor_for_voice_move_ignores_stale_entries(monkeypatch) -> None:
-    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    monkeypatch.setattr(gateway.asyncio, "sleep", _yielding_noop)
     entry = SimpleNamespace(
         created_at=gateway._utc_now() - timedelta(minutes=1),
         target=SimpleNamespace(id="301"),
@@ -838,7 +851,7 @@ async def _boot_gateway(monkeypatch, fake_repo: FakeRepo) -> object:
     monkeypatch.setattr(gateway, "Bus", FakeBus)
     monkeypatch.setattr(gateway.discord, "Client", FakeClient)
     monkeypatch.setattr(gateway, "_deliver_pending", _noop)
-    monkeypatch.setattr(gateway.asyncio, "sleep", _noop)
+    monkeypatch.setattr(gateway.asyncio, "sleep", _yielding_noop)
 
     FakeClient.instances.clear()
     await gateway.main()

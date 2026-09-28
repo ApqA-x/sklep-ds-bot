@@ -26,7 +26,7 @@ from services.chat_templates import activity_unknown_event
 from voice_tracker import domain, eventlog, supervise
 from voice_tracker.bus import Bus
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
+from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret, wait_for_shutdown
 from voice_tracker.timeutil import discord_timestamp, go_duration, parse_datetime, positive_delta
 
 
@@ -502,7 +502,9 @@ async def main() -> None:
     supervise.attach(supervisor, heartbeat)
     await client.login(cfg.discord_token)
     try:
-        await client.connect()
+        # R26-12b: connect() бессрочный — по SIGTERM/SIGINT отменяем его, чтобы
+        # drain в finally (Discord/NATS/Mongo) исполнялся, а не ждал grace-kill.
+        await wait_for_shutdown(client.connect())
     finally:
         await supervisor.shutdown()
         await client.close()

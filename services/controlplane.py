@@ -22,7 +22,7 @@ from pymongo import MongoClient
 from voice_tracker.bus import decode_envelope, sign_envelope
 from voice_tracker import domain, supervise
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
+from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret, wait_for_shutdown
 
 
 logger = logging.getLogger(__name__)
@@ -434,7 +434,9 @@ async def main() -> None:
     )
     supervise.attach(supervisor, heartbeat)
     try:
-        await client.start(cfg.discord_token)
+        # R26-12b: start() бессрочный — по SIGTERM/SIGINT отменяем его (сам
+        # start закроет client в своём finally), чтобы drain ниже исполнялся.
+        await wait_for_shutdown(client.start(cfg.discord_token))
     finally:
         await supervisor.shutdown()
         await nats.drain()

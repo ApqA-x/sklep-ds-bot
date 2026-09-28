@@ -24,7 +24,7 @@ from voice_tracker import domain, eventlog
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.media import store_attachments
 from voice_tracker.repository import Repository
-from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret
+from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret, wait_for_shutdown
 from voice_tracker.timeutil import datetime_to_json
 
 
@@ -2878,7 +2878,10 @@ async def main() -> None:
     )
     supervise.attach(supervisor, heartbeat)
     try:
-        await client.connect()
+        # R26-12b: connect() бессрочный, а SIGTERM из docker stop раньше не
+        # доходил до python (CMD был `sh -c`) — отсюда wait_for_shutdown: по
+        # сигналу connect() отменяется и drain ниже реально исполняется.
+        await wait_for_shutdown(client.connect())
     finally:
         await supervisor.shutdown()
         await bus.aclose()
