@@ -164,7 +164,7 @@ printf '%s\\n' "$line" >> "$log"
 has() { local n="$1"; shift; local a; for a in "$@"; do [ "$a" = "$n" ] && return 0; done; return 1; }
 _arch="$(uname -m)"; case "$_arch" in x86_64) _arch=amd64 ;; aarch64) _arch=arm64 ;; esac
 if has buildx "$@"; then
-  printf 'Name: fake/registry\\nPlatform: linux/%s\\n' "$_arch"
+  printf 'Name: fake/registry\\nPlatform:    linux/%s\\n' "$_arch"
   exit 0
 fi
 if has config "$@"; then
