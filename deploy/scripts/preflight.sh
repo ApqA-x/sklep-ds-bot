@@ -36,7 +36,7 @@ grep -Eo '^(MONGO_IMAGE|NATS_IMAGE|BOT_[A-Z]+_IMAGE|WEB_IMAGE)=.*' "$ENV_FILE" |
   info "checking image $var ($TARGET_PLATFORM)"
   docker buildx imagetools inspect "$image" >/dev/null 2>&1 \
     || die "$var: digest not pullable (private registry? войдите: docker login ghcr.io) или не существует"
-  docker buildx imagetools inspect "$image" 2>/dev/null | grep -q "Platform: $TARGET_PLATFORM" \
+  docker buildx imagetools inspect "$image" 2>/dev/null | grep -Eq "^[[:space:]]*Platform:[[:space:]]+$TARGET_PLATFORM([[:space:]]|$)" \
     || die "$var: нет platform-варианта $TARGET_PLATFORM — не выкатывать на эту машину вслепую"
 done
 
