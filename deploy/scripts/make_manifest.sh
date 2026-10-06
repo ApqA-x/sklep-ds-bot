@@ -55,7 +55,7 @@ fi
   echo "  \"targetPlatform\": \"$TARGET_OS/$ARCH\","
   [ -f "$OUT/current.json" ] && echo "  \"previousManifest\": \"$(basename "$(readlink -f "$OUT/current.json" 2>/dev/null || echo "$OUT/current.json")")\"," || echo "  \"previousManifest\": null,"
   echo "  $SCHEMA_LINES,"
-  echo "  \"images\": {"
+  echo "  \"images\": ["
   FIRST=1
   while IFS='=' read -r var image; do
     [ -n "${image:-}" ] || continue
@@ -65,11 +65,12 @@ fi
     entry "${var%_IMAGE}" "$image"
   done < <(grep -Eo '^(MONGO_IMAGE|NATS_IMAGE|BOT_[A-Z]+_IMAGE|WEB_IMAGE)=.*' "$ENV_FILE")
   echo ""
-  echo "  },"
+  echo "  ],"
   echo "  \"compose\": \"$(basename "$COMPOSE_FILE")\","
   echo "  \"project\": \"$PROJECT\""
   echo "}"
 } > "$OUT/manifest-$STAMP.json"
 
+python3 -m json.tool "$OUT/manifest-$STAMP.json" >/dev/null || die "manifest JSON invalid"
 ln -sfn "manifest-$STAMP.json" "$OUT/current.json"
 info "manifest: $OUT/manifest-$STAMP.json (current -> него)"
