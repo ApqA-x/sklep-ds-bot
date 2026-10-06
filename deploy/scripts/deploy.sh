@@ -31,6 +31,6 @@ fi
 info "pulling pinned images"
 compose pull --quiet
 info "starting"
-compose up -d --remove-orphans
+compose up -d --wait --wait-timeout 120 --remove-orphans
 bash "$DEPLOY_DIR/scripts/status.sh" "$PROFILE"
 info "DONE"

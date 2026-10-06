@@ -114,7 +114,7 @@ BACKUP_DIR="$(sed -n 's/^BACKUP_DIR=//p' "$ENV_FILE" 2>/dev/null | head -1 || tr
 if [ -n "$BACKUP_DIR" ]; then
   echo
   info "свежесть точки восстановления (T14 B06):"
-  "$DEPLOY_DIR/backup/backup_status.sh" "$PROFILE" || info "см. docs/runbook-backup.md"
+  bash "$DEPLOY_DIR/backup/backup_status.sh" "$PROFILE" || info "см. docs/runbook-backup.md"
 fi
 
 echo

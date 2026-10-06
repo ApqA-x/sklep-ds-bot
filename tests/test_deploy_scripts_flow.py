@@ -484,13 +484,13 @@ def test_v2615_dry_run_without_flag_makes_no_mutating_calls(h: Harness, tmp_path
 
 def test_v2615_apply_performs_exactly_one_pull_one_up_then_status(h: Harness, tmp_path: Path) -> None:
     """V26-15: с --apply выполняются ровно одна `compose pull --quiet` и один
-    `compose up -d --remove-orphans`, затем ps из status.sh; порядок по логу."""
+    `compose up -d --wait --wait-timeout 120 --remove-orphans`, затем ps из status.sh; порядок по логу."""
     env = _write_env(tmp_path, "staging")
     proc = h.run("deploy.sh", ["staging", "--apply"], envfile=env)
     assert proc.returncode == 0, proc.stderr[-800:]
     pulls, ups = _pull_calls(h), _up_calls(h)
     assert len(pulls) == 1 and _has(pulls[0], "pull", "--quiet"), pulls
-    assert len(ups) == 1 and _has(ups[0], "up", "-d", "--remove-orphans"), ups
+    assert len(ups) == 1 and _has(ups[0], "up", "-d", "--wait", "--wait-timeout", "120", "--remove-orphans"), ups
     calls = h.calls()
     i_pull = next(i for i, c in enumerate(calls) if _has(c, "pull"))
     i_up = next(i for i, c in enumerate(calls) if _has(c, "up", "-d"))
