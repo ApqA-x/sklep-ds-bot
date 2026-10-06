@@ -63,7 +63,7 @@ fi
     [ $FIRST -eq 0 ] && echo ","
     FIRST=0
     entry "${var%_IMAGE}" "$image"
-  done < <(grep -Eo '^(MONGO_IMAGE|NATS_IMAGE|BOT_[A-Z]+_IMAGE|WEB_IMAGE)=.*' "$ENV_FILE" | sed 's/=/ /1')
+  done < <(grep -Eo '^(MONGO_IMAGE|NATS_IMAGE|BOT_[A-Z]+_IMAGE|WEB_IMAGE)=.*' "$ENV_FILE")
   echo ""
   echo "  },"
   echo "  \"compose\": \"$(basename "$COMPOSE_FILE")\","
