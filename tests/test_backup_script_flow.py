@@ -119,7 +119,11 @@ case "${1:-}" in
         fi
         exit 0 ;;
       ps)
-        if [[ "$*" == *-q* ]]; then echo "fakecid"; exit 0; fi
+        if [[ "$*" == *-q* ]]; then
+          # The gateway is stopped during backup; plain ps -q must hide it.
+          if [[ "$*" == *-a* ]]; then echo "fakecid"; fi
+          exit 0
+        fi
         # ps --services — «поднятые» сервисы: freeze запоминает их для unfreeze
         printf 'gateway\ntracker\nweb\nmongo\nnats\n'
         exit 0 ;;
@@ -575,6 +579,8 @@ def test_happy_path_stream_encrypt_freeze_perms(h: Harness) -> None:
     assert len(finals) == 1
     final = finals[0]
     assert (final / ".verified_ok").is_file()
+    manifest = json.loads((final / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source"]["appRevision"] == "fakerevisioncafe1234"
     assert {p.name for p in final.iterdir()} == \
         {"mongo.archive.age", "media.age", "manifest.json", ".verified_ok"}
     assert h.partials() == []  # финализация доведена, orphan'ов нет

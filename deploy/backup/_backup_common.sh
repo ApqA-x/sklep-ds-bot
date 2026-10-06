@@ -95,7 +95,9 @@ media_manifest_json() {
 
 container_label() { # container_label SERVICE KEY — OCI-метка образа сервиса (может быть пусто)
   local cid
-  cid="$(compose ps -q "$1" 2>/dev/null | head -1)"
+  # Writers are frozen while the manifest is assembled; include the stopped
+  # gateway or its OCI revision silently disappears from the backup metadata.
+  cid="$(compose ps -a -q "$1" 2>/dev/null | head -1)"
   [ -n "$cid" ] || return 1
   docker inspect -f "{{ index .Config.Labels \"$2\" }}" "$cid" 2>/dev/null | grep -v '^<nil>$'
 }
