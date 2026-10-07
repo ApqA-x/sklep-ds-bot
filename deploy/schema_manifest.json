@@ -1008,6 +1008,25 @@
       "collection": "operations",
       "keys": [
         [
+          "auditState",
+          1
+        ],
+        [
+          "updatedAt",
+          1
+        ]
+      ],
+      "name": "web_operations_auditState_updatedAt",
+      "owner": "web",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
+      "collection": "operations",
+      "keys": [
+        [
           "createdAt",
           1
         ]
