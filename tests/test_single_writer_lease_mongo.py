@@ -27,7 +27,7 @@ def db():
     except Exception:
         client.close()
         pytest.skip("test mongod is not running")
-    name = f"voice_tracker_writer_{uuid.uuid4().hex[:10]}"
+    name = f"voice_tracker_twriter_{uuid.uuid4().hex[:10]}"
     guard_db_name(name)
     database = client[name]
     yield database
