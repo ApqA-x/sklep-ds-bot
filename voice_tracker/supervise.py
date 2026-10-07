@@ -22,15 +22,23 @@ import random
 import re
 import socket
 import time
-from datetime import UTC, datetime
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_COLLECTION = "bot_runtime_heartbeats"
-# E09 (R26-02): identity процесса-издателя. Порядок seq внутри scope держит
-# bucket-lock одного процесса; второй параллельный gateway его ломает, поэтому
-# startup сверяется со свежим heartbeat ДРУГОГО instance и отказывает.
+SINGLE_WRITER_COLLECTION = "bot_single_writer_leases"
+
+
+class SingleWriterLeaseLost(RuntimeError):
+    """The gateway must stop emitting events when its fence is no longer current."""
+
+
+# Hostname is diagnostic identity in heartbeats. The lease owner below is a
+# fresh random token for each process, including restarts on the same host.
 INSTANCE_ID = socket.gethostname()
 # R26-10: время старта процесса попадает в heartbeat-док (started_at) —
 # healthcheck отличает «процесс в startup grace» от «цикл давно без прогресса».
@@ -56,10 +64,7 @@ def backoff_seconds(
 def evaluate_single_writer(
     doc: Any, our_instance: str, now: datetime, max_age_seconds: float
 ) -> str | None:
-    """E09 (R26-02): чистая проверка — можно ли стартовать этому instance.
-    Отказ только по СВЕЖЕМУ heartbeat другого живого instance; наш же instance
-    (рестарт того же контейнера), просроченный или снятый при graceful stop —
-    проходные. None — стартовать можно, иначе причина отказа."""
+    """Legacy heartbeat diagnostic; not used for the atomic lease decision."""
     if not isinstance(doc, dict):
         return None
     if doc.get("stopped") is True:
@@ -80,32 +85,80 @@ def evaluate_single_writer(
     )
 
 
+@dataclass
+class SingleWriterLease:
+    db: Any
+    worker: str
+    instance: str
+    owner: str
+    fence: int
+    ttl_seconds: float
+
+    def _owned_filter(self) -> dict[str, Any]:
+        return {"_id": self.worker, "owner": self.owner, "fence": self.fence, "stopped": False}
+
+    def ensure_current(self) -> None:
+        """Fail closed before publishing or changing an ordered sequence."""
+        where = {**self._owned_filter(), "expiresAt": {"$gt": datetime.now(UTC)}}
+        if self.db[SINGLE_WRITER_COLLECTION].find_one(where) is None:
+            raise SingleWriterLeaseLost(f"single-writer lease lost: {self.worker}")
+
+    def renew(self) -> None:
+        from pymongo import ReturnDocument
+
+        now = datetime.now(UTC)
+        doc = self.db[SINGLE_WRITER_COLLECTION].find_one_and_update(
+            {**self._owned_filter(), "expiresAt": {"$gt": now}},
+            {"$set": {"expiresAt": now + timedelta(seconds=self.ttl_seconds), "updatedAt": now}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if doc is None:
+            raise SingleWriterLeaseLost(f"single-writer lease lost: {self.worker}")
+
+    def release(self) -> None:
+        self.db[SINGLE_WRITER_COLLECTION].update_one(
+            self._owned_filter(),
+            {"$set": {"stopped": True, "expiresAt": datetime.now(UTC), "updatedAt": datetime.now(UTC)}},
+        )
+
+
 def claim_single_writer(
     db: Any, worker: str, instance: str, *, max_age_seconds: float = 90.0
-) -> None:
-    """Startup-guard издателя: держим heartbeat-строку за собой до первого тика.
-    Атомарность — одна строка на worker в практике (replace_one upsert по
-    {"worker"}), гонка двух холодных стартов — известное ограничение без
-    unique-индекса; основной защитимый случай — второй живой writer."""
+) -> SingleWriterLease:
+    """Atomic CAS lease. `_id=worker` is Mongo's built-in unique constraint.
+
+    A fresh process always gets a distinct owner and a monotonically increasing
+    fence, even when it starts with the same hostname as its predecessor.
+    """
+    from pymongo import ReturnDocument
+    from pymongo.errors import DuplicateKeyError
+
     now = datetime.now(UTC)
-    doc = db[HEARTBEAT_COLLECTION].find_one({"worker": worker})
-    reason = evaluate_single_writer(doc, instance, now, max_age_seconds)
-    if reason is not None:
-        raise RuntimeError(reason)
-    db[HEARTBEAT_COLLECTION].update_one(
-        {"worker": worker},
-        {"$set": {"worker": worker, "instance": instance, "updated_at": now, "stopped": False}},
-        upsert=True,
-    )
+    owner = uuid.uuid4().hex
+    expiry = now + timedelta(seconds=max_age_seconds)
+    coll = db[SINGLE_WRITER_COLLECTION]
+    try:
+        coll.insert_one({
+            "_id": worker, "worker": worker, "instance": instance, "owner": owner,
+            "fence": 1, "expiresAt": expiry, "updatedAt": now, "stopped": False,
+        })
+        fence = 1
+    except DuplicateKeyError:
+        doc = coll.find_one_and_update(
+            {"_id": worker, "$or": [{"stopped": True}, {"expiresAt": {"$lte": now}}]},
+            {"$set": {"instance": instance, "owner": owner, "expiresAt": expiry,
+                      "updatedAt": now, "stopped": False}, "$inc": {"fence": 1}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if doc is None:
+            raise RuntimeError(f"single-writer lease held by another process: {worker}")
+        fence = int(doc["fence"])
+    return SingleWriterLease(db, worker, instance, owner, fence, max_age_seconds)
 
 
-def release_single_writer(db: Any, worker: str, instance: str) -> None:
-    """Graceful stop: снимаем с себя право (stopped=True), чтобы быстрый рестарт
-    нового контейнера не был отвергнут собственным свежим heartbeat."""
-    db[HEARTBEAT_COLLECTION].update_one(
-        {"worker": worker, "instance": instance},
-        {"$set": {"stopped": True, "updated_at": datetime.now(UTC)}},
-    )
+def release_single_writer(lease: SingleWriterLease) -> None:
+    """A superseded owner cannot release a successor's lease."""
+    lease.release()
 
 
 def _error_name(exc: BaseException) -> str:

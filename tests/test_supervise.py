@@ -315,36 +315,71 @@ def test_single_writer_claim_and_release() -> None:
             self.docs = {}
 
         def find_one(self, flt):
-            d = self.docs.get(flt["worker"])
-            return dict(d) if d else None
+            d = self.docs.get(flt["_id"])
+            if d is None or any(
+                d.get(key) != value for key, value in flt.items()
+                if key not in {"_id", "expiresAt"}
+            ):
+                return None
+            if "expiresAt" in flt and not d["expiresAt"] > flt["expiresAt"]["$gt"]:
+                return None
+            return dict(d)
+
+        def insert_one(self, doc):
+            from pymongo.errors import DuplicateKeyError
+
+            if doc["_id"] in self.docs:
+                raise DuplicateKeyError("duplicate _id")
+            self.docs[doc["_id"]] = dict(doc)
+
+        def find_one_and_update(self, flt, update, return_document=None):
+            d = self.docs.get(flt["_id"])
+            if d is None:
+                return None
+            alternate = flt.get("$or")
+            if alternate and not (d.get("stopped") is True or d["expiresAt"] <= alternate[1]["expiresAt"]["$lte"]):
+                return None
+            if not alternate and self.find_one(flt) is None:
+                return None
+            d.update(update["$set"])
+            if "$inc" in update:
+                d["fence"] += update["$inc"]["fence"]
+            return dict(d)
 
         def update_one(self, flt, update, upsert=False):
-            key = flt["worker"]
-            if key in self.docs:
-                self.docs[key].update(update["$set"])
-            elif upsert:
-                self.docs[key] = dict(update["$set"])
+            if self.find_one(flt) is not None:
+                self.docs[flt["_id"]].update(update["$set"])
 
     coll = _Coll()
 
     class _Db:
         def __getitem__(self, name):
-            assert name == supervise.HEARTBEAT_COLLECTION
+            assert name == supervise.SINGLE_WRITER_COLLECTION
             return coll
 
     real_db = _Db()
-    supervise.claim_single_writer(real_db, "gateway", "host-a")
+    first = supervise.claim_single_writer(real_db, "gateway", "host-a")
     assert coll.docs["gateway"]["instance"] == "host-a"
+    assert first.fence == 1
     # второй живой instance отвергается
-    with pytest.raises(RuntimeError, match="host-a"):
+    with pytest.raises(RuntimeError, match="gateway"):
         supervise.claim_single_writer(real_db, "gateway", "host-b")
-    # рестарт того же instance — проходит
-    supervise.claim_single_writer(real_db, "gateway", "host-a")
+    # Even the same hostname is a different process and cannot steal the lease.
+    with pytest.raises(RuntimeError, match="gateway"):
+        supervise.claim_single_writer(real_db, "gateway", "host-a")
     # graceful stop снимает блок для нового instance
-    supervise.release_single_writer(real_db, "gateway", "host-a")
+    supervise.release_single_writer(first)
     assert coll.docs["gateway"]["stopped"] is True
-    supervise.claim_single_writer(real_db, "gateway", "host-b")
+    second = supervise.claim_single_writer(real_db, "gateway", "host-b")
     assert coll.docs["gateway"]["instance"] == "host-b"
+    assert second.fence == 2
+    with pytest.raises(supervise.SingleWriterLeaseLost):
+        first.ensure_current()
+    with pytest.raises(supervise.SingleWriterLeaseLost):
+        first.renew()
+    first.release()
+    assert coll.docs["gateway"]["stopped"] is False
+    second.renew()
 
 
 # ============================================================ R26-10 (V26-24)

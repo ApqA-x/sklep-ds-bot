@@ -1947,16 +1947,16 @@ async def main() -> None:
     else:
         repo.verify_startup()
 
-    # E09 (R26-02): gateway — единственный writer порядка voice.events (seq
-    # выдаётся под bucket-lock этого процесса). Свежий heartbeat другого
-    # instance = второй writer ломает гарантию порядка → старт отказан.
+    # Gateway is the only publisher of ordered voice.events. A Mongo CAS lease
+    # uses `_id=worker` for uniqueness and a fresh owner/fence per process.
     # getattr(...,0): боевой Config всегда несёт поле (=90); тестовые подставные
     # cfg без поля проходят мимо guard.
     singleton_max_age = getattr(cfg, "gateway_singleton_max_age_seconds", 0)
     singleton_guard = singleton_max_age > 0
+    writer_lease = None
     if singleton_guard:
         try:
-            supervise.claim_single_writer(
+            writer_lease = supervise.claim_single_writer(
                 repo.db, "gateway", supervise.INSTANCE_ID,
                 max_age_seconds=float(singleton_max_age),
             )
@@ -1964,10 +1964,21 @@ async def main() -> None:
             mongo_client.close()
             raise SystemExit(str(exc)) from None
 
+    lease_task = None
+    if writer_lease is not None:
+        async def renew_writer_lease() -> None:
+            while True:
+                await asyncio.sleep(max(1.0, float(singleton_max_age) / 3))
+                await asyncio.to_thread(writer_lease.renew)
+
+        # Begin renewal before Discord login and initial reconciliation, which
+        # may take longer than one lease TTL on a large guild.
+        lease_task = asyncio.create_task(renew_writer_lease(), name="gateway-writer-lease")
+
     nats = NATS()
     await nats.connect(cfg.nats_url)
     bus = Bus(nats, cfg.event_signing_secret, "gateway", max_age_seconds=cfg.event_max_age_seconds)
-    durable_bus = eventlog.DurablePublisher(bus, repo.db, issuer="gateway")
+    durable_bus = eventlog.DurablePublisher(bus, repo.db, issuer="gateway", writer_lease=writer_lease)
     settings = repo.get_guild_settings(None, cfg.discord_guild_id) or domain.GuildSettings(guild_id=cfg.discord_guild_id)
     logger.info(
         "invite feature defaults guild=%s snapshot=%s live=%s reconciliation=%s userinfo=%s",
@@ -2718,6 +2729,8 @@ async def main() -> None:
     async def sweep_pending() -> None:
         while True:
             await asyncio.sleep(60)
+            if writer_lease is not None:
+                await asyncio.to_thread(writer_lease.ensure_current)
             # R26-10.3: две подоперации (pending-delivery и журнал событий).
             # beat — только когда вся итерация прошла без исключений; серия
             # отказов растёт ровно на 1 за итерацию, а не за подоперацию.
@@ -2735,7 +2748,7 @@ async def main() -> None:
                     domain.SUBJECT_ACTIVITY_EVENT,
                     domain.SUBJECT_SESSION_CLOSED,
                 ):
-                    await eventlog.republish_pending(bus, repo.db, subject)
+                    await eventlog.republish_pending(bus, repo.db, subject, writer_lease=writer_lease)
                 n = await eventlog.sweep_pending(
                     repo.db,
                     "gateway",
@@ -2877,6 +2890,21 @@ async def main() -> None:
         },
     )
     supervise.attach(supervisor, heartbeat)
+    async def connect_with_lease_guard() -> None:
+        connect_task = asyncio.create_task(client.connect(), name="gateway-discord-connect")
+        try:
+            done, _ = await asyncio.wait((connect_task, lease_task), return_when=asyncio.FIRST_COMPLETED)
+            if lease_task in done:
+                # A lost lease must terminate this publisher, including when
+                # Discord is idle and no event callback can observe the loss.
+                await client.close()
+                raise RuntimeError("gateway single-writer lease lost") from lease_task.exception()
+            await connect_task
+        finally:
+            if not connect_task.done():
+                connect_task.cancel()
+                await asyncio.gather(connect_task, return_exceptions=True)
+
     try:
         # R26-12b: connect() бессрочный, а SIGTERM из docker stop раньше не
         # доходил до python (CMD был `sh -c`) — отсюда wait_for_shutdown: по
@@ -2884,13 +2912,16 @@ async def main() -> None:
         # R26-12b r2: отмена connect() в discord.py 2.7.1 НЕ закрывает ни
         # websocket, ни HTTP-сессию (у start/login/connect нет finally-close) —
         # client закрывает только явный close(), он ниже в drain.
-        await wait_for_shutdown(client.connect())
+        await wait_for_shutdown(connect_with_lease_guard() if lease_task is not None else client.connect())
     finally:
+        if lease_task is not None:
+            lease_task.cancel()
+            await asyncio.gather(lease_task, return_exceptions=True)
         await supervisor.shutdown()
         await client.close()
         await bus.aclose()
-        if singleton_guard:
-            supervise.release_single_writer(repo.db, "gateway", supervise.INSTANCE_ID)
+        if writer_lease is not None:
+            supervise.release_single_writer(writer_lease)
         mongo_client.close()
 
 
