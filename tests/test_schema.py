@@ -79,6 +79,7 @@ def test_web_subset_matches_web_indexes_list() -> None:
         ("chat_presets", "guildId_1_createdAt_1", "chat_presets_guildId_createdAt"),
         ("operations", "guildId_1_batchId_1", "web_operations_guildId_batchId"),
         ("operations", "guildId_1_createdAt_-1", "web_operations_guildId_createdAt"),
+        ("operations", "auditState_1_updatedAt_1", "web_operations_auditState_updatedAt"),
     }
     assert pairs == expected
 

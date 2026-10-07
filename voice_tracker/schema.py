@@ -171,6 +171,10 @@ MANIFEST: tuple[IndexSpec, ...] = (
     # --- operations journal (T08)
     _spec(OP, [("guildId", 1), ("batchId", 1)], owner="web", name="web_operations_guildId_batchId"),
     _spec(OP, [("guildId", 1), ("createdAt", -1)], owner="web", name="web_operations_guildId_createdAt"),
+    # Web audit recovery scans terminal operations with a durable pending/error
+    # marker. Keep each 30-second replay bounded by the outstanding backlog.
+    _spec(OP, [("auditState", 1), ("updatedAt", 1)], owner="web",
+          name="web_operations_auditState_updatedAt"),
     # --- только runner'ом (M2/M3/M4): additive TTL и уникальные индексы поверх dedup/состояния
     _spec(OP, [("createdAt", 1)], owner="runner", name="operations_createdAt_ttl",
           ttl=OPERATIONS_TTL_SECONDS),
