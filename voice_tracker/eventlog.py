@@ -189,6 +189,7 @@ async def publish_durable(
     value: Any,
     *,
     event_id: str | None = None,
+    writer_lease: Any = None,
 ) -> str:
     """Записать в журнал и попробовать опубликовать. Сбой транспорта не теряет
     событие: строка остаётся с publishedAt=None и будет повторена republish_pending
@@ -197,6 +198,8 @@ async def publish_durable(
         json.dumps(_plain(value), ensure_ascii=False, default=str)
     )
     eid = await asyncio.to_thread(record, db, subject, payload, event_id=event_id)
+    if writer_lease is not None:
+        await asyncio.to_thread(writer_lease.ensure_current)
     try:
         await bus.publish_json(subject, value, message_id=eid)
         await asyncio.to_thread(
@@ -218,12 +221,15 @@ def _unpublished_rows(db: Any, subject: str, limit: int) -> list[dict]:
     )
 
 
-async def republish_pending(bus: Any, db: Any, subject: str, *, limit: int = 50) -> int:
+async def republish_pending(bus: Any, db: Any, subject: str, *, limit: int = 50,
+                            writer_lease: Any = None) -> int:
     """Повторная доставка устойчивых, но не подтверждённых транспортом событий.
     Тот же event_id → тот же message_id → потребители дедуплицируют (E02)."""
     rows = await asyncio.to_thread(_unpublished_rows, db, subject, limit)
     republished = 0
     for row in rows:
+        if writer_lease is not None:
+            await asyncio.to_thread(writer_lease.ensure_current)
         try:
             await bus.publish_json(subject, row["payload"], message_id=row["_id"])
             await asyncio.to_thread(
@@ -1084,14 +1090,20 @@ class DurablePublisher:
     (guild,user) порядок seq совпадает с порядком вставки в журнал. Seq
     назначается из того же счётчика event_seq, что и consume-side доназначение,
     поэтому mixed backlog (легаси-строки без seq) упорядочивается согласованно.
-    Вне bucket-лока издателя (второй репликой gateway) порядок не гарантируется —
-    startup-guard E09 отказывает второму writer'у."""
+    Every gateway call checks the current fenced lease before recording and
+    again before assigning a sequence or sending to NATS. A superseded
+    publisher raises instead of silently retrying as an active writer."""
 
-    def __init__(self, bus: Any, db: Any, *, issuer: str = "") -> None:
+    def __init__(self, bus: Any, db: Any, *, issuer: str = "", writer_lease: Any = None) -> None:
         self.bus = bus
         self.db = db
         self.issuer = issuer
+        self.writer_lease = writer_lease
         self._scope_locks: dict[str, asyncio.Lock] = {}
+
+    async def _ensure_writer(self) -> None:
+        if self.writer_lease is not None:
+            await asyncio.to_thread(self.writer_lease.ensure_current)
 
     def _scope_lock(self, scope: str) -> asyncio.Lock:
         if len(self._scope_locks) > 8192:
@@ -1108,13 +1120,16 @@ class DurablePublisher:
         )
         scope = derive_scope(subject, payload)
         if scope is None:
-            return await publish_durable(self.bus, self.db, subject, value, event_id=event_id)
+            return await publish_durable(self.bus, self.db, subject, value, event_id=event_id,
+                                         writer_lease=self.writer_lease)
         async with self._scope_lock(scope):
+            await self._ensure_writer()
             eid = await asyncio.to_thread(
                 record, self.db, subject, payload, event_id=event_id, issuer=self.issuer
             )
             row = await asyncio.to_thread(self.db[COLL_EVENT_LOG].find_one, {"_id": eid})
             if row is not None and row.get("seq") is None:
+                await self._ensure_writer()
                 seq = await asyncio.to_thread(_bump_seq_sync, self.db, subject, scope)
                 await asyncio.to_thread(
                     self.db[COLL_EVENT_LOG].update_one,
@@ -1122,12 +1137,17 @@ class DurablePublisher:
                     {"$set": {"seq": seq, "updatedAt": _utc_now()}},
                 )
             try:
+                await self._ensure_writer()
                 await self.bus.publish_json(subject, value, message_id=eid)
                 await asyncio.to_thread(
                     self.db[COLL_EVENT_LOG].update_one,
                     {"_id": eid}, {"$set": {"publishedAt": _utc_now(), "publishError": None}},
                 )
             except Exception as err:  # noqa: BLE001 — журнал устойчив, транспорт догонит
+                from .supervise import SingleWriterLeaseLost
+
+                if isinstance(err, SingleWriterLeaseLost):
+                    raise
                 await asyncio.to_thread(
                     self.db[COLL_EVENT_LOG].update_one,
                     {"_id": eid}, {"$set": {"publishedAt": None, "publishError": str(err)[:300]}},
@@ -1143,6 +1163,7 @@ class DurablePublisher:
             subject, value = args
         else:
             raise TypeError("publish_json expects subject/value or ctx/subject/value")
+        await self._ensure_writer()
         from .domain import SUBJECT_SESSION_CLOSED, SUBJECT_SUMMARY_READY, SUBJECT_VOICE_EVENT
 
         event_id = kwargs.get("event_id")
@@ -1162,7 +1183,8 @@ class DurablePublisher:
                 event_id = deterministic_event_id("session-closed", session_id)
         if subject == SUBJECT_VOICE_EVENT:
             return await self._publish_ordered(subject, value, event_id)
-        return await publish_durable(self.bus, self.db, subject, value, event_id=event_id)
+        return await publish_durable(self.bus, self.db, subject, value, event_id=event_id,
+                                     writer_lease=self.writer_lease)
 
 
 def _is_duplicate(err: Exception) -> bool:
