@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from voice_tracker.sleep_timers import SleepTimerBusy, SleepTimerStore
+from voice_tracker.sleep_audit import project_pending
 
 
 NOW = datetime(2026, 10, 8, 21, 0, tzinfo=UTC)
@@ -27,6 +28,13 @@ class Collection:
     def find_one(self, flt: dict) -> dict | None:
         with self.lock:
             return deepcopy(self.docs.get(flt["_id"]))
+
+    def find(self, flt: dict):
+        with self.lock:
+            if "auditPending.eventId" in flt:
+                return [deepcopy(doc) for doc in self.docs.values() if doc.get("auditPending")]
+            return [deepcopy(doc) for doc in self.docs.values()
+                    if doc.get("status") == flt.get("status")]
 
     def insert_one(self, doc: dict) -> None:
         with self.lock:
@@ -63,8 +71,12 @@ class Collection:
             doc = self.docs.get(flt["_id"])
             if doc is None or any(doc.get(key) != value for key, value in flt.items() if key != "_id"):
                 return SimpleNamespace(matched_count=0)
-            doc.update(update["$set"])
-            doc["revision"] += update["$inc"]["revision"]
+            doc.update(update.get("$set", {}))
+            doc["revision"] += update.get("$inc", {}).get("revision", 0)
+            for key, value in update.get("$push", {}).items():
+                doc.setdefault(key, []).append(deepcopy(value))
+            for key, value in update.get("$pull", {}).items():
+                doc[key] = [entry for entry in doc.get(key, []) if entry != value]
             return SimpleNamespace(matched_count=1)
 
     def update_many(self, flt: dict, update: dict):
@@ -240,3 +252,55 @@ def test_two_workers_cannot_claim_same_due_timer() -> None:
         a = pool.submit(store.claim_due, owner="a", fence=1, now=NOW + timedelta(hours=2))
         b = pool.submit(store.claim_due, owner="b", fence=2, now=NOW + timedelta(hours=2))
         assert sum(result is not None for result in (a.result(), b.result())) == 1
+
+
+def test_audit_projection_survives_failure_and_timer_replacement() -> None:
+    timers = Collection()
+    store = SleepTimerStore(timers)
+    set_timer(store, 2, "set-1")
+    claimed = store.claim_due(owner="gateway-a", fence=4, now=NOW + timedelta(hours=2))
+    assert claimed is not None
+    assert store.finish(
+        claimed, owner="gateway-a", fence=4, status="disconnected",
+        reason="discord_patch_succeeded", now=NOW + timedelta(hours=2, seconds=1),
+    )
+
+    class AuditCollection:
+        def __init__(self) -> None:
+            self.docs: dict[str, dict] = {}
+            self.fail = True
+
+        def update_one(self, flt, update, *, upsert):
+            if self.fail:
+                raise RuntimeError("audit unavailable")
+            self.docs.setdefault(flt["_id"], deepcopy(update["$setOnInsert"]))
+
+    audit = AuditCollection()
+    db = {"voice_sleep_timers": timers, "web_audit_logs": audit}
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        project_pending(db)
+    assert len(store.get("456", "123")["auditPending"]) == 2
+
+    audit.fail = False
+    assert project_pending(db) == 2
+    assert project_pending(db) == 0
+    assert len(audit.docs) == 2
+    result = next(doc for doc in audit.docs.values() if doc["action"] == "sleep.execute")
+    assert result["stage"] == "effect"
+    assert result["after"]["status"] == "disconnected"
+
+    set_timer(store, 3, "set-2", NOW + timedelta(hours=3))
+    assert project_pending(db) == 1
+    assert len(audit.docs) == 3
+    assert result["_id"] in audit.docs
+
+
+def test_stale_claim_audit_is_unknown_and_not_a_disconnect_effect() -> None:
+    timers = Collection()
+    store = SleepTimerStore(timers)
+    set_timer(store, 2, "set-1")
+    store.claim_due(owner="gateway-a", fence=4, now=NOW + timedelta(hours=2))
+    assert store.mark_stale_unknown(current_fence=5, now=NOW + timedelta(hours=3)) == 1
+    events = store.get("456", "123")["auditPending"]
+    assert events[-1]["status"] == "unknown"
+    assert events[-1]["reason"] == "gateway_restarted_during_execution"

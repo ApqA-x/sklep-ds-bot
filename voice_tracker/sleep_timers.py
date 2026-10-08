@@ -15,6 +15,7 @@ from typing import Any
 
 IDEMPOTENCY_DAYS = 90
 MAX_RECENT_REQUESTS = 1024
+MAX_PENDING_AUDIT = 4096
 MAX_CAS_ATTEMPTS = 16
 
 
@@ -65,6 +66,24 @@ def _restore_utc(value: Any) -> Any:
     return value
 
 
+def _audit_event(
+    timer: dict[str, Any], *, at: datetime, status: str, reason: str,
+    event_id: str, actor_user_id: str | None = None,
+    source: str | None = None, due_at: datetime | None = None,
+) -> dict[str, Any]:
+    return {
+        "eventId": event_id,
+        "guildId": timer["guildId"],
+        "targetUserId": timer["targetUserId"],
+        "actorUserId": actor_user_id or timer.get("actorUserId", ""),
+        "source": source or timer.get("source", ""),
+        "status": status,
+        "reason": reason,
+        "dueAt": due_at if due_at is not None else timer.get("dueAt"),
+        "at": at,
+    }
+
+
 class SleepTimerStore:
     def __init__(self, collection: Any) -> None:
         self.collection = collection
@@ -100,6 +119,10 @@ class SleepTimerStore:
         if status not in {"disconnected", "skipped", "failed", "unknown"}:
             raise ValueError("invalid final status")
         at = _now(now)
+        audit = _audit_event(
+            claimed, at=at, status=status, reason=reason,
+            event_id=f"sleep:{claimed['_id']}:revision:{claimed['revision'] + 1}",
+        )
         result = self.collection.update_one(
             {
                 "_id": claimed["_id"], "revision": claimed["revision"],
@@ -108,7 +131,7 @@ class SleepTimerStore:
             {"$set": {
                 "status": status, "reason": str(reason)[:256],
                 "resultAt": at, "updatedAt": at,
-            }, "$inc": {"revision": 1}},
+            }, "$inc": {"revision": 1}, "$push": {"auditPending": audit}},
         )
         return result.matched_count == 1
 
@@ -118,23 +141,29 @@ class SleepTimerStore:
     ) -> int:
         """A successor or restarted local loop never retries an uncertain call."""
         at = _now(now)
-        result = self.collection.update_many(
-            {"status": "executing", "claimFence": {"$lt": current_fence}},
-            {"$set": {
-                "status": "unknown", "reason": "gateway_restarted_during_execution",
-                "resultAt": at, "updatedAt": at,
-            }, "$inc": {"revision": 1}},
-        )
-        modified = result.modified_count
-        if current_owner is not None:
-            local = self.collection.update_many(
-                {"status": "executing", "claimOwner": current_owner},
-                {"$set": {
-                    "status": "unknown", "reason": "worker_loop_restarted_during_execution",
-                    "resultAt": at, "updatedAt": at,
-                }, "$inc": {"revision": 1}},
+        modified = 0
+        # A per-document CAS gives each uncertain result a deterministic audit
+        # event in the *same* atomic update as its final state.
+        for raw in self.collection.find({"status": "executing"}):
+            claimed = _restore_utc(raw)
+            stale = int(claimed.get("claimFence") or 0) < current_fence
+            local = current_owner is not None and claimed.get("claimOwner") == current_owner
+            if not stale and not local:
+                continue
+            reason = "gateway_restarted_during_execution" if stale else "worker_loop_restarted_during_execution"
+            audit = _audit_event(
+                claimed, at=at, status="unknown", reason=reason,
+                event_id=f"sleep:{claimed['_id']}:revision:{claimed['revision'] + 1}",
             )
-            modified += local.modified_count
+            result = self.collection.update_one(
+                {"_id": claimed["_id"], "revision": claimed["revision"],
+                 "status": "executing", "claimOwner": claimed.get("claimOwner"),
+                 "claimFence": claimed.get("claimFence")},
+                {"$set": {"status": "unknown", "reason": reason,
+                          "resultAt": at, "updatedAt": at},
+                 "$inc": {"revision": 1}, "$push": {"auditPending": audit}},
+            )
+            modified += result.matched_count
         return modified
 
     def set(
@@ -190,6 +219,9 @@ class SleepTimerStore:
             history = [entry for entry in history if entry["at"] >= cutoff]
             if len(history) >= MAX_RECENT_REQUESTS:
                 raise SleepTimerConflict("idempotency history full; wait for expiry")
+            audit_pending = list((old or {}).get("auditPending") or [])
+            if len(audit_pending) >= MAX_PENDING_AUDIT:
+                raise SleepTimerConflict("timer audit backlog full; retry after recovery")
             revision = int((old or {}).get("revision", 0)) + 1
             due_at = now + timedelta(hours=hours) if hours is not None else None
             prior_active = bool(old and old.get("status") == "pending")
@@ -212,6 +244,11 @@ class SleepTimerStore:
                 "updatedAt": now, "actorUserId": actor_user_id,
                 "source": source, "requestId": request_id,
                 "recentRequests": [*history, outcome],
+                "auditPending": [*audit_pending, _audit_event(
+                    new, at=now, status=status, reason=action,
+                    event_id=f"sleep:{key}:request:{request_id}",
+                    actor_user_id=actor_user_id, source=source, due_at=due_at,
+                )],
             })
             if action == "set":
                 new.update({"createdAt": now, "dueAt": due_at, "hours": hours})

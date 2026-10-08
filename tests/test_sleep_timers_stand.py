@@ -12,6 +12,7 @@ from pymongo import MongoClient
 
 from stand_guard import guard_db_name, guard_mongo_uri
 from voice_tracker.sleep_timers import SleepTimerStore
+from voice_tracker.sleep_audit import project_pending
 
 
 pytestmark = pytest.mark.integration
@@ -55,6 +56,13 @@ def test_concurrent_set_and_replay_on_real_mongo() -> None:
             assert store.claim_due(owner="other", fence=8, now=due + timedelta(hours=1)) is None
             assert store.finish(claimed, owner="gateway", fence=7, status="skipped", reason="absent")
             assert store.get("456", "123")["status"] == "skipped"
+            assert project_pending(db) == 3  # two sets and one final decision
+            assert project_pending(db) == 0
+            assert db["web_audit_logs"].count_documents({}) == 3
+            store.set("456", "123", 4, actor_user_id="789", source="slash",
+                      request_id="request-c", now=due + timedelta(hours=1))
+            assert project_pending(db) == 1
+            assert db["web_audit_logs"].count_documents({}) == 4
         finally:
             client.drop_database(db_name)
     finally:
