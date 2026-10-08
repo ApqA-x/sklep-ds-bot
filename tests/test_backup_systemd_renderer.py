@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import os
+import importlib.util
 from pathlib import Path
 
 import pytest
 
-from deploy.backup.render_systemd_units import UNIT_NAMES, render, render_template
+RENDERER = Path(__file__).resolve().parents[1] / "deploy" / "backup" / "render_systemd_units.py"
+spec = importlib.util.spec_from_file_location("render_systemd_units", RENDERER)
+assert spec is not None and spec.loader is not None
+renderer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(renderer)
+UNIT_NAMES = renderer.UNIT_NAMES
+render = renderer.render
+render_template = renderer.render_template
 
 
 def test_service_paths_are_rendered_from_real_deploy_directory() -> None:
