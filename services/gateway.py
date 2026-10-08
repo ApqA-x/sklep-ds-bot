@@ -2910,16 +2910,25 @@ async def main() -> None:
 
     async def sweep_sleep_timers() -> None:
         assert sleep_executor is not None
-        recovered = await sleep_executor.recover_stale()
+        try:
+            recovered = await sleep_executor.recover_stale()
+        except Exception as exc:
+            supervisor.fail("gateway-sleep-timers", exc)
+            raise
         if recovered:
             logger.warning("sleep timers left unknown after gateway restart count=%s", recovered)
         while True:
             await asyncio.sleep(1)
-            # Cap work per tick so other gateway event handlers retain time.
-            for _ in range(20):
-                if not await sleep_executor.run_once():
-                    break
-            supervisor.beat("gateway-sleep-timers")
+            try:
+                # Cap work per tick so other gateway event handlers retain time.
+                for _ in range(20):
+                    if not await sleep_executor.run_once():
+                        break
+            except Exception as exc:
+                supervisor.fail("gateway-sleep-timers", exc)
+                raise
+            else:
+                supervisor.beat("gateway-sleep-timers")
 
     # T12: все фоновые циклы под надзором — гибель наблюдаема (structured log +
     # снапшот в heartbeat), respawn с backoff+jitter; shutdown = cancel+await.
