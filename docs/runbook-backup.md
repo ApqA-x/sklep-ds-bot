@@ -33,6 +33,15 @@
 Linux (целевой хост, systemd-таймеры из `deploy/backup/systemd/`):
 
 ```bash
+cd /home/apqa/estera-prod-20261006/bot  # заменить на фактический checkout
+UNIT_STAGE="$(mktemp -d)"
+python3 deploy/backup/render_systemd_units.py \
+  --deploy-dir "$(pwd)/deploy" --output-dir "$UNIT_STAGE"
+cat "$UNIT_STAGE"/*.service        # сверить WorkingDirectory/ExecStart с этим checkout
+sudo install -m 0644 "$UNIT_STAGE"/*.service "$UNIT_STAGE"/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl cat dsbot-backup.service dsbot-backup-status.service
+# Включать только после проверки BACKUP_DIR/age-ключа и независимого хранения копии.
 sudo systemctl enable --now dsbot-backup.timer dsbot-backup-status.timer
 systemctl list-timers 'dsbot-backup*'   # последний/следующий запуск (B06)
 journalctl -u dsbot-backup.service -n 50
