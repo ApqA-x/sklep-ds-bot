@@ -111,7 +111,7 @@ def test_plan_reports_would_apply_for_all_pending_migrations() -> None:
     result = migrate.plan_and_apply(db, apply=False)
     assert result["dryRun"] is True
     assert [a["action"] for a in result["actions"]] == ["would-apply"] * len(migrate.MIGRATIONS)
-    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     # dry-run ничего не создал
     assert db.cols.get(schema.OP) is None or db.cols[schema.OP].indexes == []
 
@@ -254,3 +254,16 @@ def test_m9_creates_timer_collection_once_under_migration_role() -> None:
     assert migrate.VOICE_SLEEP_TIMERS_COLLECTION not in db.cols
     assert migrate._apply_sleep_timers_collection(db, dry=False)["created"] is True
     assert migrate._apply_sleep_timers_collection(db, dry=False)["created"] is False
+
+
+def test_m10_creates_canonical_due_scan_index() -> None:
+    db = FakeDB()
+    dry = migrate._apply_sleep_timer_due_index(db, dry=True)
+    assert dry["dryRun"] is True
+    assert db.cols == {}
+    applied = migrate._apply_sleep_timer_due_index(db, dry=False)
+    assert applied["index"] == "voice_sleep_timers.voice_sleep_status_due_id"
+    assert len(db["voice_sleep_timers"].indexes) == 1
+    keys, options = db["voice_sleep_timers"].indexes[0]
+    assert keys == (("status", 1), ("dueAt", 1), ("_id", 1))
+    assert dict(options)["name"] == "voice_sleep_status_due_id"

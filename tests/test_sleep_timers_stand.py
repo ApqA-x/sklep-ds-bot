@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pymongo import MongoClient
@@ -49,6 +49,12 @@ def test_concurrent_set_and_replay_on_real_mongo() -> None:
             assert {item["requestId"] for item in saved["recentRequests"]} == {"request-a", "request-b"}
             assert set_one("request-a", 2).replayed is True
             assert store.get("456", "123")["revision"] == 2
+            due = saved["dueAt"]
+            claimed = store.claim_due(owner="gateway", fence=7, now=due)
+            assert claimed is not None and claimed["status"] == "executing"
+            assert store.claim_due(owner="other", fence=8, now=due + timedelta(hours=1)) is None
+            assert store.finish(claimed, owner="gateway", fence=7, status="skipped", reason="absent")
+            assert store.get("456", "123")["status"] == "skipped"
         finally:
             client.drop_database(db_name)
     finally:
