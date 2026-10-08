@@ -24,6 +24,7 @@ from voice_tracker import domain, eventlog
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.media import store_attachments
 from voice_tracker.repository import Repository
+from voice_tracker.voice_presence import VoicePresenceTracker
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret, wait_for_shutdown
 from voice_tracker.timeutil import datetime_to_json
 
@@ -1998,6 +1999,9 @@ async def main() -> None:
     intents.message_content = True
     client = discord.Client(intents=intents)
     GatewayService(client, durable_bus).install()
+    # Sleep timers are not executable yet.  Record an independent, fail-closed
+    # voice-presence timeline for the future deadline worker.
+    voice_presence = VoicePresenceTracker(repo.db["voice_presence_observations"])
     invite_attribution = InviteAttributionController(
         client=client,
         repo=repo,
@@ -2083,9 +2087,24 @@ async def main() -> None:
 
     @client.event
     async def on_ready() -> None:
+        try:
+            await voice_presence.seed(client.guilds, cfg.discord_guild_id)
+        except Exception:
+            logger.exception("voice presence seed failed; sleep evidence unavailable")
         await invite_attribution.seed_on_ready()
         await voice_controller.reconcile()
         await reconcile_member_state_once()
+
+    @client.event
+    async def on_disconnect() -> None:
+        voice_presence.disconnected()
+
+    @client.event
+    async def on_resumed() -> None:
+        try:
+            await voice_presence.seed(client.guilds, cfg.discord_guild_id)
+        except Exception:
+            logger.exception("voice presence resume seed failed; sleep evidence unavailable")
 
     @client.event
     async def on_member_join(member: discord.Member) -> None:
@@ -2678,7 +2697,12 @@ async def main() -> None:
             ",".join(sorted(edit_kwargs)),
         )
 
+    async def _observe_voice_presence(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        if _guild_allowed(cfg.discord_guild_id, str(getattr(getattr(member, "guild", None), "id", "") or "")):
+            await voice_presence.observe(member, before, after)
+
     install_event_listener(client, "on_voice_state_update", _on_voice_state_update_activity)
+    install_event_listener(client, "on_voice_state_update", _observe_voice_presence)
     install_event_listener(client, "on_voice_state_update", _on_voice_state_update_unmute)
     install_event_listener(client, "on_voice_state_update", voice_controller.on_voice_state_update)
     install_event_listener(client, "on_voice_channel_effect", soundboard_enforcement.on_voice_channel_effect)

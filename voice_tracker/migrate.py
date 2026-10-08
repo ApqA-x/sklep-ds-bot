@@ -222,6 +222,21 @@ def _apply_guild_settings_revision_backfill(db: Any, dry: bool) -> dict:
             "backfilled": res.modified_count, "dryRun": False}
 
 
+VOICE_PRESENCE_COLLECTION = "voice_presence_observations"
+
+
+def _apply_voice_presence_collection(db: Any, dry: bool) -> dict:
+    """M8: pre-create the observation collection under the DDL-capable role.
+
+    Runtime credentials intentionally cannot implicitly create a collection.
+    The built-in _id index is sufficient for the one-document-per-user key.
+    """
+    exists = VOICE_PRESENCE_COLLECTION in db.list_collection_names()
+    if not dry and not exists:
+        db.create_collection(VOICE_PRESENCE_COLLECTION)
+    return {"collection": VOICE_PRESENCE_COLLECTION, "created": not exists and not dry, "dryRun": dry}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
@@ -230,6 +245,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "eventlog-sweep-cursor-indexes", _apply_sweep_cursor_indexes, backward_compatible=True),
     Migration(6, "eventlog-ordering-gate-index", _apply_ordering_gate_index, backward_compatible=True),
     Migration(7, "guild-settings-revision-backfill", _apply_guild_settings_revision_backfill,
+              backward_compatible=True),
+    Migration(8, "voice-presence-observations-collection", _apply_voice_presence_collection,
               backward_compatible=True),
 )
 
