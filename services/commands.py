@@ -18,6 +18,7 @@ from pymongo import MongoClient
 from services.chat_templates import dashboard_ranking_top
 from voice_tracker.appcommands import commands as application_commands
 from voice_tracker.commands import (
+    SLEEP_COMMAND_NAME,
     STATUS_COMMAND_NAME,
     Service as VoiceService,
     VOICE_COMMAND_NAMES,
@@ -37,6 +38,8 @@ from voice_tracker.discord_models import (
     User,
 )
 from voice_tracker.repository import Repository
+from voice_tracker.sleep_timers import SleepTimerBusy, SleepTimerConflict, SleepTimerStore
+from voice_tracker.timeutil import discord_timestamp
 from voice_tracker import supervise
 from voice_tracker.runtime import configure_logging, load_config, register_commands_http, wait_for_shutdown
 from voice_tracker.site_audit import (
@@ -474,6 +477,11 @@ async def _dispatch_command(
         )
     if root == "stalker":
         return _dispatch_stalker_command(service, model, command, options)
+    if root == SLEEP_COMMAND_NAME:
+        return await _dispatch_sleep_command(
+            SleepTimerStore(service.repo.db["voice_sleep_timers"]),
+            interaction, model, command, options,
+        )
     if root == "inspect" and (command == "channel" or (command == "" and _option_string(options, "channel") != "")):
         if access.get(root) != "all" and not _is_admin_only(model):
             return "Insufficient permissions."
@@ -542,6 +550,55 @@ def _dispatch_stalker_command(
     if command not in {"start", "stop", "list"}:
         return "Unknown stalker command."
     return service.handle_stalker_command(None, model, command, options)
+
+
+async def _dispatch_sleep_command(
+    store: SleepTimerStore,
+    interaction: discord.Interaction,
+    model: InteractionCreate,
+    command: str,
+    options: list[ApplicationCommandInteractionDataOption],
+) -> str:
+    """Slash interactions can only mutate their own guild/member timer."""
+    guild_id = model.guild_id
+    user_id = str(getattr(model.user, "id", "") or "")
+    if not guild_id or not user_id:
+        raise ValueError("Sleep timers require a server and a signed-in member.")
+    if command not in {"set", "status", "cancel"}:
+        raise ValueError("Unknown sleep command.")
+    if command != "set" and options:
+        raise ValueError("This sleep command accepts no options.")
+    if command == "status":
+        timer = await asyncio.to_thread(store.get, guild_id, user_id)
+        if timer is None:
+            return "You have no sleep timer."
+        due_at = timer.get("dueAt")
+        if timer.get("status") == "pending" and due_at is not None:
+            return f"Your sleep timer is set for {discord_timestamp(due_at)}."
+        return f"Your last sleep timer status: {timer.get('status', 'unknown')}."
+
+    request_id = str(getattr(interaction, "id", "") or "")
+    if not request_id:
+        raise ValueError("Discord interaction ID is required.")
+    try:
+        if command == "set":
+            if len(options) != 1 or options[0].name != "hours":
+                raise ValueError("Provide only hours from 1 to 24.")
+            hours = options[0].value
+            if isinstance(hours, bool) or not isinstance(hours, int) or not 1 <= hours <= 24:
+                raise ValueError("hours must be an integer from 1 to 24")
+            mutation = await asyncio.to_thread(
+                store.set, guild_id, user_id, hours,
+                actor_user_id=user_id, source="slash", request_id=request_id,
+            )
+            return f"You will be disconnected from voice at {discord_timestamp(mutation.outcome['dueAt'])}."
+        mutation = await asyncio.to_thread(
+            store.cancel, guild_id, user_id,
+            actor_user_id=user_id, source="slash", request_id=request_id,
+        )
+        return "Your sleep timer was cancelled." if mutation.outcome["hadActiveTimer"] else "You had no active sleep timer."
+    except (SleepTimerBusy, SleepTimerConflict) as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _dispatch_inspect_channel_command(

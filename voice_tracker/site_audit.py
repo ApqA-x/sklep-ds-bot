@@ -30,6 +30,7 @@ COMMAND_REJECTION_REASONS: dict[str, str] = {
     "Unknown unmute command.": REASON_UNKNOWN,
     "Unknown trusted command.": REASON_UNKNOWN,
     "Unknown stalker command.": REASON_UNKNOWN,
+    "Unknown sleep command.": REASON_UNKNOWN,
     "Command failed. Check service logs.": REASON_ERROR,
 }
 
@@ -44,6 +45,8 @@ MUTATING_ROUTES = frozenset(
         ("trusted", "remove"),
         ("stalker", "start"),
         ("stalker", "stop"),
+        ("sleep", "set"),
+        ("sleep", "cancel"),
         ("settings", "summary-set"),
         ("settings", "summary-clear"),
         ("settings", "activity-channel-set"),

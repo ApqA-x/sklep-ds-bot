@@ -27,6 +27,7 @@ TARGET_TOP_LEVEL_COMMAND_NAMES = {
     "status",
     "trusted",
     "stalker",
+    "sleep",
 }
 
 REMOVED_TOP_LEVEL_COMMAND_NAMES = {

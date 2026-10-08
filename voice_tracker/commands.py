@@ -46,6 +46,7 @@ USERINFO_COMMAND_NAME = "userinfo"
 STATUS_COMMAND_NAME = "status"
 TRUSTED_COMMAND_NAME = "trusted"
 STALKER_COMMAND_NAME = "stalker"
+SLEEP_COMMAND_NAME = "sleep"
 
 SETTINGS_ACTIVITY_CHANNEL_SET_COMMAND = "activity-channel-set"
 SETTINGS_ACTIVITY_CHANNEL_CLEAR_COMMAND = "activity-channel-clear"
@@ -64,6 +65,7 @@ VOICE_COMMAND_NAMES = {
     STATUS_COMMAND_NAME,
     TRUSTED_COMMAND_NAME,
     STALKER_COMMAND_NAME,
+    SLEEP_COMMAND_NAME,
 }
 INSPECT_HISTORY_ALL_COMMAND = "history.all"
 INSPECT_HISTORY_PICK_COMMAND = "history.pick"
@@ -132,6 +134,9 @@ COMMAND_POLICIES: dict[tuple[str, str], CommandPolicy] = {
     (STALKER_COMMAND_NAME, "start"): CommandPolicy(STALKER_COMMAND_NAME, "start", COMMAND_ACCESS_ALL_USER, None, "handle_stalker_command"),
     (STALKER_COMMAND_NAME, "stop"): CommandPolicy(STALKER_COMMAND_NAME, "stop", COMMAND_ACCESS_ALL_USER, None, "handle_stalker_command"),
     (STALKER_COMMAND_NAME, "list"): CommandPolicy(STALKER_COMMAND_NAME, "list", COMMAND_ACCESS_ALL_USER, None, "handle_stalker_command"),
+    (SLEEP_COMMAND_NAME, "set"): CommandPolicy(SLEEP_COMMAND_NAME, "set", COMMAND_ACCESS_ALL_USER),
+    (SLEEP_COMMAND_NAME, "status"): CommandPolicy(SLEEP_COMMAND_NAME, "status", COMMAND_ACCESS_ALL_USER),
+    (SLEEP_COMMAND_NAME, "cancel"): CommandPolicy(SLEEP_COMMAND_NAME, "cancel", COMMAND_ACCESS_ALL_USER),
 }
 
 COMMAND_ROUTE_ALIASES: dict[tuple[str, str], tuple[str, str]] = {
@@ -1063,6 +1068,7 @@ def voice_application_commands() -> list[ApplicationCommand]:
         status_application_command(),
         trusted_application_command(),
         stalker_application_command(),
+        sleep_application_command(),
     ]
 
 
@@ -1203,6 +1209,26 @@ def stalker_application_command() -> CommandDefinition:
                 options=[_user_option("user", "Member to stop stalking")],
             ),
             ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="list", description="List your stalked members"),
+        ],
+    )
+
+
+def sleep_application_command() -> CommandDefinition:
+    return CommandDefinition(
+        name=SLEEP_COMMAND_NAME,
+        description="Disconnect yourself from voice after a wall-clock delay",
+        options=[
+            ApplicationCommandOption(
+                type=OPTION_TYPE_SUB_COMMAND,
+                name="set",
+                description="Disconnect yourself after 1 to 24 hours",
+                options=[ApplicationCommandOption(
+                    type=OPTION_TYPE_INTEGER, name="hours",
+                    description="Hours from now (1–24)", required=True,
+                )],
+            ),
+            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="status", description="Show your sleep timer"),
+            ApplicationCommandOption(type=OPTION_TYPE_SUB_COMMAND, name="cancel", description="Cancel your sleep timer"),
         ],
     )
 
