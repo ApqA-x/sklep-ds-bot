@@ -95,6 +95,13 @@ class FakeDB:
     def __getitem__(self, name: str) -> FakeCol:
         return self.cols.setdefault(name, FakeCol(name))
 
+    def list_collection_names(self) -> list[str]:
+        return list(self.cols)
+
+    def create_collection(self, name: str) -> FakeCol:
+        assert name not in self.cols
+        return self[name]
+
 
 # ----------------------------------------------------------------------- plan
 
@@ -104,7 +111,7 @@ def test_plan_reports_would_apply_for_all_pending_migrations() -> None:
     result = migrate.plan_and_apply(db, apply=False)
     assert result["dryRun"] is True
     assert [a["action"] for a in result["actions"]] == ["would-apply"] * len(migrate.MIGRATIONS)
-    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7]
+    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7, 8]
     # dry-run ничего не создал
     assert db.cols.get(schema.OP) is None or db.cols[schema.OP].indexes == []
 
@@ -226,3 +233,16 @@ def test_m7_is_registered_as_additive_migration_and_skipped_when_done() -> None:
                                   "checksum": migrate.migration_checksum(mig7)}]
     plan = migrate.plan_and_apply(db, apply=False, only=7)
     assert plan["actions"] == [{"id": 7, "name": mig7.name, "action": "skip-done"}]
+
+
+def test_m8_creates_presence_collection_once_under_migration_role() -> None:
+    db = FakeDB()
+    dry = migrate._apply_voice_presence_collection(db, dry=True)
+    assert dry["created"] is False
+    assert migrate.VOICE_PRESENCE_COLLECTION not in db.cols
+
+    first = migrate._apply_voice_presence_collection(db, dry=False)
+    assert first["created"] is True
+    again = migrate._apply_voice_presence_collection(db, dry=False)
+    assert again["created"] is False
+    assert db.list_collection_names().count(migrate.VOICE_PRESENCE_COLLECTION) == 1
