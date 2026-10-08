@@ -7,5 +7,5 @@ Description=dsbot backup freshness check (T14 B06)
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/dsbot/deploy
-ExecStart=/opt/dsbot/deploy/backup/backup_status.sh production
+WorkingDirectory=@DEPLOY_DIR@
+ExecStart=@DEPLOY_DIR@/backup/backup_status.sh production

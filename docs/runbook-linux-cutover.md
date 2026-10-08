@@ -319,8 +319,9 @@ docker compose -p dsbot-prod -f deploy/production/compose.yml \
 Признаки: gateway-сессия установлена, commands-синхронизация слэш-команд
 отработала, в логах нет `4014`/переподключений из-за второго клиента.
 
-Таймеры бэкапа на новом хосте (установка unit'ов `deploy/backup/systemd/` —
-по `docs/runbook-backup.md`, «Ежедневный запуск»):
+Таймеры бэкапа на новом хосте: сначала отрендерить и установить unit'ы под
+фактический checkout по `docs/runbook-backup.md` («Ежедневный запуск»),
+проверить `BACKUP_DIR` и независимую копию, затем включить:
 
 ```bash
 sudo systemctl enable --now dsbot-backup.timer dsbot-backup-status.timer
