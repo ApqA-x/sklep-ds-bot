@@ -54,6 +54,17 @@ def _now(value: datetime | None) -> datetime:
     return value.astimezone(UTC)
 
 
+def _restore_utc(value: Any) -> Any:
+    """PyMongo's default codec returns UTC instants as naive datetimes."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    if isinstance(value, dict):
+        return {key: _restore_utc(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_restore_utc(item) for item in value]
+    return value
+
+
 class SleepTimerStore:
     def __init__(self, collection: Any) -> None:
         self.collection = collection
@@ -61,7 +72,7 @@ class SleepTimerStore:
     def get(self, guild_id: str, target_user_id: str) -> dict[str, Any] | None:
         key = f"{_validate_id(guild_id, 'guild_id')}:{_validate_id(target_user_id, 'target_user_id')}"
         doc = self.collection.find_one({"_id": key})
-        return deepcopy(doc) if doc else None
+        return _restore_utc(doc) if doc else None
 
     def set(
         self, guild_id: str, target_user_id: str, hours: int,
@@ -100,7 +111,7 @@ class SleepTimerStore:
         key = f"{guild_id}:{target_user_id}"
         cutoff = now - timedelta(days=IDEMPOTENCY_DAYS)
         for _ in range(MAX_CAS_ATTEMPTS):
-            old = self.collection.find_one({"_id": key})
+            old = _restore_utc(self.collection.find_one({"_id": key}))
             history = list((old or {}).get("recentRequests") or [])
             # Check replay before pruning; a duplicate must never change state.
             for entry in history:

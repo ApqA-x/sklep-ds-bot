@@ -46,6 +46,22 @@ class Collection:
             return SimpleNamespace(matched_count=1)
 
 
+def _naive_dates(value):
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, dict):
+        return {key: _naive_dates(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_naive_dates(item) for item in value]
+    return value
+
+
+class NaiveReadCollection(Collection):
+    def find_one(self, flt: dict) -> dict | None:
+        found = super().find_one(flt)
+        return _naive_dates(found) if found else None
+
+
 def set_timer(store: SleepTimerStore, hours: int, request_id: str, now: datetime = NOW):
     return store.set(
         "456", "123", hours, actor_user_id="789",
@@ -70,6 +86,15 @@ def test_set_is_wall_clock_and_replay_cannot_extend_deadline() -> None:
     assert replay.outcome == first.outcome
     assert replay.timer["revision"] == 1
     assert replay.timer["dueAt"] == first.timer["dueAt"]
+
+
+def test_pymongo_naive_utc_dates_do_not_break_replay_or_history_pruning() -> None:
+    store = SleepTimerStore(NaiveReadCollection())
+    set_timer(store, 2, "set-1")
+    assert set_timer(store, 2, "set-1", NOW + timedelta(minutes=1)).replayed
+    second = set_timer(store, 3, "set-2", NOW + timedelta(minutes=2))
+    assert second.timer["dueAt"].tzinfo is not None
+    assert store.get("456", "123")["dueAt"].tzinfo is not None
 
 
 def test_replace_and_cancel_are_atomic_and_idempotent() -> None:
