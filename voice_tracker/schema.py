@@ -101,8 +101,12 @@ DA = "discord_audit_logs"
 DAS = "discord_audit_state"
 CP = "chat_presets"
 OP = "operations"
+ST = "voice_sleep_timers"
 
 MANIFEST: tuple[IndexSpec, ...] = (
+    # B5: bounded ordered due scan; _id already isolates one guild/user pair.
+    _spec(ST, [("status", 1), ("dueAt", 1), ("_id", 1)], owner="bot",
+          name="voice_sleep_status_due_id"),
     # --- voice_sessions. Индекс active-сессий unique+partial держит инвариант
     # «одна active-сессия на канал» (join/move/restart) — менять только с тестом (T10.7).
     _spec(S, [("status", 1), ("guildId", 1), ("channelId", 1)], unique=True,

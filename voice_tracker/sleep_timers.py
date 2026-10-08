@@ -74,6 +74,56 @@ class SleepTimerStore:
         doc = self.collection.find_one({"_id": key})
         return _restore_utc(doc) if doc else None
 
+    def claim_due(self, *, owner: str, fence: int, now: datetime | None = None) -> dict[str, Any] | None:
+        """One-shot claim. An executing timer is never claimed a second time."""
+        from pymongo import ReturnDocument
+
+        owner = _validate_request_id(owner)
+        if not isinstance(fence, int) or fence < 1:
+            raise ValueError("positive gateway fence required")
+        at = _now(now)
+        claimed = self.collection.find_one_and_update(
+            {"status": "pending", "dueAt": {"$lte": at}},
+            {"$set": {
+                "status": "executing", "claimOwner": owner, "claimFence": fence,
+                "claimedAt": at, "updatedAt": at,
+            }, "$inc": {"revision": 1}},
+            sort=[("dueAt", 1), ("_id", 1)],
+            return_document=ReturnDocument.AFTER,
+        )
+        return deepcopy(claimed) if claimed else None
+
+    def finish(
+        self, claimed: dict[str, Any], *, owner: str, fence: int,
+        status: str, reason: str, now: datetime | None = None,
+    ) -> bool:
+        if status not in {"disconnected", "skipped", "failed", "unknown"}:
+            raise ValueError("invalid final status")
+        at = _now(now)
+        result = self.collection.update_one(
+            {
+                "_id": claimed["_id"], "revision": claimed["revision"],
+                "status": "executing", "claimOwner": owner, "claimFence": fence,
+            },
+            {"$set": {
+                "status": status, "reason": str(reason)[:256],
+                "resultAt": at, "updatedAt": at,
+            }, "$inc": {"revision": 1}},
+        )
+        return result.matched_count == 1
+
+    def mark_stale_unknown(self, *, current_fence: int, now: datetime | None = None) -> int:
+        """A successor never retries a predecessor's uncertain Discord call."""
+        at = _now(now)
+        result = self.collection.update_many(
+            {"status": "executing", "claimFence": {"$lt": current_fence}},
+            {"$set": {
+                "status": "unknown", "reason": "gateway_restarted_during_execution",
+                "resultAt": at, "updatedAt": at,
+            }, "$inc": {"revision": 1}},
+        )
+        return result.modified_count
+
     def set(
         self, guild_id: str, target_user_id: str, hours: int,
         *, actor_user_id: str, source: str, request_id: str,

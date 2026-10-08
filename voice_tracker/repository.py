@@ -89,6 +89,7 @@ class Repository:
         self.messages = _collection(db, "processed_messages")
         self.sessions = _collection(db, "voice_sessions")
         self.participants = _collection(db, "voice_session_participants")
+        self.sleep_timers = _collection(db, "voice_sleep_timers")
         self.guild_invite_snapshots = _collection(db, "guild_invite_snapshots")
         self.invite_catalog = _collection(db, "invite_catalog")
         self.member_join_attributions = _collection(db, "member_join_attributions")
@@ -100,6 +101,9 @@ class Repository:
         self.chat_messages = _collection(db, "chat_messages")
 
     def ensure_indexes(self, _ctx: Any = None) -> None:
+        self.sleep_timers.create_index(
+            [("status", 1), ("dueAt", 1), ("_id", 1)], name="voice_sleep_status_due_id"
+        )
         self.sessions.create_index(
             [("status", 1), ("guildId", 1), ("channelId", 1)],
             unique=True,

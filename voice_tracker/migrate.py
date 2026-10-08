@@ -246,6 +246,13 @@ def _apply_sleep_timers_collection(db: Any, dry: bool) -> dict:
     return {"collection": VOICE_SLEEP_TIMERS_COLLECTION, "created": not exists and not dry, "dryRun": dry}
 
 
+def _apply_sleep_timer_due_index(db: Any, dry: bool) -> dict:
+    spec = next(s for s in MANIFEST if s.name == "voice_sleep_status_due_id")
+    if not dry:
+        db[spec.collection].create_index(list(spec.keys), **spec.create_kwargs())
+    return {"index": f"{spec.collection}.{spec.name}", "dryRun": dry}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
@@ -258,6 +265,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(8, "voice-presence-observations-collection", _apply_voice_presence_collection,
               backward_compatible=True),
     Migration(9, "voice-sleep-timers-collection", _apply_sleep_timers_collection,
+              backward_compatible=True),
+    Migration(10, "voice-sleep-timers-due-index", _apply_sleep_timer_due_index,
               backward_compatible=True),
 )
 

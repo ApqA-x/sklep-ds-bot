@@ -1,6 +1,29 @@
 {
   "indexes": [
     {
+      "collection": "voice_sleep_timers",
+      "keys": [
+        [
+          "status",
+          1
+        ],
+        [
+          "dueAt",
+          1
+        ],
+        [
+          "_id",
+          1
+        ]
+      ],
+      "name": "voice_sleep_status_due_id",
+      "owner": "bot",
+      "partial": null,
+      "sparse": false,
+      "ttl": null,
+      "unique": false
+    },
+    {
       "collection": "voice_sessions",
       "keys": [
         [

@@ -45,6 +45,39 @@ class Collection:
             self.docs[flt["_id"]] = deepcopy(doc)
             return SimpleNamespace(matched_count=1)
 
+    def find_one_and_update(self, flt: dict, update: dict, *, sort, return_document):
+        with self.lock:
+            eligible = [
+                doc for doc in self.docs.values()
+                if doc["status"] == flt["status"] and doc["dueAt"] <= flt["dueAt"]["$lte"]
+            ]
+            if not eligible:
+                return None
+            doc = min(eligible, key=lambda row: (row["dueAt"], row["_id"]))
+            doc.update(update["$set"])
+            doc["revision"] += update["$inc"]["revision"]
+            return deepcopy(doc)
+
+    def update_one(self, flt: dict, update: dict):
+        with self.lock:
+            doc = self.docs.get(flt["_id"])
+            if doc is None or any(doc.get(key) != value for key, value in flt.items() if key != "_id"):
+                return SimpleNamespace(matched_count=0)
+            doc.update(update["$set"])
+            doc["revision"] += update["$inc"]["revision"]
+            return SimpleNamespace(matched_count=1)
+
+    def update_many(self, flt: dict, update: dict):
+        with self.lock:
+            modified = 0
+            for doc in self.docs.values():
+                if doc["status"] != flt["status"] or doc.get("claimFence", 0) >= flt["claimFence"]["$lt"]:
+                    continue
+                doc.update(update["$set"])
+                doc["revision"] += update["$inc"]["revision"]
+                modified += 1
+            return SimpleNamespace(modified_count=modified)
+
 
 def _naive_dates(value):
     if isinstance(value, datetime):
@@ -162,3 +195,34 @@ def test_target_must_be_a_discord_id_not_a_free_text_nickname() -> None:
             "456", "same nickname", 2, actor_user_id="789",
             source="web", request_id="request-1", now=NOW,
         )
+
+
+def test_due_claim_is_one_shot_and_fenced_finish() -> None:
+    store = SleepTimerStore(Collection())
+    set_timer(store, 2, "set-1")
+    assert store.claim_due(owner="gateway-a", fence=4, now=NOW + timedelta(hours=1)) is None
+    claimed = store.claim_due(owner="gateway-a", fence=4, now=NOW + timedelta(hours=2))
+    assert claimed["status"] == "executing"
+    assert store.claim_due(owner="gateway-b", fence=5, now=NOW + timedelta(hours=3)) is None
+    assert not store.finish(claimed, owner="gateway-b", fence=5, status="disconnected", reason="ok")
+    assert store.finish(claimed, owner="gateway-a", fence=4, status="skipped", reason="left")
+    assert not store.finish(claimed, owner="gateway-a", fence=4, status="disconnected", reason="late")
+    assert store.get("456", "123")["status"] == "skipped"
+
+
+def test_successor_marks_stale_execution_unknown_without_retry() -> None:
+    store = SleepTimerStore(Collection())
+    set_timer(store, 2, "set-1")
+    store.claim_due(owner="gateway-a", fence=4, now=NOW + timedelta(hours=2))
+    assert store.mark_stale_unknown(current_fence=5, now=NOW + timedelta(hours=3)) == 1
+    assert store.get("456", "123")["status"] == "unknown"
+    assert store.claim_due(owner="gateway-b", fence=5, now=NOW + timedelta(hours=3)) is None
+
+
+def test_two_workers_cannot_claim_same_due_timer() -> None:
+    store = SleepTimerStore(Collection())
+    set_timer(store, 2, "set-1")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(store.claim_due, owner="a", fence=1, now=NOW + timedelta(hours=2))
+        b = pool.submit(store.claim_due, owner="b", fence=2, now=NOW + timedelta(hours=2))
+        assert sum(result is not None for result in (a.result(), b.result())) == 1
