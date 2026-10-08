@@ -111,7 +111,7 @@ def test_plan_reports_would_apply_for_all_pending_migrations() -> None:
     result = migrate.plan_and_apply(db, apply=False)
     assert result["dryRun"] is True
     assert [a["action"] for a in result["actions"]] == ["would-apply"] * len(migrate.MIGRATIONS)
-    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     # dry-run ничего не создал
     assert db.cols.get(schema.OP) is None or db.cols[schema.OP].indexes == []
 
@@ -246,3 +246,11 @@ def test_m8_creates_presence_collection_once_under_migration_role() -> None:
     again = migrate._apply_voice_presence_collection(db, dry=False)
     assert again["created"] is False
     assert db.list_collection_names().count(migrate.VOICE_PRESENCE_COLLECTION) == 1
+
+
+def test_m9_creates_timer_collection_once_under_migration_role() -> None:
+    db = FakeDB()
+    assert migrate._apply_sleep_timers_collection(db, dry=True)["created"] is False
+    assert migrate.VOICE_SLEEP_TIMERS_COLLECTION not in db.cols
+    assert migrate._apply_sleep_timers_collection(db, dry=False)["created"] is True
+    assert migrate._apply_sleep_timers_collection(db, dry=False)["created"] is False
