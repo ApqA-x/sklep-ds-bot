@@ -381,6 +381,7 @@ def test_voice_application_commands_have_expected_routes() -> None:
         "status",
         "trusted",
         "stalker",
+        "sleep",
     ]
 
     assert [option.name for option in commands[SETTINGS_COMMAND_NAME].options] == [
@@ -413,6 +414,7 @@ def test_voice_application_commands_have_expected_routes() -> None:
     assert [option.name for option in commands["status"].options] == ["state"]
     assert [option.name for option in commands["trusted"].options] == ["add", "remove", "list"]
     assert [option.name for option in commands["stalker"].options] == ["start", "stop", "list"]
+    assert [option.name for option in commands["sleep"].options] == ["set", "status", "cancel"]
 
 
 def test_handle_trusted_commands() -> None:

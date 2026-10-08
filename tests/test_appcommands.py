@@ -78,6 +78,7 @@ def test_default_commands_match_mvp_catalog() -> None:
         "status",
         "trusted",
         "stalker",
+        "sleep",
     ]
     assert "audit" not in commands
     assert "bot-setting" not in commands
@@ -90,7 +91,7 @@ def test_mvp_command_payloads_have_expected_shapes_and_permissions() -> None:
     commands = {command["name"]: command for command in appcommands.default_commands()}
 
     admin_commands = {"settings", "connect", "disconnect", "inspect", "autorole", "unmute", "status", "trusted"}
-    all_user_commands = {"jump", "dashboard", "userinfo", "stalker"}
+    all_user_commands = {"jump", "dashboard", "userinfo", "stalker", "sleep"}
     for name in admin_commands:
         assert str(commands[name].get("default_member_permissions")) == str(PERMISSION_ADMINISTRATOR)
     for name in all_user_commands:
@@ -126,6 +127,9 @@ def test_mvp_command_payloads_have_expected_shapes_and_permissions() -> None:
     assert _option_names(commands["stalker"]["options"]) == ["start", "stop", "list"]
     assert _option_type(_nested_option_by_name(commands["stalker"]["options"], "start", "user")) == 6
     assert _option_type(_nested_option_by_name(commands["stalker"]["options"], "stop", "user")) == 6
+    assert _option_names(commands["sleep"]["options"]) == ["set", "status", "cancel"]
+    assert _option_names(_option_by_name(commands["sleep"]["options"], "set")["options"]) == ["hours"]
+    assert _option_type(_nested_option_by_name(commands["sleep"]["options"], "set", "hours")) == 4
 
 
 def _option_names(options: list[Any]) -> list[str]:
