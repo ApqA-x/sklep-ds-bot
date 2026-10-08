@@ -223,6 +223,7 @@ def _apply_guild_settings_revision_backfill(db: Any, dry: bool) -> dict:
 
 
 VOICE_PRESENCE_COLLECTION = "voice_presence_observations"
+VOICE_SLEEP_TIMERS_COLLECTION = "voice_sleep_timers"
 
 
 def _apply_voice_presence_collection(db: Any, dry: bool) -> dict:
@@ -237,6 +238,14 @@ def _apply_voice_presence_collection(db: Any, dry: bool) -> dict:
     return {"collection": VOICE_PRESENCE_COLLECTION, "created": not exists and not dry, "dryRun": dry}
 
 
+def _apply_sleep_timers_collection(db: Any, dry: bool) -> dict:
+    """M9: pre-create timer state; indexed due scan arrives with its worker."""
+    exists = VOICE_SLEEP_TIMERS_COLLECTION in db.list_collection_names()
+    if not dry and not exists:
+        db.create_collection(VOICE_SLEEP_TIMERS_COLLECTION)
+    return {"collection": VOICE_SLEEP_TIMERS_COLLECTION, "created": not exists and not dry, "dryRun": dry}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
@@ -247,6 +256,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "guild-settings-revision-backfill", _apply_guild_settings_revision_backfill,
               backward_compatible=True),
     Migration(8, "voice-presence-observations-collection", _apply_voice_presence_collection,
+              backward_compatible=True),
+    Migration(9, "voice-sleep-timers-collection", _apply_sleep_timers_collection,
               backward_compatible=True),
 )
 
