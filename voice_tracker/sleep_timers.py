@@ -112,8 +112,11 @@ class SleepTimerStore:
         )
         return result.matched_count == 1
 
-    def mark_stale_unknown(self, *, current_fence: int, now: datetime | None = None) -> int:
-        """A successor never retries a predecessor's uncertain Discord call."""
+    def mark_stale_unknown(
+        self, *, current_fence: int, current_owner: str | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        """A successor or restarted local loop never retries an uncertain call."""
         at = _now(now)
         result = self.collection.update_many(
             {"status": "executing", "claimFence": {"$lt": current_fence}},
@@ -122,7 +125,17 @@ class SleepTimerStore:
                 "resultAt": at, "updatedAt": at,
             }, "$inc": {"revision": 1}},
         )
-        return result.modified_count
+        modified = result.modified_count
+        if current_owner is not None:
+            local = self.collection.update_many(
+                {"status": "executing", "claimOwner": current_owner},
+                {"$set": {
+                    "status": "unknown", "reason": "worker_loop_restarted_during_execution",
+                    "resultAt": at, "updatedAt": at,
+                }, "$inc": {"revision": 1}},
+            )
+            modified += local.modified_count
+        return modified
 
     def set(
         self, guild_id: str, target_user_id: str, hours: int,

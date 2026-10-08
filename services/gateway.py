@@ -24,6 +24,8 @@ from voice_tracker import domain, eventlog
 from voice_tracker.gateway import Service as GatewayService, install_event_listener, summary_from_payload
 from voice_tracker.media import store_attachments
 from voice_tracker.repository import Repository
+from voice_tracker.sleep_executor import SleepTimerExecutor
+from voice_tracker.sleep_timers import SleepTimerStore
 from voice_tracker.voice_presence import VoicePresenceTracker
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret, wait_for_shutdown
 from voice_tracker.timeutil import datetime_to_json
@@ -1998,9 +2000,16 @@ async def main() -> None:
     intents.reactions = True
     intents.message_content = True
     client = discord.Client(intents=intents)
-    # Sleep timers are not executable yet.  Record an independent, fail-closed
-    # voice-presence timeline for the future deadline worker.
+    # The deadline worker uses this independent, fail-closed presence timeline.
     voice_presence = VoicePresenceTracker(repo.db["voice_presence_observations"])
+    sleep_executor = (
+        SleepTimerExecutor(
+            store=SleepTimerStore(repo.db["voice_sleep_timers"]),
+            presence=voice_presence, client=client, lease=writer_lease,
+            allowed_guild_id=cfg.discord_guild_id, discord_token=cfg.discord_token,
+        )
+        if writer_lease is not None else None
+    )
 
     async def _observe_voice_presence(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
         if _guild_allowed(cfg.discord_guild_id, str(getattr(getattr(member, "guild", None), "id", "") or "")):
@@ -2898,10 +2907,34 @@ async def main() -> None:
                 supervisor.beat("gateway-voice-session-reaper")
             await asyncio.sleep(120)
 
+    async def sweep_sleep_timers() -> None:
+        assert sleep_executor is not None
+        try:
+            recovered = await sleep_executor.recover_stale()
+        except Exception as exc:
+            supervisor.fail("gateway-sleep-timers", exc)
+            raise
+        if recovered:
+            logger.warning("sleep timers left unknown after gateway restart count=%s", recovered)
+        while True:
+            await asyncio.sleep(1)
+            try:
+                # Cap work per tick so other gateway event handlers retain time.
+                for _ in range(20):
+                    if not await sleep_executor.run_once():
+                        break
+            except Exception as exc:
+                supervisor.fail("gateway-sleep-timers", exc)
+                raise
+            else:
+                supervisor.beat("gateway-sleep-timers")
+
     # T12: все фоновые циклы под надзором — гибель наблюдаема (structured log +
     # снапшот в heartbeat), respawn с backoff+jitter; shutdown = cancel+await.
     supervisor = supervise.Supervisor()
     supervisor.spawn("gateway-event-sweep", sweep_pending, critical=True)
+    if sleep_executor is not None:
+        supervisor.spawn("gateway-sleep-timers", sweep_sleep_timers, critical=True)
     supervisor.spawn("gateway-managed-voice-reconcile", reconcile_managed_voice, critical=True)
     supervisor.spawn("gateway-voice-session-reaper", reconcile_voice_sessions, critical=True)
     supervisor.spawn("gateway-invite-snapshot-refresh", refresh_invite_snapshots, critical=False)

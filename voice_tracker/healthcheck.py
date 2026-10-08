@@ -116,6 +116,7 @@ _CONTRACTS: dict[str, HealthContract] = {
                 "gateway-managed-voice-reconcile", True, VOICE_RECONCILE_PROGRESS_AGE_SECONDS
             ),
             LoopContract("gateway-voice-session-reaper", True, VOICE_REAPER_PROGRESS_AGE_SECONDS),
+            LoopContract("gateway-sleep-timers", True, 60.0),
             # non-critical: presence/validity в снапшоте, readiness не снимают
             LoopContract("gateway-invite-snapshot-refresh", False),
             LoopContract("gateway-invite-metadata-reconcile", False),

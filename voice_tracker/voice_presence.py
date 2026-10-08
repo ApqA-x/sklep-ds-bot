@@ -40,6 +40,10 @@ class VoicePresenceTracker:
         self._states: dict[str, dict[str, Any]] = {}
         self._dirty: dict[str, int] = {}
 
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
     def disconnected(self) -> None:
         # Called before any await in the Discord disconnect callback.
         self._ready = False

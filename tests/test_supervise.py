@@ -473,6 +473,7 @@ SPAWN_NAMES = {
         "gateway-invite-snapshot-refresh",
         "gateway-invite-metadata-reconcile",
         "gateway-member-role-reconcile",
+        "gateway-sleep-timers",
     },
     "activity": {"activity-event-sweep"},
     "stalker": {"stalker-event-sweep"},
@@ -873,6 +874,7 @@ SERVICE_LOOP_FILES = {
         "gateway-invite-snapshot-refresh",
         "gateway-invite-metadata-reconcile",
         "gateway-member-role-reconcile",
+        "gateway-sleep-timers",
     ],
 }
 

@@ -71,7 +71,11 @@ class Collection:
         with self.lock:
             modified = 0
             for doc in self.docs.values():
-                if doc["status"] != flt["status"] or doc.get("claimFence", 0) >= flt["claimFence"]["$lt"]:
+                if doc["status"] != flt["status"]:
+                    continue
+                if "claimFence" in flt and doc.get("claimFence", 0) >= flt["claimFence"]["$lt"]:
+                    continue
+                if "claimOwner" in flt and doc.get("claimOwner") != flt["claimOwner"]:
                     continue
                 doc.update(update["$set"])
                 doc["revision"] += update["$inc"]["revision"]
@@ -217,6 +221,16 @@ def test_successor_marks_stale_execution_unknown_without_retry() -> None:
     assert store.mark_stale_unknown(current_fence=5, now=NOW + timedelta(hours=3)) == 1
     assert store.get("456", "123")["status"] == "unknown"
     assert store.claim_due(owner="gateway-b", fence=5, now=NOW + timedelta(hours=3)) is None
+
+
+def test_same_gateway_loop_restart_marks_its_inflight_claim_unknown() -> None:
+    store = SleepTimerStore(Collection())
+    set_timer(store, 2, "set-1")
+    store.claim_due(owner="gateway-a", fence=4, now=NOW + timedelta(hours=2))
+    assert store.mark_stale_unknown(
+        current_fence=4, current_owner="gateway-a", now=NOW + timedelta(hours=3)
+    ) == 1
+    assert store.get("456", "123")["reason"] == "worker_loop_restarted_during_execution"
 
 
 def test_two_workers_cannot_claim_same_due_timer() -> None:
