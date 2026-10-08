@@ -2000,8 +2000,7 @@ async def main() -> None:
     intents.reactions = True
     intents.message_content = True
     client = discord.Client(intents=intents)
-    # Sleep timers are not executable yet.  Record an independent, fail-closed
-    # voice-presence timeline for the future deadline worker.
+    # The deadline worker uses this independent, fail-closed presence timeline.
     voice_presence = VoicePresenceTracker(repo.db["voice_presence_observations"])
     sleep_executor = (
         SleepTimerExecutor(

@@ -874,6 +874,7 @@ SERVICE_LOOP_FILES = {
         "gateway-invite-snapshot-refresh",
         "gateway-invite-metadata-reconcile",
         "gateway-member-role-reconcile",
+        "gateway-sleep-timers",
     ],
 }
 
