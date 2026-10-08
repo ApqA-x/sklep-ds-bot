@@ -1998,10 +1998,18 @@ async def main() -> None:
     intents.reactions = True
     intents.message_content = True
     client = discord.Client(intents=intents)
-    GatewayService(client, durable_bus).install()
     # Sleep timers are not executable yet.  Record an independent, fail-closed
     # voice-presence timeline for the future deadline worker.
     voice_presence = VoicePresenceTracker(repo.db["voice_presence_observations"])
+
+    async def _observe_voice_presence(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        if _guild_allowed(cfg.discord_guild_id, str(getattr(getattr(member, "guild", None), "id", "") or "")):
+            await voice_presence.observe(member, before, after)
+
+    # Register before the queue publisher. A voice transition becomes dirty
+    # locally as soon as its callback starts, before publication can await I/O.
+    install_event_listener(client, "on_voice_state_update", _observe_voice_presence)
+    GatewayService(client, durable_bus).install()
     invite_attribution = InviteAttributionController(
         client=client,
         repo=repo,
@@ -2697,12 +2705,7 @@ async def main() -> None:
             ",".join(sorted(edit_kwargs)),
         )
 
-    async def _observe_voice_presence(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
-        if _guild_allowed(cfg.discord_guild_id, str(getattr(getattr(member, "guild", None), "id", "") or "")):
-            await voice_presence.observe(member, before, after)
-
     install_event_listener(client, "on_voice_state_update", _on_voice_state_update_activity)
-    install_event_listener(client, "on_voice_state_update", _observe_voice_presence)
     install_event_listener(client, "on_voice_state_update", _on_voice_state_update_unmute)
     install_event_listener(client, "on_voice_state_update", voice_controller.on_voice_state_update)
     install_event_listener(client, "on_voice_channel_effect", soundboard_enforcement.on_voice_channel_effect)

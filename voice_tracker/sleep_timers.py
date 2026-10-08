@@ -91,7 +91,7 @@ class SleepTimerStore:
             sort=[("dueAt", 1), ("_id", 1)],
             return_document=ReturnDocument.AFTER,
         )
-        return deepcopy(claimed) if claimed else None
+        return _restore_utc(claimed) if claimed else None
 
     def finish(
         self, claimed: dict[str, Any], *, owner: str, fence: int,
