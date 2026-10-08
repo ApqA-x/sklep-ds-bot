@@ -25,6 +25,7 @@ from voice_tracker.gateway import Service as GatewayService, install_event_liste
 from voice_tracker.media import store_attachments
 from voice_tracker.repository import Repository
 from voice_tracker.sleep_executor import SleepTimerExecutor
+from voice_tracker.sleep_audit import project_pending as project_sleep_audit
 from voice_tracker.sleep_timers import SleepTimerStore
 from voice_tracker.voice_presence import VoicePresenceTracker
 from voice_tracker.runtime import configure_logging, load_config, require_event_signing_secret, wait_for_shutdown
@@ -2916,9 +2917,15 @@ async def main() -> None:
             raise
         if recovered:
             logger.warning("sleep timers left unknown after gateway restart count=%s", recovered)
+        tick = 0
         while True:
             await asyncio.sleep(1)
             try:
+                tick += 1
+                if tick % 10 == 0:
+                    projected = await asyncio.to_thread(project_sleep_audit, repo.db, limit=100)
+                    if projected:
+                        logger.info("sleep timer audit projected count=%s", projected)
                 # Cap work per tick so other gateway event handlers retain time.
                 for _ in range(20):
                     if not await sleep_executor.run_once():

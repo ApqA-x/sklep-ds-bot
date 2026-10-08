@@ -104,6 +104,9 @@ class Repository:
         self.sleep_timers.create_index(
             [("status", 1), ("dueAt", 1), ("_id", 1)], name="voice_sleep_status_due_id"
         )
+        self.sleep_timers.create_index(
+            [("auditPending.eventId", 1)], sparse=True, name="voice_sleep_audit_pending"
+        )
         self.sessions.create_index(
             [("status", 1), ("guildId", 1), ("channelId", 1)],
             unique=True,

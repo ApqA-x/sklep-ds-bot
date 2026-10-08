@@ -24,6 +24,21 @@
       "unique": false
     },
     {
+      "collection": "voice_sleep_timers",
+      "keys": [
+        [
+          "auditPending.eventId",
+          1
+        ]
+      ],
+      "name": "voice_sleep_audit_pending",
+      "owner": "bot",
+      "partial": null,
+      "sparse": true,
+      "ttl": null,
+      "unique": false
+    },
+    {
       "collection": "voice_sessions",
       "keys": [
         [
