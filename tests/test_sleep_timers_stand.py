@@ -26,7 +26,7 @@ def test_concurrent_set_and_replay_on_real_mongo() -> None:
             client.admin.command("ping")
         except Exception:
             pytest.skip("isolated Mongo stand is unavailable")
-        db_name = f"voice_tracker_sleep_{uuid.uuid4().hex[:10]}"
+        db_name = f"voice_tracker_tsleep_{uuid.uuid4().hex[:10]}"
         guard_db_name(db_name)
         db = client[db_name]
         try:
