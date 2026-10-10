@@ -111,13 +111,25 @@ def test_plan_reports_would_apply_for_all_pending_migrations() -> None:
     result = migrate.plan_and_apply(db, apply=False)
     assert result["dryRun"] is True
     assert [a["action"] for a in result["actions"]] == ["would-apply"] * len(migrate.MIGRATIONS)
-    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert [a["id"] for a in result["actions"]] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     # dry-run ничего не создал
     assert db.cols.get(schema.OP) is None or db.cols[schema.OP].indexes == []
 
 
 def test_plan_output_json_serializable() -> None:
     json.dumps(migrate.plan_and_apply(FakeDB(), apply=False))
+
+
+def test_web_audit_index_is_created_only_by_migration_runner() -> None:
+    db = FakeDB()
+    spec = next(s for s in schema.MANIFEST if s.name == "web_operations_auditState_updatedAt")
+    assert migrate._apply_web_operations_audit_index(db, dry=True)["dryRun"] is True
+    assert db.cols == {}
+    result = migrate._apply_web_operations_audit_index(db, dry=False)
+    assert result["index"] == f"{spec.collection}.{spec.name}"
+    assert db[spec.collection].indexes == [
+        (tuple(spec.keys), tuple(sorted(spec.create_kwargs().items(), key=lambda kv: str(kv[0]))))
+    ]
 
 
 # ------------------------------------------------------------- DB07 rollback

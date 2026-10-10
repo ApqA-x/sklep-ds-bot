@@ -260,6 +260,14 @@ def _apply_sleep_timer_audit_index(db: Any, dry: bool) -> dict:
     return {"index": f"{spec.collection}.{spec.name}", "dryRun": dry}
 
 
+def _apply_web_operations_audit_index(db: Any, dry: bool) -> dict:
+    """M12: web's durable audit recovery needs an index created by the DDL runner."""
+    spec = next(s for s in MANIFEST if s.name == "web_operations_auditState_updatedAt")
+    if not dry:
+        db[spec.collection].create_index(list(spec.keys), **spec.create_kwargs())
+    return {"index": f"{spec.collection}.{spec.name}", "dryRun": dry}
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-index-contract", _apply_baseline, backward_compatible=True),
     Migration(2, "operations-journal-ttl", _apply_operations_ttl, backward_compatible=True),
@@ -276,6 +284,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(10, "voice-sleep-timers-due-index", _apply_sleep_timer_due_index,
               backward_compatible=True),
     Migration(11, "voice-sleep-timers-audit-index", _apply_sleep_timer_audit_index,
+              backward_compatible=True),
+    Migration(12, "web-operations-audit-recovery-index", _apply_web_operations_audit_index,
               backward_compatible=True),
 )
 
