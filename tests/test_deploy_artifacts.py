@@ -285,6 +285,20 @@ def test_validate_env_rejects_bypass_auth(tmp_path) -> None:
     assert any("WEB_DEV_BYPASS_AUTH" in e for e in validate_env.check(str(env), "production"))
 
 
+def test_archive_env_requires_separate_old_bot_and_active_guild(tmp_path) -> None:
+    valid = dict(
+        WEB_GUILD_ALLOWLIST="111111111111111111,222222222222222222",
+        WEB_ARCHIVE_GUILD_ALLOWLIST="222222222222222222",
+        WEB_ARCHIVE_DISCORD_TOKEN="old-bot-token",
+        WEB_ARCHIVE_DISCORD_APPLICATION_ID="333333333333333333",
+    )
+    assert validate_env.check(str(_write_env(tmp_path, "production", **valid)), "production") == []
+    invalid = dict(valid, WEB_GUILD_ALLOWLIST="222222222222222222", WEB_ARCHIVE_DISCORD_TOKEN="t")
+    errors = "\n".join(validate_env.check(str(_write_env(tmp_path, "production", **invalid)), "production"))
+    assert "active guild" in errors
+    assert "must differ" in errors
+
+
 # ------------------------------------------------- R26-06: единый env (V26-16)
 
 

@@ -148,6 +148,19 @@ def check(path: str, mode: str) -> list[str]:
     for key in COMMON_REQUIRED:
         if not env.get(key):
             errors.append(f"missing required key: {key}")
+    archive_ids = {part for part in re.split(r"[,\s]+", env.get("WEB_ARCHIVE_GUILD_ALLOWLIST", "")) if part}
+    allow_ids = {part for part in re.split(r"[,\s]+", env.get("WEB_GUILD_ALLOWLIST", "")) if part}
+    if archive_ids:
+        if not archive_ids <= allow_ids:
+            errors.append("WEB_ARCHIVE_GUILD_ALLOWLIST must be a subset of WEB_GUILD_ALLOWLIST")
+        if not allow_ids - archive_ids:
+            errors.append("WEB_GUILD_ALLOWLIST must include an active guild")
+        if not env.get("WEB_ARCHIVE_DISCORD_TOKEN") or not env.get("WEB_ARCHIVE_DISCORD_APPLICATION_ID"):
+            errors.append("archive guilds require WEB_ARCHIVE_DISCORD_TOKEN and WEB_ARCHIVE_DISCORD_APPLICATION_ID")
+        elif env["WEB_ARCHIVE_DISCORD_TOKEN"] == env.get("DISCORD_TOKEN"):
+            errors.append("WEB_ARCHIVE_DISCORD_TOKEN must differ from DISCORD_TOKEN")
+        if not env.get("WEB_ARCHIVE_DISCORD_APPLICATION_ID", "").isdigit():
+            errors.append("WEB_ARCHIVE_DISCORD_APPLICATION_ID must be numeric")
     if env.get("WEB_DEV_BYPASS_AUTH"):
         errors.append("WEB_DEV_BYPASS_AUTH must be absent/empty in production/staging")
     if "DSBOT_ENV_FILE" in env:
